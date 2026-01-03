@@ -47,6 +47,15 @@ def normalize_candidates(path: Path) -> Set[str]:
     return variants
 
 
+def canonicalize_path(value: Path | str) -> str:
+    path = Path(value).expanduser()
+    try:
+        resolved = path.resolve(strict=False)
+    except Exception:
+        resolved = path.absolute()
+    return str(resolved).replace("\\", "/").lower()
+
+
 def fetch_video_row(conn: sqlite3.Connection, video_path: Path) -> Tuple[int, str]:
     candidates = normalize_candidates(video_path.resolve())
     row = None
@@ -172,6 +181,18 @@ def video_metadata(
     if frame_count is None:
         frame_count = kept_frames
 
+    transcription = None
+    try:
+        canonical = canonicalize_path(file_path)
+        row = conn.execute(
+            "SELECT transcription FROM audio_transcriptions WHERE name = ? ORDER BY created_at DESC LIMIT 1",
+            (canonical,),
+        ).fetchone()
+        if row and row["transcription"]:
+            transcription = row["transcription"]
+    except sqlite3.Error:
+        transcription = None
+
     return {
         "video": {
             "path": file_path,
@@ -184,6 +205,7 @@ def video_metadata(
             "creation_time": creation_time,
         },
         "frames": frames,
+        "transcription": transcription,
     }
 
 
