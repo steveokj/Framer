@@ -1,0 +1,115 @@
+PS C:\dev\vcpkg\screenpipe> target\release\screenpipe.exe --disable-audio --show-cursor --follow-cursor --fps 30.0
+2025-10-17T21:23:35.066270Z  INFO screenpipe_audio::transcription::whisper::model: model found at "C:\\Users\\steve\\.cache\\huggingface\\hub\\models--ggerganov--whisper.cpp\\snapshots\\5359861c739e955e79d9a303bcbc70fb988958b1\\ggml-tiny-q8_0.bin"
+
+
+
+                                            _          
+   __________________  ___  ____     ____  (_____  ___ 
+  / ___/ ___/ ___/ _ \/ _ \/ __ \   / __ \/ / __ \/ _ \
+ (__  / /__/ /  /  __/  __/ / / /  / /_/ / / /_/ /  __/
+/____/\___/_/   \___/\___/_/ /_/  / .___/_/ .___/\___/ 
+                                 /_/     /_/           
+
+
+
+build ai apps that have the full context
+open source | runs locally | developer friendly
+
+
+┌────────────────────────┬────────────────────────────────────┐
+│ setting                │ value                              │
+├────────────────────────┼────────────────────────────────────┤
+│ fps                    │ 30                                 │
+│ audio chunk duration   │ 30 seconds                         │
+│ video chunk duration   │ 60 seconds                         │
+│ port                   │ 3030                               │
+│ realtime audio enabled │ false                              │
+│ audio disabled         │ true                               │
+│ vision disabled        │ false                              │
+│ audio engine           │ WhisperTinyQuantized               │
+│ ocr engine             │ WindowsNative                      │
+│ vad engine             │ Silero                             │
+│ vad sensitivity        │ High                               │
+│ data directory         │ C:\Users\steve\.screenpipe         │
+│ debug mode             │ false                              │
+│ telemetry              │ false                              │
+│ local llm              │ false                              │
+│ use pii removal        │ false                              │
+2025-10-17T21:23:35.071046Z  INFO screenpipe_server::core: Starting video recording for monitors [329973967, 4853585, 393655]
+2025-10-17T21:23:35.072465Z  INFO screenpipe_server::core: Starting video recording for monitor 329973967
+│ ignored windows        │ []                                 │
+│ included windows       │ []                                 │
+│ ui monitoring          │ false                              │
+│ frame cache            │ true                               │
+│ capture unfocused wins │ false                              │
+│ auto-destruct pid      │ 0                                  │
+│ deepgram key           │ not set                            │
+├────────────────────────┼────────────────────────────────────┤
+│ languages              │                                    │
+│                        │ all languages                      │
+├────────────────────────┼────────────────────────────────────┤
+│ monitors               │                                    │
+2025-10-17T21:23:35.072767Z  INFO screenpipe_server::core: Starting meeting events polling
+2025-10-17T21:23:35.072769Z  INFO screenpipe_server::core: Starting/restarting vision capture for monitor 329973967
+│                        │ id: 329973967                      │
+│                        │ id: 4853585                        │
+│                        │ id: 393655                         │
+├────────────────────────┼────────────────────────────────────┤
+│ audio devices          │                                    │
+│                        │ disabled                           │
+├────────────────────────┼────────────────────────────────────┤
+│ realtime audio devices │                                    │
+│                        │ disabled                           │
+├────────────────────────┼────────────────────────────────────┤
+│ pipes                  │                                    │
+2025-10-17T21:23:35.073703Z  INFO screenpipe_server::core: record_video: Starting for monitor 329973967        
+2025-10-17T21:23:35.074321Z  INFO screenpipe_server::core: Creating VideoCapture for monitor 329973967
+2025-10-17T21:23:35.074401Z  INFO screenpipe_server::video: Starting VideoCapture for monitor 329973967, max queue size: 30, fps: 30
+2025-10-17T21:23:35.074740Z  INFO screenpipe_server::core: Starting main video processing loop for monitor 329973967
+2025-10-17T21:23:35.074745Z  INFO screenpipe_server::video: Starting continuous_capture task for monitor 329973967
+2025-10-17T21:23:35.074755Z  INFO screenpipe_server::video: Starting queue processing task for monitor 329973967
+2025-10-17T21:23:35.074772Z  INFO screenpipe_server::video: Starting save_frames_as_video task for monitor 329973967
+2025-10-17T21:23:35.074882Z  INFO screenpipe_server::video: Starting continuous_capture for monitor 329973967  
+2025-10-17T21:23:35.075036Z  INFO screenpipe_server::video: Starting save_frames_as_video function for monitor 329973967
+2025-10-17T21:23:35.075032Z  INFO screenpipe_server::video: Starting monitor availability check for monitor 329973967
+│                        │ (disabled) assistant-ui-ollama-... │
+│                        │ (disabled) data-table              │
+│                        │ (disabled) desktop-to-table        │
+│                        │ (disabled) discord-to-spreadsheet  │
+│                        │ (disabled) example-pipe            │
+│                        │ ... and 12 more                    │
+└────────────────────────┴────────────────────────────────────┘
+you are using local processing. all your data stays on your computer.
+
+telemetry is disabled. no data will be sent to external services.
+
+check latest changes here: https://github.com/mediar-ai/screenpipe/releases
+2025-10-17T21:23:35.079229Z  INFO screenpipe: starting pipes
+2025-10-17T21:23:35.090064Z  INFO screenpipe_server::server: Server listening on 0.0.0.0:3030
+2025-10-17T21:23:35.986240Z  INFO screenpipe_server::video: Starting new video chunk: C:\Users\steve\.screenpipe\data\monitor_329973967_2025-10-18_01-23-35.mp4 for monitor 329973967
+2025-10-17T21:23:35.986426Z  INFO screenpipe_server::video: Starting FFmpeg process for file: C:\Users\steve\.screenpipe\data\monitor_329973967_2025-10-18_01-23-35.mp4
+2025-10-17T21:23:36.007126Z  INFO screenpipe_server::video: New FFmpeg process started for file: C:\Users\steve\.screenpipe\data\monitor_329973967_2025-10-18_01-23-35.mp4 (monitor 329973967)
+2025-10-17T21:23:41.712726Z  INFO screenpipe_server::core: record_video: Heartbeat for monitor 329973967 - iteration 100, uptime: 6s, frames processed: 3, frames/sec: 0.50
+2025-10-17T21:23:49.288128Z  INFO screenpipe_server::core: record_video: Heartbeat for monitor 329973967 - iteration 200, uptime: 14s, frames processed: 11, frames/sec: 0.79
+2025-10-17T21:23:55.199826Z  INFO screenpipe_server::core: record_video: Heartbeat for monitor 329973967 - iteration 300, uptime: 20s, frames processed: 12, frames/sec: 0.60
+2025-10-17T21:23:56.898494Z  INFO screenpipe: received ctrl+c, initiating shutdown
+2025-10-17T21:23:56.898640Z  INFO screenpipe: received shutdown signal for recording
+2025-10-17T21:23:57.263367Z  INFO screenpipe: shutdown complete
+PS C:\dev\vcpkg\screenpipe>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

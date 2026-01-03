@@ -1,0 +1,18 @@
+{
+  "db_path": "C:\\Users\\steve\\Desktop\\Framer\\data\\mkv_ingest.sqlite3",
+  "frames_dir": "C:\\Users\\steve\\Desktop\\Framer\\data\\frames",
+  "save_frames": true,
+  "frame_format": "jpg",
+  "jpeg_quality": 92,
+  "dedup_enabled": true,
+  "dedup_threshold": 0.006,
+  "ocr_engine": "tesseract",
+  "ocr_language": "eng",
+  "ocr_save_line_boxes": false,
+  "transcribe_audio": true,
+  "whisper_model_size": "medium",
+  "whisper_device": "cuda",
+  "whisper_compute_type": "float16",
+  "ffmpeg_path": "",
+  "ffprobe_path": ""
+}

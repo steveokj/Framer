@@ -1,0 +1,102 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python packaging / build
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing and coverage
+.coverage
+.coverage.*
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+.pyre/
+.cache/
+
+# Logs and temp files
+logs/
+*.log
+*.tmp
+*.temp
+
+# Databases and local state
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+transcriptions.sqlite3*
+
+# Audio files
+*.wav
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+
+# Video files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wmv
+*.webm
+
+# Local run artifacts
+sessions/
+backup/
+sp_repo/
+
+# Environment files
+.env
+.env.*
+!.env.example
+web/.env.local
+web/.env.development.local
+web/.env.production.local
+web/.env.test.local
+!web/.env.example
+
+# Editors and tooling
+.vscode/
+.idea/
+*.code-workspace
+.ipynb_checkpoints/
+
+# Node/Next.js artifacts
+web/node_modules/
+web/.next/
+web/out/
+web/.turbo/
+web/.vercel/
+web/.swc/
+web/.eslintcache
+web/npm-debug.log*
+web/yarn-debug.log*
+web/yarn-error.log*
+web/pnpm-debug.log*
+
+# Native libraries
+*.dll
+*.so
+*.dylib
+
+# OS generated
+.DS_Store
+Thumbs.db

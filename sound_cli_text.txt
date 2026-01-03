@@ -1,0 +1,8 @@
+(.venv) PS C:\Users\steve\Desktop\Whisper> py gui_new.py
+C:\Users\steve\Desktop\Whisper\.venv\Lib\site-packages\ctranslate2\__init__.py:8: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+17:39:02 INFO: cfg: TranscriberConfig(model_size='large-v2', device='cuda', language='en', compute_type='float32', sample_rate=16000, channels=1, beam_size=5, sessions_dir='sessions')
+17:39:02 INFO: Started recording (session 50). WAV=sessions\session-20251107-173902.wav device=[1, 12] sr=16000 ch=1
+17:39:39 INFO: Stopped recording (session 50). Total frames: 579072
+17:39:39 INFO: Starting transcription of sessions\session-20251107-173902.wav
+17:39:42 INFO: Session 50 transcript saved (4 segments).
