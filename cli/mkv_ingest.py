@@ -38,6 +38,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "whisper_model_size": "medium",
     "whisper_device": "cuda",
     "whisper_compute_type": "float16",
+    "tesseract_path": "",
     "ffmpeg_path": "",
     "ffprobe_path": "",
 }
@@ -347,6 +348,22 @@ def get_tool_path(config_value: str, env_key: str, fallback: str) -> str:
     return fallback
 
 
+def resolve_tesseract_cmd(config_value: str) -> Optional[str]:
+    if config_value:
+        return config_value
+    env_val = os.environ.get("TESSERACT_CMD") or os.environ.get("TESSERACT_PATH")
+    if env_val:
+        return env_val
+    candidates = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ]
+    for cand in candidates:
+        if Path(cand).exists():
+            return cand
+    return None
+
+
 def parse_fraction(value: str) -> Optional[float]:
     if not value:
         return None
@@ -446,6 +463,7 @@ def get_or_create_video_chunk(conn: sqlite3.Connection, video_path: Path) -> int
         "INSERT INTO video_chunks (file_path, device_name) VALUES (?, ?)",
         (str(video_path), ""),
     )
+    conn.commit()
     return int(cur.lastrowid)
 
 
@@ -731,6 +749,17 @@ def main() -> int:
         raise SystemExit(
             "Missing Python deps. Activate the venv and install from requirements_mkv_ingest.txt."
         ) from exc
+
+    tesseract_cmd = resolve_tesseract_cmd(str(cfg.get("tesseract_path", "")).strip())
+    if tesseract_cmd:
+        try:
+            import pytesseract
+
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+        except ModuleNotFoundError:
+            raise SystemExit(
+                "pytesseract is missing. Activate the venv and install from requirements_mkv_ingest.txt."
+            )
 
     video_path = resolve_path(args.video)
     if not video_path.exists():

@@ -13,6 +13,7 @@
   "whisper_model_size": "medium",
   "whisper_device": "cuda",
   "whisper_compute_type": "float16",
+  "tesseract_path": "",
   "ffmpeg_path": "",
   "ffprobe_path": ""
 }
