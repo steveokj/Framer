@@ -78,6 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dedup-threshold", type=float, help="Dedup threshold (default 0.006).")
     parser.add_argument("--save-line-boxes", action="store_true", help="Store line-level OCR boxes.")
     parser.add_argument("--no-transcribe-audio", action="store_true", help="Skip audio transcription.")
+    parser.add_argument("--force-transcribe", action="store_true", help="Re-run transcription even if already stored.")
     parser.add_argument("--whisper-model-size", help="Whisper model size (e.g., small, medium, large-v3).")
     parser.add_argument("--whisper-device", help="Whisper device (cuda/cpu).")
     parser.add_argument("--whisper-compute-type", help="Whisper compute type (float16/int8).")
@@ -688,6 +689,14 @@ def upsert_transcription(
     conn.commit()
 
 
+def transcription_exists(conn: sqlite3.Connection, video_path: Path, model_size: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM audio_transcriptions WHERE name = ? AND model_size = ? LIMIT 1",
+        (canonicalize_path(video_path), model_size),
+    ).fetchone()
+    return row is not None
+
+
 def transcribe_audio(
     ffmpeg: str,
     video_path: Path,
@@ -942,9 +951,13 @@ def main() -> int:
         conn.commit()
 
     if cfg["transcribe_audio"]:
-        print("[mkv_ingest] transcribing audio...")
-        transcribe_audio(ffmpeg, video_path, cfg, conn, start_time, duration)
-        print("[mkv_ingest] transcription saved")
+        model_size = cfg["whisper_model_size"]
+        if not args.force_transcribe and transcription_exists(conn, video_path, model_size):
+            print("[mkv_ingest] transcription already exists, skipping")
+        else:
+            print("[mkv_ingest] transcribing audio...")
+            transcribe_audio(ffmpeg, video_path, cfg, conn, start_time, duration)
+            print("[mkv_ingest] transcription saved")
 
     conn.close()
     return 0
