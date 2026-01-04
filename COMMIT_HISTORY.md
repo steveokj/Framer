@@ -1,0 +1,3 @@
+| Commit | Description | User message | Assistant reply | Time |
+| --- | --- | --- | --- | --- |
+| 159b1ed0813d5583592b999d5ce9130ba1c0678e | Update web pages to default API port 8001 | video stream failed...i changed default port to 8001 | Updated the web pages to default to `http://localhost:8001` when `NEXT_PUBLIC_API_BASE` isn't set, so the MKV/video views now hit your new FastAPI port. This updates the fallback API base strings and error copy in `web/app/video_frame_mkv/page.tsx` and the other video-related pages under `web/app/`. Tests not run (not requested).<br>Next steps:<br>1) restart `npm run dev` and reload the page.<br>2) confirm the FastAPI server is running on 8001 (or set `NEXT_PUBLIC_API_BASE`). | 2026-01-04 14:28:05 |
