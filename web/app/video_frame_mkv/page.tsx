@@ -686,6 +686,8 @@ export default function VideoFrameMkvPage() {
   const [uploadProgress, setUploadProgress] = useState<{ loaded: number; total: number } | null>(null);
   const [uploadFileName, setUploadFileName] = useState<string | null>(null);
   const [ingestAfterUpload, setIngestAfterUpload] = useState(true);
+  const [fastIngest, setFastIngest] = useState(true);
+  const [fastIngestFps, setFastIngestFps] = useState(2);
   const [ingestPhase, setIngestPhase] = useState<IngestPhase>("idle");
   const [ingestLogs, setIngestLogs] = useState<string[]>([]);
   const [ingestProgress, setIngestProgress] = useState<IngestProgress | null>(null);
@@ -878,7 +880,7 @@ export default function VideoFrameMkvPage() {
   }, []);
 
   const startIngest = useCallback(
-    async (video: string) => {
+    async (video: string, options?: { fast?: boolean; maxFps?: number }) => {
       setIngestPhase("starting");
       setIngestLogs([]);
       setIngestProgress(null);
@@ -892,7 +894,11 @@ export default function VideoFrameMkvPage() {
         const res = await fetch("/api/mkv_ingest", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ videoPath: video }),
+          body: JSON.stringify({
+            videoPath: video,
+            fast: Boolean(options?.fast),
+            maxFps: options?.maxFps,
+          }),
         });
         if (!res.ok) {
           const payload = await res.json().catch(() => ({}));
@@ -2271,7 +2277,7 @@ export default function VideoFrameMkvPage() {
         setUploadPhase("ingesting");
         setIngestTargetPath(storedPath);
         try {
-          await startIngest(storedPath);
+          await startIngest(storedPath, { fast: fastIngest, maxFps: fastIngest ? fastIngestFps : undefined });
           setUploadPhase("done");
           refreshIngestedVideos().catch(() => {
             /* handled inside */
@@ -2415,6 +2421,29 @@ export default function VideoFrameMkvPage() {
               />
               Ingest after upload
             </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#cbd5f5", fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={fastIngest}
+                disabled={!ingestAfterUpload || uploadBusy}
+                onChange={(event) => setFastIngest(event.target.checked)}
+              />
+              Fast ingest
+            </label>
+            {fastIngest && (
+              <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#cbd5f5", fontSize: 13 }}>
+                <span>Max fps</span>
+                <input
+                  type="number"
+                  min={0.5}
+                  step={0.5}
+                  value={fastIngestFps}
+                  disabled={!ingestAfterUpload || uploadBusy}
+                  onChange={(event) => setFastIngestFps(Math.max(0.5, Number(event.target.value) || 0.5))}
+                  style={{ width: 70, padding: "2px 6px" }}
+                />
+              </label>
+            )}
             {uploadPhase !== "idle" && <span style={{ color: "#94a3b8" }}>{uploadPhaseLabel}</span>}
           </div>
           <input
@@ -2485,6 +2514,7 @@ export default function VideoFrameMkvPage() {
           <div style={{ display: "grid", gap: 4, color: "#94a3b8", fontSize: 12 }}>
             <div>Ingest status: {ingestStatusLabel}</div>
             <div>Transcription: {transcriptionLabel}</div>
+            <div>Ingest mode: {fastIngest ? `Fast (${fastIngestFps} fps)` : "Full"}</div>
           </div>
           {ingestLogs.length > 0 && (
             <details style={{ border: "1px solid #1e293b", borderRadius: 8, padding: 8 }}>

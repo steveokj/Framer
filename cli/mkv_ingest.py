@@ -84,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--whisper-compute-type", help="Whisper compute type (float16/int8).")
     parser.add_argument("--ffmpeg", help="Override ffmpeg path.")
     parser.add_argument("--ffprobe", help="Override ffprobe path.")
+    parser.add_argument("--max-fps", type=float, help="Cap extracted frames per second for faster ingest.")
     parser.add_argument("--overwrite", action="store_true", help="Delete existing records for this video.")
     return parser.parse_args()
 
@@ -480,7 +481,13 @@ def delete_existing_video(conn: sqlite3.Connection, video_chunk_id: int, video_p
     conn.commit()
 
 
-def extract_frames(ffmpeg: str, video_path: Path, dest_dir: Path, total_hint: Optional[int] = None) -> List[Path]:
+def extract_frames(
+    ffmpeg: str,
+    video_path: Path,
+    dest_dir: Path,
+    total_hint: Optional[int] = None,
+    max_fps: Optional[float] = None,
+) -> List[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     pattern = dest_dir / "frame_%06d.png"
     cmd = [
@@ -495,6 +502,10 @@ def extract_frames(ffmpeg: str, video_path: Path, dest_dir: Path, total_hint: Op
         "-progress",
         "pipe:1",
         "-nostats",
+    ]
+    if max_fps and max_fps > 0:
+        cmd += ["-vf", f"fps={max_fps}"]
+    cmd += [
         str(pattern),
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -831,6 +842,11 @@ def main() -> int:
         fps = frame_count_hint / duration
     if fps <= 0.0:
         fps = 1.0
+    max_fps = args.max_fps if args.max_fps and args.max_fps > 0 else None
+    sample_fps = None
+    if max_fps:
+        sample_fps = min(max_fps, fps) if fps > 0 else max_fps
+    timestamp_fps = sample_fps or fps
 
     output_dir = None
     if save_frames:
@@ -839,7 +855,9 @@ def main() -> int:
         print(f"[mkv_ingest] saving frames to: {output_dir}", flush=True)
 
     frame_total_hint = frame_count_hint
-    if not frame_total_hint and fps > 0 and duration > 0:
+    if sample_fps and duration > 0:
+        frame_total_hint = int(duration * sample_fps)
+    elif not frame_total_hint and fps > 0 and duration > 0:
         frame_total_hint = int(duration * fps)
     if frame_total_hint is not None and frame_total_hint < 1:
         frame_total_hint = None
@@ -849,7 +867,7 @@ def main() -> int:
         print("[mkv_ingest] extracting frames...", flush=True)
         if frame_total_hint:
             print(f"[mkv_ingest] extract: 0/{frame_total_hint}", flush=True)
-        frame_paths = extract_frames(ffmpeg, video_path, frame_dir, frame_total_hint)
+        frame_paths = extract_frames(ffmpeg, video_path, frame_dir, frame_total_hint, sample_fps)
         frame_total = len(frame_paths)
         print(f"[mkv_ingest] extracted {frame_total} frames", flush=True)
 
@@ -885,7 +903,7 @@ def main() -> int:
                 prev_gray = gray
                 kept_frames += 1
 
-                frame_ts = start_time + timedelta(seconds=frame_index / max(fps, 1e-6))
+                frame_ts = start_time + timedelta(seconds=frame_index / max(timestamp_fps, 1e-6))
                 stored_path = None
                 if save_frames and output_dir is not None:
                     fname = f"frame_{frame_index:06d}.{frame_format}"

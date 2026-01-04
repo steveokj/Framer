@@ -72,6 +72,17 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   const videoPath = await resolvePath(videoPathInput);
+  const fast = Boolean(body?.fast);
+  const maxFpsRaw = body?.maxFps;
+  const maxFps =
+    typeof maxFpsRaw === "number"
+      ? maxFpsRaw
+      : typeof maxFpsRaw === "string"
+        ? Number.parseFloat(maxFpsRaw)
+        : null;
+  const dedupRaw = body?.dedupThreshold;
+  const dedupThreshold =
+    typeof dedupRaw === "number" ? dedupRaw : typeof dedupRaw === "string" ? Number.parseFloat(dedupRaw) : null;
   const encoder = new TextEncoder();
   let child: ReturnType<typeof spawn> | null = null;
 
@@ -85,7 +96,13 @@ export async function POST(req: NextRequest): Promise<Response> {
       sendEvent("stage", { stage: "starting" });
 
       const py = process.env.PYTHON || "python";
-      child = spawn(py, ["-u", INGEST_SCRIPT, "--video", videoPath], {
+      const args = [INGEST_SCRIPT, "--video", videoPath];
+      if (fast) {
+        const fps = maxFps && maxFps > 0 ? maxFps : 2;
+        const dedup = dedupThreshold && dedupThreshold > 0 ? dedupThreshold : 0.02;
+        args.push("--max-fps", String(fps), "--dedup-threshold", String(dedup));
+      }
+      child = spawn(py, ["-u", ...args], {
         cwd: PROJECT_ROOT,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, PYTHONUNBUFFERED: "1" },
