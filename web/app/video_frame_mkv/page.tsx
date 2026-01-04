@@ -217,7 +217,7 @@ function formatBytes(bytes: number): string {
 }
 
 function stripTranscriptTimestamp(text: string): string {
-  return text.replace(/^\s*\[\s*\d+(\.\d+)?s?\s*->\s*\d+(\.\d+)?s?\s*\]\s*/i, "");
+  return text.replace(/\[\s*\d+(\.\d+)?s?\s*->\s*\d+(\.\d+)?s?\s*\]\s*/gi, "").trim();
 }
 
 function buildTranscriptSegments(text: string | null | undefined, duration: number | null): Segment[] {
