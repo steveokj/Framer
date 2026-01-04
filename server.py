@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
+import string
 import wave
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -16,9 +18,25 @@ from path_utils import canonicalize_path
 # Root directory of the application - used for resolving relative paths
 ROOT = Path(__file__).parent.resolve()
 # Additional directories that are safe to serve over /files_abs
+def _extra_allowed_roots() -> List[Path]:
+    roots: List[Path] = []
+    env_roots = os.getenv("ALLOWED_FILE_ROOTS", "")
+    for raw in env_roots.split(";"):
+        raw = raw.strip()
+        if raw:
+            roots.append(Path(raw).expanduser())
+    if os.name == "nt":
+        for letter in string.ascii_uppercase:
+            candidate = Path(f"{letter}:/")
+            if candidate.exists():
+                roots.append(candidate)
+    return roots
+
+
 ALLOWED_FILE_ROOTS = [
     ROOT,
     (Path.home() / ".screenpipe").resolve(),
+    *_extra_allowed_roots(),
 ]
 # Path to the SQLite database containing transcriptions
 DB_PATH = ROOT / "transcriptions.sqlite3"

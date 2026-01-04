@@ -50,6 +50,20 @@ type IngestedVideo = {
   creation_time: string | null;
 };
 
+type ServerBrowseEntry = {
+  name: string;
+  path: string;
+  type: "dir" | "file";
+  size: number | null;
+};
+
+type ServerBrowseResponse = {
+  currentPath: string | null;
+  parentPath: string | null;
+  roots: string[];
+  entries: ServerBrowseEntry[];
+};
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
@@ -57,6 +71,7 @@ const API_BASE = (
 ).replace(/\/$/, "");
 
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
+const SERVER_BROWSER_STORAGE_KEY = "mkvServerBrowserPath";
 
 function normalisePath(input: string): string {
   return input.replace(/\\/g, "/").replace(/^\.?\//, "");
@@ -631,6 +646,17 @@ export default function VideoFrameMkvPage() {
   const [selectedIngestedPath, setSelectedIngestedPath] = useState("");
   const [videoInput, setVideoInput] = useState("");
   const [videoPath, setVideoPath] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const [ingestAfterUpload, setIngestAfterUpload] = useState(true);
+  const [serverBrowsePath, setServerBrowsePath] = useState("");
+  const [serverBrowseInput, setServerBrowseInput] = useState("");
+  const [serverBrowseParent, setServerBrowseParent] = useState<string | null>(null);
+  const [serverBrowseRoots, setServerBrowseRoots] = useState<string[]>([]);
+  const [serverBrowseEntries, setServerBrowseEntries] = useState<ServerBrowseEntry[]>([]);
+  const [serverBrowseLoading, setServerBrowseLoading] = useState(false);
+  const [serverBrowseError, setServerBrowseError] = useState<string | null>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [loadingTranscript, setLoadingTranscript] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
@@ -651,6 +677,7 @@ export default function VideoFrameMkvPage() {
   const [, forceFrameUpdate] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const lastTimelineRef = useRef(0);
   const lastSyncedRef = useRef(0);
   const hideControlsTimeoutRef = useRef<number | null>(null);
@@ -693,11 +720,53 @@ export default function VideoFrameMkvPage() {
     }
   }, []);
 
+  const loadServerBrowser = useCallback(async (pathInput?: string) => {
+    setServerBrowseLoading(true);
+    setServerBrowseError(null);
+    try {
+      const params = new URLSearchParams();
+      if (pathInput && pathInput.trim()) {
+        params.set("path", pathInput.trim());
+      }
+      const query = params.toString();
+      const url = query ? `/api/server_browse?${query}` : "/api/server_browse";
+      const res = await fetch(url);
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to load server files (status ${res.status})`);
+      }
+      const data: ServerBrowseResponse = await res.json();
+      setServerBrowseRoots(Array.isArray(data.roots) ? data.roots : []);
+      setServerBrowseEntries(Array.isArray(data.entries) ? data.entries : []);
+      setServerBrowseParent(data.parentPath ?? null);
+      const current = data.currentPath ?? "";
+      setServerBrowsePath(current);
+      setServerBrowseInput(current);
+      if (current) {
+        localStorage.setItem(SERVER_BROWSER_STORAGE_KEY, current);
+      } else {
+        localStorage.removeItem(SERVER_BROWSER_STORAGE_KEY);
+      }
+    } catch (err) {
+      setServerBrowseEntries([]);
+      setServerBrowseError(err instanceof Error ? err.message : "Failed to load server files");
+    } finally {
+      setServerBrowseLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     refreshIngestedVideos().catch(() => {
       /* handled inside */
     });
   }, [refreshIngestedVideos]);
+
+  useEffect(() => {
+    const saved = localStorage.getItem(SERVER_BROWSER_STORAGE_KEY);
+    loadServerBrowser(saved || undefined).catch(() => {
+      /* handled inside */
+    });
+  }, [loadServerBrowser]);
 
   useEffect(() => {
     if (!videoInput && ingestedVideos.length > 0) {
@@ -1881,6 +1950,88 @@ export default function VideoFrameMkvPage() {
     setSelectedIngestedPath(match ? match.file_path : "");
   };
 
+  const handleUploadClick = () => {
+    uploadInputRef.current?.click();
+  };
+
+  const handleUploadChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    setUploading(true);
+    setUploadError(null);
+    setUploadMessage(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const ingestParam = ingestAfterUpload ? "1" : "0";
+      const res = await fetch(`/api/mkv_upload?ingest=${ingestParam}`, {
+        method: "POST",
+        body: formData,
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload.error || `Upload failed (status ${res.status})`);
+      }
+      const storedPath = typeof payload.path === "string" ? payload.path : "";
+      if (storedPath) {
+        setVideoInput(storedPath);
+        setVideoPath(storedPath);
+        setSelectedIngestedPath("");
+      }
+      setUploadMessage(payload.ingested ? "Upload complete and ingested." : "Upload complete.");
+      if (payload.ingested) {
+        refreshIngestedVideos().catch(() => {
+          /* handled inside */
+        });
+      }
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleServerBrowseSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    loadServerBrowser(serverBrowseInput).catch(() => {
+      /* handled inside */
+    });
+  };
+
+  const handleServerBrowseInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setServerBrowseInput(event.target.value);
+  };
+
+  const handleServerBrowseEntryClick = (entry: ServerBrowseEntry) => {
+    if (entry.type === "dir") {
+      loadServerBrowser(entry.path).catch(() => {
+        /* handled inside */
+      });
+      return;
+    }
+    setVideoInput(entry.path);
+    setVideoPath(entry.path);
+    setSelectedIngestedPath("");
+  };
+
+  const handleServerBrowseRootClick = (root: string) => {
+    loadServerBrowser(root).catch(() => {
+      /* handled inside */
+    });
+  };
+
+  const handleServerBrowseUp = () => {
+    if (!serverBrowseParent) {
+      return;
+    }
+    loadServerBrowser(serverBrowseParent).catch(() => {
+      /* handled inside */
+    });
+  };
+
   return (
     <main style={{ display: "grid", gap: 24, padding: 24 }}>
       <header>
@@ -1942,6 +2093,130 @@ export default function VideoFrameMkvPage() {
             Load video metadata
           </button>
         </form>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          <strong>Upload video</strong>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+            <button
+              type="button"
+              onClick={handleUploadClick}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 6,
+                border: "1px solid #334155",
+                background: "rgba(15, 23, 42, 0.6)",
+                color: "#f8fafc",
+                cursor: "pointer",
+              }}
+            >
+              Select video to upload
+            </button>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#cbd5f5", fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={ingestAfterUpload}
+                onChange={(event) => setIngestAfterUpload(event.target.checked)}
+              />
+              Ingest after upload
+            </label>
+            {uploading && <span style={{ color: "#94a3b8" }}>Uploading...</span>}
+          </div>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept="video/*,.mkv,.mp4,.mov,.webm,.avi,.m4v"
+            onChange={handleUploadChange}
+            style={{ display: "none" }}
+          />
+          {uploadMessage && <p style={{ color: "#a7f3d0" }}>{uploadMessage}</p>}
+          {uploadError && <p style={{ color: "#fca5a5" }}>{uploadError}</p>}
+          <p style={{ color: "#94a3b8", fontSize: 12 }}>Uploads save to data/uploads on the server.</p>
+        </div>
+
+        <details style={{ border: "1px solid #1e293b", borderRadius: 8, padding: 10 }}>
+          <summary style={{ cursor: "pointer", color: "#e2e8f0" }}>Browse server files</summary>
+          <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              {serverBrowseParent && (
+                <button
+                  type="button"
+                  onClick={handleServerBrowseUp}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    border: "1px solid #334155",
+                    background: "rgba(15, 23, 42, 0.6)",
+                    color: "#f8fafc",
+                    cursor: "pointer",
+                  }}
+                >
+                  Up
+                </button>
+              )}
+              {serverBrowseRoots.map((root) => (
+                <button
+                  key={root}
+                  type="button"
+                  onClick={() => handleServerBrowseRootClick(root)}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    border: "1px solid #334155",
+                    background: "rgba(15, 23, 42, 0.6)",
+                    color: "#f8fafc",
+                    cursor: "pointer",
+                  }}
+                >
+                  {root}
+                </button>
+              ))}
+            </div>
+            <form onSubmit={handleServerBrowseSubmit} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="text"
+                value={serverBrowseInput}
+                onChange={handleServerBrowseInputChange}
+                placeholder="C:\\"
+                style={{ flex: 1, padding: "8px 10px" }}
+              />
+              <button type="submit" style={{ padding: "8px 12px" }}>
+                Go
+              </button>
+            </form>
+            {serverBrowsePath && (
+              <div style={{ color: "#94a3b8", fontSize: 12 }}>Current folder: {serverBrowsePath}</div>
+            )}
+            {serverBrowseLoading && <span style={{ color: "#94a3b8" }}>Loading...</span>}
+            {serverBrowseError && <p style={{ color: "#fca5a5" }}>{serverBrowseError}</p>}
+            <div style={{ display: "grid", gap: 6, maxHeight: 220, overflowY: "auto" }}>
+              {serverBrowseEntries.map((entry) => (
+                <button
+                  key={`${entry.type}-${entry.path}`}
+                  type="button"
+                  onClick={() => handleServerBrowseEntryClick(entry)}
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "center",
+                    padding: "6px 8px",
+                    borderRadius: 6,
+                    border: "1px solid #1e293b",
+                    background: "rgba(15, 23, 42, 0.55)",
+                    color: entry.type === "dir" ? "#38bdf8" : "#e2e8f0",
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  <span style={{ minWidth: 52 }}>{entry.type === "dir" ? "[DIR]" : "[FILE]"}</span>
+                  <span style={{ flex: 1 }}>{entry.name}</span>
+                </button>
+              ))}
+              {!serverBrowseLoading && serverBrowsePath && serverBrowseEntries.length === 0 && (
+                <span style={{ color: "#94a3b8" }}>No video files found in this folder.</span>
+              )}
+            </div>
+          </div>
+        </details>
         {videoWarning && <p style={{ color: "#b54747", marginTop: 8 }}>{videoWarning}</p>}
         {metadataError && <p style={{ color: "#fca5a5" }}>{metadataError}</p>}
         {loadingMetadata && <p style={{ color: "#94a3b8" }}>Loading metadata...</p>}
