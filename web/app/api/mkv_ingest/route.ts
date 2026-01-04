@@ -85,9 +85,10 @@ export async function POST(req: NextRequest): Promise<Response> {
       sendEvent("stage", { stage: "starting" });
 
       const py = process.env.PYTHON || "python";
-      child = spawn(py, [INGEST_SCRIPT, "--video", videoPath], {
+      child = spawn(py, ["-u", INGEST_SCRIPT, "--video", videoPath], {
         cwd: PROJECT_ROOT,
         stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
       });
 
       let currentStage: string | null = null;

@@ -512,14 +512,14 @@ def extract_frames(ffmpeg: str, video_path: Path, dest_dir: Path, total_hint: Op
                     continue
                 if total_hint:
                     if current - last_reported >= report_interval or current >= total_hint:
-                        print(f"[mkv_ingest] extract: {current}/{total_hint}")
+                        print(f"[mkv_ingest] extract: {current}/{total_hint}", flush=True)
                         last_reported = current
                 else:
                     if current - last_reported >= report_interval:
-                        print(f"[mkv_ingest] extract: {current}")
+                        print(f"[mkv_ingest] extract: {current}", flush=True)
                         last_reported = current
             if total_hint and line.startswith("progress=") and line.endswith("end") and last_reported < total_hint:
-                print(f"[mkv_ingest] extract: {total_hint}/{total_hint}")
+                print(f"[mkv_ingest] extract: {total_hint}/{total_hint}", flush=True)
                 last_reported = total_hint
     stderr = proc.stderr.read().strip() if proc.stderr else ""
     proc.wait()
@@ -803,7 +803,7 @@ def main() -> int:
     if not video_path.exists():
         raise SystemExit(f"Video file not found: {video_path}")
 
-    print(f"[mkv_ingest] video: {video_path}")
+    print(f"[mkv_ingest] video: {video_path}", flush=True)
 
     db_path = resolve_path(cfg["db_path"])
     frames_base = resolve_path(cfg["frames_dir"])
@@ -836,7 +836,7 @@ def main() -> int:
     if save_frames:
         output_dir = build_output_dir(frames_base, video_path)
         output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[mkv_ingest] saving frames to: {output_dir}")
+        print(f"[mkv_ingest] saving frames to: {output_dir}", flush=True)
 
     frame_total_hint = frame_count_hint
     if not frame_total_hint and fps > 0 and duration > 0:
@@ -846,10 +846,12 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="mkv_frames_") as tmpdir:
         frame_dir = Path(tmpdir)
-        print("[mkv_ingest] extracting frames...")
+        print("[mkv_ingest] extracting frames...", flush=True)
+        if frame_total_hint:
+            print(f"[mkv_ingest] extract: 0/{frame_total_hint}", flush=True)
         frame_paths = extract_frames(ffmpeg, video_path, frame_dir, frame_total_hint)
         frame_total = len(frame_paths)
-        print(f"[mkv_ingest] extracted {frame_total} frames")
+        print(f"[mkv_ingest] extracted {frame_total} frames", flush=True)
 
         dedup_enabled = bool(cfg["dedup_enabled"])
         dedup_threshold = float(cfg["dedup_threshold"])
@@ -963,14 +965,14 @@ def main() -> int:
                     )
 
                 if idx % progress_interval == 0 or idx == frame_total:
-                    print(f"[mkv_ingest] frames: {idx}/{frame_total} kept={kept_frames}")
+                    print(f"[mkv_ingest] frames: {idx}/{frame_total} kept={kept_frames}", flush=True)
 
                 if idx % 25 == 0:
                     conn.commit()
                     conn.execute("BEGIN")
 
         conn.commit()
-        print(f"[mkv_ingest] kept {kept_frames} frames (dedup={'on' if dedup_enabled else 'off'})")
+        print(f"[mkv_ingest] kept {kept_frames} frames (dedup={'on' if dedup_enabled else 'off'})", flush=True)
         conn.execute(
             """
             INSERT OR REPLACE INTO video_metadata (
@@ -994,11 +996,11 @@ def main() -> int:
     if cfg["transcribe_audio"]:
         model_size = cfg["whisper_model_size"]
         if not args.force_transcribe and transcription_exists(conn, video_path, model_size):
-            print("[mkv_ingest] transcription already exists, skipping")
+            print("[mkv_ingest] transcription already exists, skipping", flush=True)
         else:
-            print("[mkv_ingest] transcribing audio...")
+            print("[mkv_ingest] transcribing audio...", flush=True)
             transcribe_audio(ffmpeg, video_path, cfg, conn, start_time, duration)
-            print("[mkv_ingest] transcription saved")
+            print("[mkv_ingest] transcription saved", flush=True)
 
     conn.close()
     return 0
