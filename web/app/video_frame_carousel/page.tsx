@@ -44,7 +44,7 @@ const DEFAULT_AUDIO = "C:\\Users\\steve\\Desktop\\Whisper\\sessions\\session-202
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
-    : "http://localhost:8000"
+    : "http://localhost:8001"
 ).replace(/\/$/, "");
 
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
@@ -474,7 +474,7 @@ export default function VideoFrameCarouselPage() {
   const { url: videoUrl, warning: videoWarning } = useMemo(() => buildFileUrl(videoPath), [videoPath]);
   const { warning: audioWarning } = useMemo(() => buildFileUrl(audioPath), [audioPath]);
 
-  const serverHint = API_BASE || "http://localhost:8000";
+  const serverHint = API_BASE || "http://localhost:8001";
   const frames = useMemo(() => {
     const all = metadata?.frames ?? [];
     if (all.length <= 1) {
@@ -1403,6 +1403,7 @@ export default function VideoFrameCarouselPage() {
     </main>
   );
 }
+
 
 
 

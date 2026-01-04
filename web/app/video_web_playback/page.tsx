@@ -191,7 +191,7 @@ export default function VideoWebPlaybackPage() {
 
   const audioOffset = metadata?.alignment.audio_offset_seconds ?? 0;
   const combinedOffset = audioOffset + manualOffset;
-  const serverHint = API_BASE || "http://localhost:8000";
+  const serverHint = API_BASE || "http://localhost:8001";
   const timelineDuration = useMemo(() => getTimelineDuration(metadata), [metadata]);
   const displayScale = useMemo(() => {
     if (!timelineDuration || videoDuration == null || !(videoDuration > 0)) {
@@ -629,3 +629,4 @@ export default function VideoWebPlaybackPage() {
     </main>
   );
 }
+

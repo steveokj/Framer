@@ -53,7 +53,7 @@ type IngestedVideo = {
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
-    : "http://localhost:8000"
+    : "http://localhost:8001"
 ).replace(/\/$/, "");
 
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
@@ -665,7 +665,7 @@ export default function VideoFrameMkvPage() {
 
   const { url: videoUrl, warning: videoWarning } = useMemo(() => buildFileUrl(videoPath), [videoPath]);
 
-  const serverHint = API_BASE || "http://localhost:8000";
+  const serverHint = API_BASE || "http://localhost:8001";
   const timelineDuration = useMemo(() => getTimelineDuration(metadata), [metadata]);
   const displayScale = useMemo(() => {
     if (!timelineDuration || videoDuration == null || !(videoDuration > 0)) {
@@ -2359,3 +2359,4 @@ export default function VideoFrameMkvPage() {
     </main>
   );
 }
+

@@ -45,7 +45,7 @@ type IngestedVideo = {
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
-    : "http://localhost:8000"
+    : "http://localhost:8001"
 ).replace(/\/$/, "");
 
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
@@ -488,7 +488,7 @@ export default function VideoMkvPage() {
 
   const { url: videoUrl, warning: videoWarning } = useMemo(() => buildFileUrl(videoPath), [videoPath]);
 
-  const serverHint = API_BASE || "http://localhost:8000";
+  const serverHint = API_BASE || "http://localhost:8001";
   const refreshIngestedVideos = useCallback(async () => {
     setIngestedLoading(true);
     setIngestedError(null);
@@ -1540,6 +1540,7 @@ export default function VideoMkvPage() {
     </main>
   );
 }
+
 
 
 

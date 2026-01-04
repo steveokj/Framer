@@ -51,7 +51,7 @@ const DEFAULT_AUDIO = "C:\\Users\\steve\\Desktop\\Whisper\\sessions\\session-202
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
-    : "http://localhost:8000"
+    : "http://localhost:8001"
 ).replace(/\/$/, "");
 
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
@@ -629,7 +629,7 @@ export default function VideoFrame2Page() {
 
   const audioOffset = metadata?.alignment.audio_offset_seconds ?? 0;
   const combinedOffset = audioOffset + manualOffset;
-  const serverHint = API_BASE || "http://localhost:8000";
+  const serverHint = API_BASE || "http://localhost:8001";
   const timelineDuration = useMemo(() => getTimelineDuration(metadata), [metadata]);
   const displayScale = useMemo(() => {
     if (!timelineDuration || videoDuration == null || !(videoDuration > 0)) {
@@ -2163,4 +2163,5 @@ export default function VideoFrame2Page() {
     </main>
   );
 }
+
 

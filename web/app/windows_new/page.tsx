@@ -583,7 +583,7 @@ export default function WindowsNewPage() {
 
   const audioOffset = metadata?.alignment.audio_offset_seconds ?? 0;
   const combinedOffset = audioOffset + manualOffset;
-  const serverHint = API_BASE || "http://localhost:8000";
+  const serverHint = API_BASE || "http://localhost:8001";
   const timelineDuration = useMemo(() => {
     if (!metadata || !metadata.frames.length) return null;
     return metadata.frames[metadata.frames.length - 1].seconds_from_video_start;
@@ -1911,3 +1911,4 @@ export default function WindowsNewPage() {
     </main>
   );
 }
+
