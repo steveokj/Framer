@@ -68,6 +68,12 @@ type IngestPhase =
   | "done"
   | "error";
 
+type IngestProgress = {
+  done: number;
+  total: number;
+  kept?: number | null;
+};
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
@@ -524,6 +530,8 @@ export default function VideoMkvPage() {
   const [ingestAfterUpload, setIngestAfterUpload] = useState(true);
   const [ingestPhase, setIngestPhase] = useState<IngestPhase>("idle");
   const [ingestLogs, setIngestLogs] = useState<string[]>([]);
+  const [ingestProgress, setIngestProgress] = useState<IngestProgress | null>(null);
+  const [ingestTargetPath, setIngestTargetPath] = useState<string | null>(null);
   const [transcriptionStatus, setTranscriptionStatus] = useState<"idle" | "running" | "done" | "skipped" | "error">(
     "idle",
   );
@@ -562,6 +570,18 @@ export default function VideoMkvPage() {
     return Math.max(uploadProgress.total - uploadProgress.loaded, 0);
   }, [uploadProgress]);
   const uploadBusy = uploadPhase === "uploading" || uploadPhase === "ingesting";
+  const ingestPercent = useMemo(() => {
+    if (!ingestProgress || !ingestProgress.total) {
+      return null;
+    }
+    return Math.min(100, Math.round((ingestProgress.done / ingestProgress.total) * 100));
+  }, [ingestProgress]);
+  const ingestInProgressForVideo =
+    Boolean(ingestTargetPath) &&
+    Boolean(videoPath) &&
+    ingestTargetPath === videoPath &&
+    ingestPhase !== "done" &&
+    ingestPhase !== "error";
   const uploadPhaseLabel = useMemo(() => {
     switch (uploadPhase) {
       case "uploading":
@@ -674,6 +694,7 @@ export default function VideoMkvPage() {
     async (video: string) => {
       setIngestPhase("starting");
       setIngestLogs([]);
+      setIngestProgress(null);
       setUploadDetail("Starting ingest...");
       setUploadError(null);
       setTranscriptionStatus("idle");
@@ -732,6 +753,15 @@ export default function VideoMkvPage() {
               if (typeof line === "string") {
                 setIngestLogs((prev) => [...prev, line].slice(-200));
                 const lower = line.toLowerCase();
+                const progressMatch = line.match(/frames:\s*(\d+)\s*\/\s*(\d+)(?:\s+kept=(\d+))?/i);
+                if (progressMatch) {
+                  const done = Number(progressMatch[1]);
+                  const total = Number(progressMatch[2]);
+                  const kept = progressMatch[3] ? Number(progressMatch[3]) : null;
+                  if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
+                    setIngestProgress({ done, total, kept: kept ?? null });
+                  }
+                }
                 if (lower.includes("transcribing audio")) {
                   sawTranscribe = true;
                   setTranscriptionStatus("running");
@@ -1143,8 +1173,13 @@ export default function VideoMkvPage() {
   }, []);
 
   useEffect(() => {
+    if (ingestInProgressForVideo) {
+      setMetadata(null);
+      setMetadataError(null);
+      return;
+    }
     fetchMetadata(videoPath);
-  }, [videoPath, fetchMetadata]);
+  }, [videoPath, fetchMetadata, ingestInProgressForVideo]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1524,11 +1559,16 @@ export default function VideoMkvPage() {
       setUploadDetail("Upload complete.");
       if (ingestAfterUpload && storedPath) {
         setUploadPhase("ingesting");
-        await startIngest(storedPath);
-        setUploadPhase("done");
-        refreshIngestedVideos().catch(() => {
-          /* handled inside */
-        });
+        setIngestTargetPath(storedPath);
+        try {
+          await startIngest(storedPath);
+          setUploadPhase("done");
+          refreshIngestedVideos().catch(() => {
+            /* handled inside */
+          });
+        } finally {
+          setIngestTargetPath(null);
+        }
       } else {
         setUploadPhase("done");
       }
@@ -1701,6 +1741,34 @@ export default function VideoMkvPage() {
               Uploading {uploadPercent ?? 0}% ({formatBytes(uploadRemaining ?? 0)} left of {formatBytes(uploadProgress.total)})
             </div>
           )}
+          {ingestProgress && uploadPhase === "ingesting" && (
+            <div style={{ color: "#94a3b8", fontSize: 12 }}>
+              Frames processed {ingestProgress.done}/{ingestProgress.total} ({ingestPercent ?? 0}%)
+            </div>
+          )}
+          {ingestProgress && uploadPhase === "ingesting" && (
+            <div
+              style={{
+                height: 6,
+                borderRadius: 999,
+                border: "1px solid #1e293b",
+                background: "rgba(15, 23, 42, 0.8)",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${ingestPercent ?? 0}%`,
+                  height: "100%",
+                  background: "#34d399",
+                  transition: "width 0.2s ease",
+                }}
+              />
+            </div>
+          )}
+          {uploadPhase === "ingesting" && !ingestProgress && (
+            <div style={{ color: "#94a3b8", fontSize: 12 }}>Starting ingest, waiting for frame progress...</div>
+          )}
           {uploadDetail && <p style={{ color: "#a7f3d0" }}>{uploadDetail}</p>}
           {uploadError && <p style={{ color: "#fca5a5" }}>{uploadError}</p>}
           <div style={{ display: "grid", gap: 4, color: "#94a3b8", fontSize: 12 }}>
@@ -1812,7 +1880,10 @@ export default function VideoMkvPage() {
           </div>
         </details>
         {videoWarning && <p style={{ color: "#b54747", marginTop: 8 }}>{videoWarning}</p>}
-        {metadataError && <p style={{ color: "#fca5a5" }}>{metadataError}</p>}
+        {ingestInProgressForVideo && (
+          <p style={{ color: "#94a3b8" }}>Waiting for ingest to finish before loading metadata.</p>
+        )}
+        {!ingestInProgressForVideo && metadataError && <p style={{ color: "#fca5a5" }}>{metadataError}</p>}
         {loadingMetadata && <p style={{ color: "#94a3b8" }}>Loading metadata...</p>}
       </section>
 

@@ -813,7 +813,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mkv_frames_") as tmpdir:
         frame_dir = Path(tmpdir)
         frame_paths = extract_frames(ffmpeg, video_path, frame_dir)
-        print(f"[mkv_ingest] extracted {len(frame_paths)} frames")
+        frame_total = len(frame_paths)
+        print(f"[mkv_ingest] extracted {frame_total} frames")
 
         dedup_enabled = bool(cfg["dedup_enabled"])
         dedup_threshold = float(cfg["dedup_threshold"])
@@ -822,6 +823,7 @@ def main() -> int:
 
         prev_gray: Optional[np.ndarray] = None
         kept_frames = 0
+        progress_interval = max(1, frame_total // 20)
 
         conn.execute("BEGIN")
         for idx, frame_path in enumerate(frame_paths, start=1):
@@ -924,6 +926,9 @@ def main() -> int:
                             for b in boxes
                         ],
                     )
+
+                if idx % progress_interval == 0 or idx == frame_total:
+                    print(f"[mkv_ingest] frames: {idx}/{frame_total} kept={kept_frames}")
 
                 if idx % 25 == 0:
                     conn.commit()
