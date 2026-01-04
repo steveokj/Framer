@@ -64,6 +64,18 @@ type ServerBrowseResponse = {
   entries: ServerBrowseEntry[];
 };
 
+type UploadPhase = "idle" | "uploading" | "ingesting" | "done" | "error";
+
+type IngestPhase =
+  | "idle"
+  | "starting"
+  | "ingesting"
+  | "processing"
+  | "transcribing"
+  | "transcribed"
+  | "done"
+  | "error";
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
@@ -180,6 +192,21 @@ function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  const precision = value >= 10 || idx === 0 ? 0 : 1;
+  return `${value.toFixed(precision)} ${units[idx]}`;
 }
 
 function buildTranscriptSegments(text: string | null | undefined, duration: number | null): Segment[] {
@@ -646,10 +673,17 @@ export default function VideoFrameMkvPage() {
   const [selectedIngestedPath, setSelectedIngestedPath] = useState("");
   const [videoInput, setVideoInput] = useState("");
   const [videoPath, setVideoPath] = useState("");
-  const [uploading, setUploading] = useState(false);
+  const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const [uploadDetail, setUploadDetail] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ loaded: number; total: number } | null>(null);
+  const [uploadFileName, setUploadFileName] = useState<string | null>(null);
   const [ingestAfterUpload, setIngestAfterUpload] = useState(true);
+  const [ingestPhase, setIngestPhase] = useState<IngestPhase>("idle");
+  const [ingestLogs, setIngestLogs] = useState<string[]>([]);
+  const [transcriptionStatus, setTranscriptionStatus] = useState<"idle" | "running" | "done" | "skipped" | "error">(
+    "idle",
+  );
   const [serverBrowsePath, setServerBrowsePath] = useState("");
   const [serverBrowseInput, setServerBrowseInput] = useState("");
   const [serverBrowseParent, setServerBrowseParent] = useState<string | null>(null);
@@ -700,6 +734,73 @@ export default function VideoFrameMkvPage() {
     }
     return timelineDuration / videoDuration;
   }, [timelineDuration, videoDuration]);
+  const uploadPercent = useMemo(() => {
+    if (!uploadProgress || !uploadProgress.total) {
+      return null;
+    }
+    return Math.min(100, Math.round((uploadProgress.loaded / uploadProgress.total) * 100));
+  }, [uploadProgress]);
+  const uploadRemaining = useMemo(() => {
+    if (!uploadProgress) {
+      return null;
+    }
+    return Math.max(uploadProgress.total - uploadProgress.loaded, 0);
+  }, [uploadProgress]);
+  const uploadBusy = uploadPhase === "uploading" || uploadPhase === "ingesting";
+  const uploadPhaseLabel = useMemo(() => {
+    switch (uploadPhase) {
+      case "uploading":
+        return "Uploading";
+      case "ingesting":
+        return "Ingesting";
+      case "done":
+        return "Complete";
+      case "error":
+        return "Error";
+      default:
+        return "Idle";
+    }
+  }, [uploadPhase]);
+  const ingestStatusLabel = useMemo(() => {
+    if (!ingestAfterUpload) {
+      return "Skipped";
+    }
+    switch (ingestPhase) {
+      case "starting":
+        return "Starting";
+      case "ingesting":
+        return "Preparing";
+      case "processing":
+        return "Processing frames";
+      case "transcribing":
+        return "Transcribing audio";
+      case "transcribed":
+        return "Transcription ready";
+      case "done":
+        return "Complete";
+      case "error":
+        return "Error";
+      default:
+        return "Waiting";
+    }
+  }, [ingestAfterUpload, ingestPhase]);
+  const transcriptionLabel = useMemo(() => {
+    if (!ingestAfterUpload) {
+      return "Skipped";
+    }
+    switch (transcriptionStatus) {
+      case "running":
+        return "Running";
+      case "done":
+        return "Done";
+      case "skipped":
+        return "Skipped";
+      case "error":
+        return "Error";
+      default:
+        return "Pending";
+    }
+  }, [ingestAfterUpload, transcriptionStatus]);
 
   const refreshIngestedVideos = useCallback(async () => {
     setIngestedLoading(true);
@@ -753,6 +854,145 @@ export default function VideoFrameMkvPage() {
     } finally {
       setServerBrowseLoading(false);
     }
+  }, []);
+
+  const startIngest = useCallback(
+    async (video: string) => {
+      setIngestPhase("starting");
+      setIngestLogs([]);
+      setUploadDetail("Starting ingest...");
+      setUploadError(null);
+      setTranscriptionStatus("idle");
+      let sawTranscribe = false;
+      let sawTranscriptionSaved = false;
+      let sawTranscriptionSkipped = false;
+      try {
+        const res = await fetch("/api/mkv_ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ videoPath: video }),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || `Ingest request failed (status ${res.status})`);
+        }
+        const reader = res.body?.getReader();
+        if (!reader) {
+          throw new Error("Ingest stream unavailable");
+        }
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let doneCode: number | null = null;
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) {
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          let separatorIndex = buffer.indexOf("\n\n");
+          while (separatorIndex !== -1) {
+            const chunk = buffer.slice(0, separatorIndex);
+            buffer = buffer.slice(separatorIndex + 2);
+            const lines = chunk.split("\n");
+            let eventType = "message";
+            let data = "";
+            for (const line of lines) {
+              if (line.startsWith("event:")) {
+                eventType = line.slice(6).trim();
+              } else if (line.startsWith("data:")) {
+                data += line.slice(5).trim();
+              }
+            }
+            if (!data) {
+              separatorIndex = buffer.indexOf("\n\n");
+              continue;
+            }
+            let payload: any = null;
+            try {
+              payload = JSON.parse(data);
+            } catch {
+              payload = { line: data };
+            }
+            if (eventType === "log") {
+              const line = payload?.line;
+              if (typeof line === "string") {
+                setIngestLogs((prev) => [...prev, line].slice(-200));
+                const lower = line.toLowerCase();
+                if (lower.includes("transcribing audio")) {
+                  sawTranscribe = true;
+                  setTranscriptionStatus("running");
+                }
+                if (lower.includes("transcription saved")) {
+                  sawTranscriptionSaved = true;
+                  setTranscriptionStatus("done");
+                }
+                if (lower.includes("transcription already exists")) {
+                  sawTranscriptionSkipped = true;
+                  setTranscriptionStatus("skipped");
+                }
+              }
+            } else if (eventType === "stage") {
+              const stage = payload?.stage as IngestPhase | undefined;
+              if (stage) {
+                setIngestPhase(stage);
+                if (stage === "transcribing") {
+                  setUploadDetail("Transcribing audio...");
+                } else if (stage === "processing" || stage === "ingesting") {
+                  setUploadDetail("Processing frames...");
+                }
+              }
+            } else if (eventType === "done") {
+              doneCode = Number(payload?.code ?? 0);
+            } else if (eventType === "error") {
+              throw new Error(payload?.message || "Ingest failed");
+            }
+            separatorIndex = buffer.indexOf("\n\n");
+          }
+        }
+        if (doneCode && doneCode !== 0) {
+          throw new Error(`Ingest failed (exit ${doneCode})`);
+        }
+        if (!sawTranscribe && !sawTranscriptionSaved && !sawTranscriptionSkipped) {
+          setTranscriptionStatus("skipped");
+        }
+        setIngestPhase("done");
+        setUploadDetail("Ingest complete.");
+      } catch (err) {
+        setIngestPhase("error");
+        setUploadPhase("error");
+        setUploadError(err instanceof Error ? err.message : "Ingest failed");
+        setTranscriptionStatus("error");
+        throw err;
+      }
+    },
+    []
+  );
+
+  const uploadFileWithProgress = useCallback((file: File): Promise<{ path?: string; ingested?: boolean }> => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/mkv_upload?ingest=0");
+      xhr.responseType = "json";
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          setUploadProgress({ loaded: event.loaded, total: event.total });
+        }
+      };
+      xhr.onload = () => {
+        const payload = xhr.response ?? {};
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(payload);
+        } else {
+          reject(new Error(payload.error || `Upload failed (status ${xhr.status})`));
+        }
+      };
+      xhr.onerror = () => {
+        reject(new Error("Upload failed"));
+      };
+      const formData = new FormData();
+      formData.append("file", file);
+      xhr.send(formData);
+    });
   }, []);
 
   useEffect(() => {
@@ -1960,37 +2200,36 @@ export default function VideoFrameMkvPage() {
     if (!file) {
       return;
     }
-    setUploading(true);
+    setUploadPhase("uploading");
     setUploadError(null);
-    setUploadMessage(null);
+    setUploadDetail(null);
+    setUploadProgress({ loaded: 0, total: file.size });
+    setUploadFileName(file.name);
+    setIngestPhase("idle");
+    setIngestLogs([]);
+    setTranscriptionStatus("idle");
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const ingestParam = ingestAfterUpload ? "1" : "0";
-      const res = await fetch(`/api/mkv_upload?ingest=${ingestParam}`, {
-        method: "POST",
-        body: formData,
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(payload.error || `Upload failed (status ${res.status})`);
-      }
+      const payload = await uploadFileWithProgress(file);
       const storedPath = typeof payload.path === "string" ? payload.path : "";
       if (storedPath) {
         setVideoInput(storedPath);
         setVideoPath(storedPath);
         setSelectedIngestedPath("");
       }
-      setUploadMessage(payload.ingested ? "Upload complete and ingested." : "Upload complete.");
-      if (payload.ingested) {
+      setUploadDetail("Upload complete.");
+      if (ingestAfterUpload && storedPath) {
+        setUploadPhase("ingesting");
+        await startIngest(storedPath);
+        setUploadPhase("done");
         refreshIngestedVideos().catch(() => {
           /* handled inside */
         });
+      } else {
+        setUploadPhase("done");
       }
     } catch (err) {
+      setUploadPhase("error");
       setUploadError(err instanceof Error ? err.message : "Upload failed");
-    } finally {
-      setUploading(false);
     }
   };
 
@@ -2100,26 +2339,28 @@ export default function VideoFrameMkvPage() {
             <button
               type="button"
               onClick={handleUploadClick}
+              disabled={uploadBusy}
               style={{
                 padding: "8px 12px",
                 borderRadius: 6,
                 border: "1px solid #334155",
-                background: "rgba(15, 23, 42, 0.6)",
-                color: "#f8fafc",
-                cursor: "pointer",
+                background: uploadBusy ? "rgba(30, 41, 59, 0.6)" : "rgba(15, 23, 42, 0.6)",
+                color: uploadBusy ? "#94a3b8" : "#f8fafc",
+                cursor: uploadBusy ? "not-allowed" : "pointer",
               }}
             >
-              Select video to upload
+              {uploadBusy ? "Upload in progress" : "Select video to upload"}
             </button>
             <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#cbd5f5", fontSize: 13 }}>
               <input
                 type="checkbox"
                 checked={ingestAfterUpload}
+                disabled={uploadBusy}
                 onChange={(event) => setIngestAfterUpload(event.target.checked)}
               />
               Ingest after upload
             </label>
-            {uploading && <span style={{ color: "#94a3b8" }}>Uploading...</span>}
+            {uploadPhase !== "idle" && <span style={{ color: "#94a3b8" }}>{uploadPhaseLabel}</span>}
           </div>
           <input
             ref={uploadInputRef}
@@ -2128,8 +2369,55 @@ export default function VideoFrameMkvPage() {
             onChange={handleUploadChange}
             style={{ display: "none" }}
           />
-          {uploadMessage && <p style={{ color: "#a7f3d0" }}>{uploadMessage}</p>}
+          {uploadFileName && <div style={{ color: "#e2e8f0", fontSize: 13 }}>File: {uploadFileName}</div>}
+          {uploadProgress && (
+            <div
+              style={{
+                height: 8,
+                borderRadius: 999,
+                border: "1px solid #1e293b",
+                background: "rgba(15, 23, 42, 0.8)",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${uploadPercent ?? 0}%`,
+                  height: "100%",
+                  background: uploadPhase === "error" ? "#f87171" : "#38bdf8",
+                  transition: "width 0.2s ease",
+                }}
+              />
+            </div>
+          )}
+          {uploadProgress && uploadPhase === "uploading" && (
+            <div style={{ color: "#94a3b8", fontSize: 12 }}>
+              Uploading {uploadPercent ?? 0}% ({formatBytes(uploadRemaining ?? 0)} left of {formatBytes(uploadProgress.total)})
+            </div>
+          )}
+          {uploadDetail && <p style={{ color: "#a7f3d0" }}>{uploadDetail}</p>}
           {uploadError && <p style={{ color: "#fca5a5" }}>{uploadError}</p>}
+          <div style={{ display: "grid", gap: 4, color: "#94a3b8", fontSize: 12 }}>
+            <div>Ingest status: {ingestStatusLabel}</div>
+            <div>Transcription: {transcriptionLabel}</div>
+          </div>
+          {ingestLogs.length > 0 && (
+            <details style={{ border: "1px solid #1e293b", borderRadius: 8, padding: 8 }}>
+              <summary style={{ cursor: "pointer", color: "#e2e8f0" }}>Ingest log</summary>
+              <div
+                style={{
+                  marginTop: 8,
+                  maxHeight: 180,
+                  overflowY: "auto",
+                  fontSize: 12,
+                  color: "#cbd5f5",
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {ingestLogs.join("\n")}
+              </div>
+            </details>
+          )}
           <p style={{ color: "#94a3b8", fontSize: 12 }}>Uploads save to data/uploads on the server.</p>
         </div>
 
