@@ -1723,6 +1723,11 @@ export default function VideoFrameMkvPage() {
   }, [videoPath, fetchMetadata, ingestInProgressForVideo]);
 
   useEffect(() => {
+    setMetadata(null);
+    setMetadataError(null);
+  }, [videoPath]);
+
+  useEffect(() => {
     lastTimelineRef.current = 0;
     setCurrentTime(0);
   }, [videoPath]);

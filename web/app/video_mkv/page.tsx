@@ -1192,6 +1192,11 @@ export default function VideoMkvPage() {
   }, [videoPath, fetchMetadata, ingestInProgressForVideo]);
 
   useEffect(() => {
+    setMetadata(null);
+    setMetadataError(null);
+  }, [videoPath]);
+
+  useEffect(() => {
     const video = videoRef.current;
     if (!video) {
       return;

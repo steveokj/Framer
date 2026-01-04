@@ -863,6 +863,7 @@ def main() -> int:
         progress_interval = max(1, frame_total // 20)
 
         conn.execute("BEGIN")
+        print(f"[mkv_ingest] frames: 0/{frame_total} kept=0", flush=True)
         for idx, frame_path in enumerate(frame_paths, start=1):
             frame_index = frame_index_from_path(frame_path)
             if frame_index is None:
