@@ -480,7 +480,7 @@ def delete_existing_video(conn: sqlite3.Connection, video_chunk_id: int, video_p
     conn.commit()
 
 
-def extract_frames(ffmpeg: str, video_path: Path, dest_dir: Path) -> List[Path]:
+def extract_frames(ffmpeg: str, video_path: Path, dest_dir: Path, total_hint: Optional[int] = None) -> List[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     pattern = dest_dir / "frame_%06d.png"
     cmd = [
@@ -492,11 +492,39 @@ def extract_frames(ffmpeg: str, video_path: Path, dest_dir: Path) -> List[Path]:
         str(video_path),
         "-vsync",
         "0",
+        "-progress",
+        "pipe:1",
+        "-nostats",
         str(pattern),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    report_interval = max(1, (total_hint or 0) // 20) if total_hint else 200
+    last_reported = 0
+    if proc.stdout:
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("frame="):
+                try:
+                    current = int(line.split("=", 1)[1])
+                except ValueError:
+                    continue
+                if total_hint:
+                    if current - last_reported >= report_interval or current >= total_hint:
+                        print(f"[mkv_ingest] extract: {current}/{total_hint}")
+                        last_reported = current
+                else:
+                    if current - last_reported >= report_interval:
+                        print(f"[mkv_ingest] extract: {current}")
+                        last_reported = current
+            if total_hint and line.startswith("progress=") and line.endswith("end") and last_reported < total_hint:
+                print(f"[mkv_ingest] extract: {total_hint}/{total_hint}")
+                last_reported = total_hint
+    stderr = proc.stderr.read().strip() if proc.stderr else ""
+    proc.wait()
     if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg frame extraction failed: {proc.stderr.strip()}")
+        raise RuntimeError(f"ffmpeg frame extraction failed: {stderr}")
     frames = sorted(dest_dir.glob("frame_*.png"))
     if not frames:
         raise RuntimeError("Frame extraction produced no files.")
@@ -810,9 +838,16 @@ def main() -> int:
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"[mkv_ingest] saving frames to: {output_dir}")
 
+    frame_total_hint = frame_count_hint
+    if not frame_total_hint and fps > 0 and duration > 0:
+        frame_total_hint = int(duration * fps)
+    if frame_total_hint is not None and frame_total_hint < 1:
+        frame_total_hint = None
+
     with tempfile.TemporaryDirectory(prefix="mkv_frames_") as tmpdir:
         frame_dir = Path(tmpdir)
-        frame_paths = extract_frames(ffmpeg, video_path, frame_dir)
+        print("[mkv_ingest] extracting frames...")
+        frame_paths = extract_frames(ffmpeg, video_path, frame_dir, frame_total_hint)
         frame_total = len(frame_paths)
         print(f"[mkv_ingest] extracted {frame_total} frames")
 

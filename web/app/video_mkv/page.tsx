@@ -72,6 +72,7 @@ type IngestProgress = {
   done: number;
   total: number;
   kept?: number | null;
+  phase: "extract" | "process";
 };
 
 const API_BASE = (
@@ -753,13 +754,22 @@ export default function VideoMkvPage() {
               if (typeof line === "string") {
                 setIngestLogs((prev) => [...prev, line].slice(-200));
                 const lower = line.toLowerCase();
+                const extractMatch = line.match(/extract:\s*(\d+)\s*\/\s*(\d+)/i);
+                if (extractMatch) {
+                  const rawDone = Number(extractMatch[1]);
+                  const total = Number(extractMatch[2]);
+                  const done = Number.isFinite(rawDone) && Number.isFinite(total) ? Math.min(rawDone, total) : rawDone;
+                  if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
+                    setIngestProgress({ done, total, kept: null, phase: "extract" });
+                  }
+                }
                 const progressMatch = line.match(/frames:\s*(\d+)\s*\/\s*(\d+)(?:\s+kept=(\d+))?/i);
                 if (progressMatch) {
                   const done = Number(progressMatch[1]);
                   const total = Number(progressMatch[2]);
                   const kept = progressMatch[3] ? Number(progressMatch[3]) : null;
                   if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
-                    setIngestProgress({ done, total, kept: kept ?? null });
+                    setIngestProgress({ done, total, kept: kept ?? null, phase: "process" });
                   }
                 }
                 if (lower.includes("transcribing audio")) {
@@ -1743,7 +1753,9 @@ export default function VideoMkvPage() {
           )}
           {ingestProgress && uploadPhase === "ingesting" && (
             <div style={{ color: "#94a3b8", fontSize: 12 }}>
-              Frames processed {ingestProgress.done}/{ingestProgress.total} ({ingestPercent ?? 0}%)
+              {ingestProgress.phase === "extract" ? "Extracting frames" : "Processing frames"} {ingestProgress.done}/
+              {ingestProgress.total} ({ingestPercent ?? 0}%)
+              {ingestProgress.phase === "process" && ingestProgress.kept != null ? `, kept ${ingestProgress.kept}` : ""}
             </div>
           )}
           {ingestProgress && uploadPhase === "ingesting" && (
@@ -1760,7 +1772,7 @@ export default function VideoMkvPage() {
                 style={{
                   width: `${ingestPercent ?? 0}%`,
                   height: "100%",
-                  background: "#34d399",
+                  background: ingestProgress.phase === "extract" ? "#38bdf8" : "#34d399",
                   transition: "width 0.2s ease",
                 }}
               />

@@ -37,7 +37,13 @@ function detectStage(line: string): string | null {
   if (lower.includes("transcription saved") || lower.includes("transcription already exists")) {
     return "transcribed";
   }
-  if (lower.includes("extracted") || lower.includes("saving frames") || lower.includes("kept")) {
+  if (
+    lower.includes("extracting") ||
+    lower.includes("extract:") ||
+    lower.includes("extracted") ||
+    lower.includes("saving frames") ||
+    lower.includes("kept")
+  ) {
     return "processing";
   }
   if (lower.includes("video:")) {
