@@ -98,7 +98,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       const py = process.env.PYTHON || "python";
       const args = [INGEST_SCRIPT, "--video", videoPath];
       if (fast) {
-        const fps = maxFps && maxFps > 0 ? maxFps : 2;
+        const fps = maxFps && maxFps > 0 ? maxFps : 1;
         const dedup = dedupThreshold && dedupThreshold > 0 ? dedupThreshold : 0.02;
         args.push("--max-fps", String(fps), "--dedup-threshold", String(dedup));
       }

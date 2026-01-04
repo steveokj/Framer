@@ -530,7 +530,7 @@ export default function VideoMkvPage() {
   const [uploadFileName, setUploadFileName] = useState<string | null>(null);
   const [ingestAfterUpload, setIngestAfterUpload] = useState(true);
   const [fastIngest, setFastIngest] = useState(true);
-  const [fastIngestFps, setFastIngestFps] = useState(2);
+  const [fastIngestFps, setFastIngestFps] = useState(1);
   const [ingestPhase, setIngestPhase] = useState<IngestPhase>("idle");
   const [ingestLogs, setIngestLogs] = useState<string[]>([]);
   const [ingestProgress, setIngestProgress] = useState<IngestProgress | null>(null);

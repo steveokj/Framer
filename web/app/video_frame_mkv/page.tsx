@@ -216,6 +216,10 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(precision)} ${units[idx]}`;
 }
 
+function stripTranscriptTimestamp(text: string): string {
+  return text.replace(/^\s*\[\s*\d+(\.\d+)?s?\s*->\s*\d+(\.\d+)?s?\s*\]\s*/i, "");
+}
+
 function buildTranscriptSegments(text: string | null | undefined, duration: number | null): Segment[] {
   if (!text) {
     return [];
@@ -659,6 +663,15 @@ function RestartIcon({ size = 20, color = "#f8fafc" }: IconProps) {
     );
   }
 
+function SubtitleIcon({ size = 20, color = "#f8fafc" }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x={3} y={5} width={18} height={14} rx={2} stroke={color} strokeWidth={1.6} />
+      <path d="M7 10h4M13 10h4M7 14h6M15 14h2" stroke={color} strokeWidth={1.6} strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function FrameCarouselIcon({ size = 20, color = "#f8fafc" }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -687,7 +700,7 @@ export default function VideoFrameMkvPage() {
   const [uploadFileName, setUploadFileName] = useState<string | null>(null);
   const [ingestAfterUpload, setIngestAfterUpload] = useState(true);
   const [fastIngest, setFastIngest] = useState(true);
-  const [fastIngestFps, setFastIngestFps] = useState(2);
+  const [fastIngestFps, setFastIngestFps] = useState(1);
   const [ingestPhase, setIngestPhase] = useState<IngestPhase>("idle");
   const [ingestLogs, setIngestLogs] = useState<string[]>([]);
   const [ingestProgress, setIngestProgress] = useState<IngestProgress | null>(null);
@@ -713,6 +726,7 @@ export default function VideoFrameMkvPage() {
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
+  const [captionsEnabled, setCaptionsEnabled] = useState(false);
   const [frameOverlayOpen, setFrameOverlayOpen] = useState(false);
   const [decoderError, setDecoderError] = useState<string | null>(null);
   const [selectedFrameId, setSelectedFrameId] = useState<number | null>(null);
@@ -2210,6 +2224,7 @@ export default function VideoFrameMkvPage() {
     () => segments.find((seg) => currentTime >= seg.start && currentTime < seg.end) || null,
     [segments, currentTime],
   );
+  const activeSegmentText = activeSegment ? stripTranscriptTimestamp(activeSegment.text) : "";
 
   // ========== SEEK TO TRANSCRIPT SEGMENT ==========
   const handleSeekToSegment = (segment: Segment) => {
@@ -2630,7 +2645,14 @@ export default function VideoFrameMkvPage() {
 
       <section style={{ display: "grid", gap: 16 }}>
         <div
-          style={{ position: "relative", background: "#111", minHeight: 320, borderRadius: 12, overflow: "hidden" }}
+          style={{
+            position: "relative",
+            background: "#111",
+            minHeight: 240,
+            height: "min(52vh, 420px)",
+            borderRadius: 12,
+            overflow: "hidden",
+          }}
           onMouseMove={handlePlayerPointerMove}
           onMouseLeave={handlePlayerPointerLeave}
           onTouchStart={handlePlayerPointerMove}
@@ -2648,6 +2670,27 @@ export default function VideoFrameMkvPage() {
                 onLoadedData={() => setVideoLoadError(null)}
                 playsInline
               />
+              {captionsEnabled && activeSegmentText && (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: "8%",
+                    right: "8%",
+                    bottom: 64,
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    background: "rgba(15, 23, 42, 0.75)",
+                    color: "#f8fafc",
+                    textAlign: "center",
+                    fontSize: 16,
+                    lineHeight: 1.4,
+                    textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+                    pointerEvents: "none",
+                  }}
+                >
+                  {activeSegmentText}
+                </div>
+              )}
               <div
                 style={{
                   position: "absolute",
@@ -2680,6 +2723,26 @@ export default function VideoFrameMkvPage() {
                     }}
                   >
                     {isPlaying ? <PauseIcon /> : <PlayIcon />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCaptionsEnabled((prev) => !prev)}
+                    aria-label={captionsEnabled ? "Disable subtitles" : "Enable subtitles"}
+                    title={captionsEnabled ? "Disable subtitles" : "Enable subtitles"}
+                    style={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: "50%",
+                      border: "none",
+                      background: captionsEnabled ? "rgba(56, 189, 248, 0.8)" : "rgba(15, 23, 42, 0.55)",
+                      color: captionsEnabled ? "#0f172a" : "#f8fafc",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <SubtitleIcon color={captionsEnabled ? "#0f172a" : "#f8fafc"} />
                   </button>
                   <button
                     type="button"
@@ -2776,7 +2839,7 @@ export default function VideoFrameMkvPage() {
           <div>
             <strong>Current transcript:</strong>
             <div style={{ marginTop: 8, minHeight: 40 }}>
-              {activeSegment ? activeSegment.text : loadingTranscript ? "Loading..." : "--"}
+              {activeSegmentText ? activeSegmentText : loadingTranscript ? "Loading..." : "--"}
             </div>
           </div>
         </div>
@@ -2794,6 +2857,7 @@ export default function VideoFrameMkvPage() {
           ) : (
             segments.map((segment) => {
               const isActive = activeSegment?.id === segment.id;
+              const displayText = stripTranscriptTimestamp(segment.text);
               return (
                 <button
                   key={segment.id}
@@ -2815,7 +2879,7 @@ export default function VideoFrameMkvPage() {
                   <span style={{ fontVariantNumeric: "tabular-nums" }}>
                     {formatTime(segment.start)} - {formatTime(segment.end)}
                   </span>
-                  <span>{segment.text}</span>
+                  <span>{displayText}</span>
                 </button>
               );
             })
