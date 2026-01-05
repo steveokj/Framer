@@ -510,6 +510,7 @@ type ClipCardProps = {
   eventsForClip: EventView[];
   ingestState: ClipIngestState | null;
   onIngestFrames: (clip: Clip) => void;
+  detailsMaxWidth: number;
 };
 
 function ClipCard({
@@ -521,6 +522,7 @@ function ClipCard({
   eventsForClip,
   ingestState,
   onIngestFrames,
+  detailsMaxWidth,
 }: ClipCardProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hideControlsTimeoutRef = useRef<number | null>(null);
@@ -530,7 +532,13 @@ function ClipCard({
   const [controlsVisible, setControlsVisible] = useState(true);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const [videoError, setVideoError] = useState<string | null>(null);
-  const clipDuration = Math.max(0.05, clip.end_seconds - clip.start_seconds);
+  const effectiveDuration = useMemo(() => {
+    if (videoDuration != null && Number.isFinite(videoDuration)) {
+      return Math.min(clip.end_seconds, videoDuration);
+    }
+    return clip.end_seconds;
+  }, [clip.end_seconds, videoDuration]);
+  const clipDuration = Math.max(0.05, effectiveDuration - clip.start_seconds);
   const timelineSeconds = clip.start_seconds + clipTime;
   const formattedCurrentTime = useMemo(() => formatTime(clipTime), [clipTime]);
   const formattedTotalTime = useMemo(() => formatTime(clipDuration), [clipDuration]);
@@ -587,7 +595,8 @@ function ClipCard({
       const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : videoDuration;
       let nextTime = Math.max(0, targetTimeline);
       if (duration != null && Number.isFinite(duration)) {
-        nextTime = Math.min(nextTime, duration);
+        const safeEnd = Math.min(clip.end_seconds, duration);
+        nextTime = Math.min(nextTime, safeEnd);
       }
       video.currentTime = nextTime;
       const relative = Math.max(0, targetTimeline - clip.start_seconds);
@@ -656,12 +665,9 @@ function ClipCard({
     }
     const duration = Number.isFinite(video.duration) ? video.duration : videoDuration;
     const currentTimeline = video.currentTime;
-    if (currentTimeline >= clip.end_seconds - 0.01) {
-      let endVideo = clip.end_seconds;
-      if (duration != null && Number.isFinite(duration)) {
-        endVideo = Math.min(endVideo, duration);
-      }
-      video.currentTime = Math.max(0, endVideo);
+    const safeEnd = duration != null && Number.isFinite(duration) ? Math.min(clip.end_seconds, duration) : clip.end_seconds;
+    if (currentTimeline >= safeEnd - 0.01) {
+      video.currentTime = Math.max(0, safeEnd);
       video.pause();
       setIsPlaying(false);
       setClipTime(clipDuration);
@@ -713,12 +719,14 @@ function ClipCard({
         background: "rgba(11, 17, 32, 0.9)",
         display: "grid",
         gap: 12,
+        gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)",
+        alignItems: "start",
       }}
     >
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", gridColumn: "1 / -1" }}>
         <strong style={{ fontSize: 18 }}>{clip.window_name}</strong>
         <span style={{ color: "#94a3b8" }}>
-          {formatTime(clip.start_seconds)} - {formatTime(clip.end_seconds)}
+          {formatTime(clip.start_seconds)} - {formatTime(effectiveDuration)}
         </span>
         <span style={{ color: "#64748b" }}>{displayEvents.length} events</span>
       </div>
@@ -731,6 +739,7 @@ function ClipCard({
           height: "min(45vh, 320px)",
           borderRadius: 12,
           overflow: "hidden",
+          gridColumn: "1 / 2",
         }}
         onMouseMove={handlePlayerPointerMove}
         onMouseLeave={handlePlayerPointerLeave}
@@ -894,9 +903,9 @@ function ClipCard({
           <div style={{ padding: 32, color: "#eee" }}>Enter a video path to start playback.</div>
         )}
       </div>
-      {videoError && <div style={{ color: "#fca5a5" }}>{videoError}</div>}
+      {videoError && <div style={{ color: "#fca5a5", gridColumn: "1 / 2" }}>{videoError}</div>}
       {ingestState && ingestState.phase !== "idle" && (
-        <div style={{ display: "grid", gap: 6, color: "#cbd5f5" }}>
+        <div style={{ display: "grid", gap: 6, color: "#cbd5f5", gridColumn: "1 / 2" }}>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
             <strong>Frames:</strong>
             <span>{ingestLabel}</span>
@@ -925,6 +934,17 @@ function ClipCard({
         </div>
       )}
 
+      <div
+        style={{
+          gridColumn: "2 / 3",
+          gridRow: "2 / span 3",
+          justifySelf: "end",
+          width: "100%",
+          maxWidth: detailsMaxWidth,
+          display: "grid",
+          gap: 12,
+        }}
+      >
       <div style={{ display: "grid", gap: 10 }}>
         <strong>Events</strong>
         {displayEvents.length === 0 ? (
@@ -1006,6 +1026,7 @@ function ClipCard({
           </div>
         )}
       </div>
+      </div>
     </div>
   );
 }
@@ -1032,6 +1053,7 @@ export default function WindowsEventsPage() {
   const [searchEvents, setSearchEvents] = useState(true);
   const [searchTranscripts, setSearchTranscripts] = useState(true);
   const [enabledEventTypes, setEnabledEventTypes] = useState<string[]>([...EVENT_TYPE_PRESET]);
+  const [detailsMaxWidth, setDetailsMaxWidth] = useState(420);
                                                                                                                  
   const { url: videoUrl, warning: videoWarning } = useMemo(() => buildFileUrl(videoPath), [videoPath]);          
   const serverHint = API_BASE || "http://localhost:8001";                                                        
@@ -1738,6 +1760,19 @@ export default function WindowsEventsPage() {
             <span style={{ color: "#94a3b8" }}>{filteredEvents.length} events</span>
             {loadingEvents && <span style={{ color: "#94a3b8" }}>Loading events...</span>}
             {eventError && <span style={{ color: "#fca5a5" }}>{eventError}</span>}
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto", color: "#94a3b8" }}>
+              <span>Details width</span>
+              <input
+                type="range"
+                min={280}
+                max={640}
+                step={20}
+                value={detailsMaxWidth}
+                onChange={(e) => setDetailsMaxWidth(Number(e.target.value || "420"))}
+                style={{ accentColor: "#38bdf8" }}
+              />
+              <span style={{ minWidth: 48 }}>{detailsMaxWidth}px</span>
+            </label>
           </div>
           {filteredClips.length === 0 ? (
             <div style={{ color: "#94a3b8" }}>No window clips match this search.</div>
@@ -1757,6 +1792,7 @@ export default function WindowsEventsPage() {
                     eventsForClip={eventsForClip}
                     ingestState={clipIngest[clip.id] ?? null}
                     onIngestFrames={startClipIngest}
+                    detailsMaxWidth={detailsMaxWidth}
                   />
                 );
               })}
