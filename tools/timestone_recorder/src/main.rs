@@ -27,13 +27,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, UIA_CONTROLTYPE_ID, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    CUIAutomation, IUIAutomation, SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK, UIA_CONTROLTYPE_ID,
+    UIA_DocumentControlTypeId, UIA_EditControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, PostQuitMessage, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK,
-    KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    GetWindowThreadProcessId, PostQuitMessage, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, OBJID_WINDOW,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP,
 };
 
@@ -53,6 +55,10 @@ thread_local! {
 struct RecorderConfig {
     mouse_hz: u64,
     snapshot_hz: u64,
+    emit_snapshots: bool,
+    emit_mouse_move: bool,
+    emit_mouse_scroll: bool,
+    window_poll_hz: u64,
     capture_raw_keys: bool,
     obs_video_path: Option<String>,
     safe_text_only: bool,
@@ -67,6 +73,10 @@ impl Default for RecorderConfig {
         Self {
             mouse_hz: 30,
             snapshot_hz: 1,
+            emit_snapshots: false,
+            emit_mouse_move: false,
+            emit_mouse_scroll: false,
+            window_poll_hz: 0,
             capture_raw_keys: false,
             obs_video_path: None,
             safe_text_only: true,
@@ -112,6 +122,8 @@ struct RecorderState {
     mouse_move_interval_ms: i64,
     last_mouse_move_ms: AtomicI64,
     capture_raw_keys: bool,
+    emit_mouse_move: bool,
+    emit_mouse_scroll: bool,
     pressed_keys: Mutex<HashSet<u32>>,
     safe_text_only: bool,
     allowlist_processes: Vec<String>,
@@ -119,6 +131,7 @@ struct RecorderState {
     text_flush_ms: i64,
     max_text_len: usize,
     text_buffer: Mutex<TextBuffer>,
+    window_tracker: Mutex<WindowTracker>,
 }
 
 #[derive(Serialize, Clone, PartialEq)]
@@ -259,6 +272,8 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         mouse_move_interval_ms: (1000 / config.mouse_hz.max(1)) as i64,
         last_mouse_move_ms: AtomicI64::new(-1),
         capture_raw_keys: config.capture_raw_keys,
+        emit_mouse_move: config.emit_mouse_move,
+        emit_mouse_scroll: config.emit_mouse_scroll,
         pressed_keys: Mutex::new(HashSet::new()),
         safe_text_only: config.safe_text_only,
         allowlist_processes: config.allowlist_processes.clone(),
@@ -268,6 +283,10 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         text_buffer: Mutex::new(TextBuffer {
             text: String::new(),
             last_ts_ms: 0,
+        }),
+        window_tracker: Mutex::new(WindowTracker {
+            last_hwnd: HWND(0),
+            last_rect: None,
         }),
     });
     let _ = STATE.set(state.clone());
@@ -290,9 +309,28 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     send_session_event(&state, "session_start", json!({ "note": "manual_start" }));
 
     let stop_signal_path = base_dir.join(STOP_FILE);
-    let snapshot_handle = spawn_snapshot_loop(state.clone(), stop_signal_path, shutdown.clone(), config.snapshot_hz);
+    let stop_handle = spawn_stop_watcher(state.clone(), stop_signal_path, shutdown.clone());
+    let snapshot_handle = if config.emit_snapshots {
+        Some(spawn_snapshot_loop(
+            state.clone(),
+            shutdown.clone(),
+            config.snapshot_hz,
+        ))
+    } else {
+        None
+    };
+    let window_poll_handle = if config.window_poll_hz > 0 {
+        Some(spawn_window_poll_loop(
+            state.clone(),
+            shutdown.clone(),
+            config.window_poll_hz,
+        ))
+    } else {
+        None
+    };
 
     let (mouse_hook, keyboard_hook) = install_hooks()?;
+    let (foreground_hook, location_hook) = install_window_event_hooks()?;
 
     unsafe {
         let mut msg = MSG::default();
@@ -311,9 +349,17 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     unsafe {
         let _ = UnhookWindowsHookEx(mouse_hook);
         let _ = UnhookWindowsHookEx(keyboard_hook);
+        let _ = UnhookWinEvent(foreground_hook);
+        let _ = UnhookWinEvent(location_hook);
     }
 
-    snapshot_handle.join().ok();
+    stop_handle.join().ok();
+    if let Some(handle) = snapshot_handle {
+        handle.join().ok();
+    }
+    if let Some(handle) = window_poll_handle {
+        handle.join().ok();
+    }
     writer_handle.join().ok();
     let _ = fs::remove_file(lock_path);
     Ok(())
@@ -439,6 +485,7 @@ fn apply_overrides(config: &mut RecorderConfig, overrides: &CliOverrides) {
 fn normalize_config(mut config: RecorderConfig) -> RecorderConfig {
     config.mouse_hz = config.mouse_hz.max(1);
     config.snapshot_hz = config.snapshot_hz.max(1);
+    config.window_poll_hz = config.window_poll_hz.max(0);
     config.text_flush_ms = config.text_flush_ms.max(250);
     if config.max_text_len < 16 {
         config.max_text_len = 16;
@@ -466,16 +513,13 @@ fn normalize_process_list(list: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn spawn_snapshot_loop(
+fn spawn_stop_watcher(
     state: Arc<RecorderState>,
     stop_path: PathBuf,
     shutdown: Arc<AtomicBool>,
-    snapshot_hz: u64,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let mut last_hwnd = HWND(0);
-        let mut last_rect: Option<RectInfo> = None;
-        let interval = Duration::from_millis(1000 / snapshot_hz.max(1));
+        let interval = Duration::from_millis(200);
         while !shutdown.load(Ordering::SeqCst) {
             if stop_path.exists() {
                 let _ = fs::remove_file(&stop_path);
@@ -486,50 +530,37 @@ fn spawn_snapshot_loop(
                 }
                 break;
             }
-
             flush_text_buffer_if_stale(&state, "idle_timeout");
+            thread::sleep(interval);
+        }
+    })
+}
 
+fn spawn_snapshot_loop(
+    state: Arc<RecorderState>,
+    shutdown: Arc<AtomicBool>,
+    snapshot_hz: u64,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let interval = Duration::from_millis(1000 / snapshot_hz.max(1));
+        while !shutdown.load(Ordering::SeqCst) {
             if let Some(snapshot) = build_snapshot(&state) {
                 state.sender.try_send(snapshot).ok();
             }
+            thread::sleep(interval);
+        }
+    })
+}
 
-            if let Some((hwnd, window_info)) = active_window_info() {
-                if hwnd != last_hwnd {
-                    last_hwnd = hwnd;
-                    flush_text_buffer_with_window(&state, Some(window_info.clone()), "window_change");
-                    let event = EventRecord {
-                        session_id: state.session_id.clone(),
-                        ts_wall_ms: now_wall_ms(),
-                        ts_mono_ms: now_mono_ms(&state),
-                        event_type: "active_window_changed".to_string(),
-                        process_name: window_info.process_name.clone(),
-                        window_title: Some(window_info.title.clone()),
-                        window_class: Some(window_info.class_name.clone()),
-                        window_rect: window_info.rect.clone(),
-                        mouse: None,
-                        payload: json!({}),
-                    };
-                    state.sender.try_send(event).ok();
-                }
-
-                if window_info.rect != last_rect {
-                    last_rect = window_info.rect.clone();
-                    let event = EventRecord {
-                        session_id: state.session_id.clone(),
-                        ts_wall_ms: now_wall_ms(),
-                        ts_mono_ms: now_mono_ms(&state),
-                        event_type: "window_rect_changed".to_string(),
-                        process_name: window_info.process_name.clone(),
-                        window_title: Some(window_info.title.clone()),
-                        window_class: Some(window_info.class_name.clone()),
-                        window_rect: window_info.rect.clone(),
-                        mouse: None,
-                        payload: json!({}),
-                    };
-                    state.sender.try_send(event).ok();
-                }
-            }
-
+fn spawn_window_poll_loop(
+    state: Arc<RecorderState>,
+    shutdown: Arc<AtomicBool>,
+    window_poll_hz: u64,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let interval = Duration::from_millis(1000 / window_poll_hz.max(1));
+        while !shutdown.load(Ordering::SeqCst) {
+            poll_active_window(&state);
             thread::sleep(interval);
         }
     })
@@ -550,6 +581,39 @@ fn install_hooks() -> Result<(HHOOK, HHOOK)> {
             anyhow::bail!("Failed to install keyboard hook");
         }
         Ok((mouse_hook, keyboard_hook))
+    }
+}
+
+fn install_window_event_hooks() -> Result<(HWINEVENTHOOK, HWINEVENTHOOK)> {
+    unsafe {
+        let foreground = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            HMODULE::default(),
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if foreground.0 == 0 {
+            anyhow::bail!("Failed to install foreground event hook");
+        }
+
+        let location = SetWinEventHook(
+            EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_LOCATIONCHANGE,
+            HMODULE::default(),
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if location.0 == 0 {
+            let _ = UnhookWinEvent(foreground);
+            anyhow::bail!("Failed to install location event hook");
+        }
+
+        Ok((foreground, location))
     }
 }
 
@@ -611,6 +675,11 @@ struct WindowInfo {
     process_name: Option<String>,
 }
 
+struct WindowTracker {
+    last_hwnd: HWND,
+    last_rect: Option<RectInfo>,
+}
+
 fn cursor_position() -> Option<(i32, i32)> {
     unsafe {
         let mut pt = POINT::default();
@@ -625,23 +694,24 @@ fn cursor_position() -> Option<(i32, i32)> {
 fn active_window_info() -> Option<(HWND, WindowInfo)> {
     unsafe {
         let hwnd = GetForegroundWindow();
-        if hwnd.0 == 0 {
-            return None;
-        }
-        let title = get_window_text(hwnd);
-        let class_name = get_window_class(hwnd);
-        let rect = get_window_rect(hwnd);
-        let process_name = get_process_name(hwnd);
-        Some((
-            hwnd,
-            WindowInfo {
-                title,
-                class_name,
-                rect,
-                process_name,
-            },
-        ))
+        window_info_for_hwnd(hwnd).map(|info| (hwnd, info))
     }
+}
+
+fn window_info_for_hwnd(hwnd: HWND) -> Option<WindowInfo> {
+    if hwnd.0 == 0 {
+        return None;
+    }
+    let title = get_window_text(hwnd);
+    let class_name = get_window_class(hwnd);
+    let rect = get_window_rect(hwnd);
+    let process_name = get_process_name(hwnd);
+    Some(WindowInfo {
+        title,
+        class_name,
+        rect,
+        process_name,
+    })
 }
 
 fn get_window_text(hwnd: HWND) -> String {
@@ -715,6 +785,97 @@ fn get_process_name(hwnd: HWND) -> Option<String> {
     }
 }
 
+fn poll_active_window(state: &RecorderState) {
+    if let Some((hwnd, window_info)) = active_window_info() {
+        update_window_events(state, hwnd, window_info);
+    }
+}
+
+fn update_window_events(state: &RecorderState, hwnd: HWND, window_info: WindowInfo) {
+    let (is_new, rect_changed) = {
+        let mut tracker = state.window_tracker.lock().unwrap();
+        let is_new = hwnd != tracker.last_hwnd;
+        let rect_changed = is_new || window_info.rect != tracker.last_rect;
+        tracker.last_hwnd = hwnd;
+        tracker.last_rect = window_info.rect.clone();
+        (is_new, rect_changed)
+    };
+
+    if is_new {
+        flush_text_buffer_with_window(state, Some(window_info.clone()), "window_change");
+        send_active_window_changed(state, &window_info);
+    }
+    if rect_changed {
+        send_window_rect_changed(state, &window_info);
+    }
+}
+
+fn send_active_window_changed(state: &RecorderState, window_info: &WindowInfo) {
+    let event = EventRecord {
+        session_id: state.session_id.clone(),
+        ts_wall_ms: now_wall_ms(),
+        ts_mono_ms: now_mono_ms(state),
+        event_type: "active_window_changed".to_string(),
+        process_name: window_info.process_name.clone(),
+        window_title: Some(window_info.title.clone()),
+        window_class: Some(window_info.class_name.clone()),
+        window_rect: window_info.rect.clone(),
+        mouse: None,
+        payload: json!({}),
+    };
+    state.sender.try_send(event).ok();
+}
+
+fn send_window_rect_changed(state: &RecorderState, window_info: &WindowInfo) {
+    let event = EventRecord {
+        session_id: state.session_id.clone(),
+        ts_wall_ms: now_wall_ms(),
+        ts_mono_ms: now_mono_ms(state),
+        event_type: "window_rect_changed".to_string(),
+        process_name: window_info.process_name.clone(),
+        window_title: Some(window_info.title.clone()),
+        window_class: Some(window_info.class_name.clone()),
+        window_rect: window_info.rect.clone(),
+        mouse: None,
+        payload: json!({}),
+    };
+    state.sender.try_send(event).ok();
+}
+
+unsafe extern "system" fn win_event_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _id_child: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    if id_object != OBJID_WINDOW.0 {
+        return;
+    }
+    let Some(state) = STATE.get() else {
+        return;
+    };
+    match event {
+        EVENT_SYSTEM_FOREGROUND => {
+            if let Some(window_info) = window_info_for_hwnd(hwnd) {
+                update_window_events(state, hwnd, window_info);
+            }
+        }
+        EVENT_OBJECT_LOCATIONCHANGE => {
+            let foreground = GetForegroundWindow();
+            if hwnd != foreground {
+                return;
+            }
+            if let Some(window_info) = window_info_for_hwnd(hwnd) {
+                update_window_events(state, hwnd, window_info);
+            }
+        }
+        _ => {}
+    }
+}
+
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == 0 {
         if let Some(state) = STATE.get() {
@@ -735,6 +896,12 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
             };
 
             if event_type != "unknown" {
+                if event_type == "mouse_move" && !state.emit_mouse_move {
+                    return CallNextHookEx(HHOOK(0), code, wparam, lparam);
+                }
+                if event_type == "mouse_scroll" && !state.emit_mouse_scroll {
+                    return CallNextHookEx(HHOOK(0), code, wparam, lparam);
+                }
                 let mono_ms = now_mono_ms(state);
                 if event_type == "mouse_move" {
                     let last = state.last_mouse_move_ms.load(Ordering::SeqCst);
