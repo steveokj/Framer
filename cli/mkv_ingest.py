@@ -86,6 +86,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ffprobe", help="Override ffprobe path.")
     parser.add_argument("--max-fps", type=float, help="Cap extracted frames per second for faster ingest.")
     parser.add_argument("--overwrite", action="store_true", help="Delete existing records for this video.")
+    parser.add_argument("--clip-start", type=float, help="Start time in seconds for partial ingest.")
+    parser.add_argument("--clip-end", type=float, help="End time in seconds for partial ingest.")
+    parser.add_argument("--skip-metadata", action="store_true", help="Skip updating video_metadata for partial ingest.")
     return parser.parse_args()
 
 
@@ -487,6 +490,8 @@ def extract_frames(
     dest_dir: Path,
     total_hint: Optional[int] = None,
     max_fps: Optional[float] = None,
+    clip_start: Optional[float] = None,
+    clip_end: Optional[float] = None,
 ) -> List[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     pattern = dest_dir / "frame_%06d.png"
@@ -497,6 +502,15 @@ def extract_frames(
         "error",
         "-i",
         str(video_path),
+    ]
+    if clip_start is not None and clip_start > 0:
+        cmd += ["-ss", f"{clip_start:.3f}"]
+    if clip_end is not None and clip_end > 0:
+        if clip_start is not None and clip_end > clip_start:
+            cmd += ["-t", f"{(clip_end - clip_start):.3f}"]
+        else:
+            cmd += ["-to", f"{clip_end:.3f}"]
+    cmd += [
         "-vsync",
         "0",
         "-progress",
@@ -837,6 +851,22 @@ def main() -> int:
     duration = meta.get("duration") or 0.0
     width = meta.get("width") or 0
     height = meta.get("height") or 0
+    clip_start = args.clip_start if args.clip_start is not None and args.clip_start >= 0 else None
+    clip_end = args.clip_end if args.clip_end is not None and args.clip_end > 0 else None
+    if clip_end is not None and clip_start is None:
+        clip_start = 0.0
+    if clip_end is not None and clip_start is not None and clip_end <= clip_start:
+        raise SystemExit("--clip-end must be greater than --clip-start")
+    clip_mode = clip_start is not None or clip_end is not None
+    skip_metadata = bool(args.skip_metadata or clip_mode)
+    effective_duration = duration
+    if clip_mode:
+        if clip_start is None:
+            clip_start = 0.0
+        if clip_end is not None:
+            effective_duration = max(clip_end - clip_start, 0.0)
+        else:
+            effective_duration = max(duration - clip_start, 0.0)
     frame_count_hint = meta.get("frame_count")
     if fps <= 0.0 and frame_count_hint and duration > 0:
         fps = frame_count_hint / duration
@@ -855,10 +885,10 @@ def main() -> int:
         print(f"[mkv_ingest] saving frames to: {output_dir}", flush=True)
 
     frame_total_hint = frame_count_hint
-    if sample_fps and duration > 0:
-        frame_total_hint = int(duration * sample_fps)
-    elif not frame_total_hint and fps > 0 and duration > 0:
-        frame_total_hint = int(duration * fps)
+    if sample_fps and effective_duration > 0:
+        frame_total_hint = int(effective_duration * sample_fps)
+    elif not frame_total_hint and fps > 0 and effective_duration > 0:
+        frame_total_hint = int(effective_duration * fps)
     if frame_total_hint is not None and frame_total_hint < 1:
         frame_total_hint = None
 
@@ -867,7 +897,15 @@ def main() -> int:
         print("[mkv_ingest] extracting frames...", flush=True)
         if frame_total_hint:
             print(f"[mkv_ingest] extract: 0/{frame_total_hint}", flush=True)
-        frame_paths = extract_frames(ffmpeg, video_path, frame_dir, frame_total_hint, sample_fps)
+        frame_paths = extract_frames(
+            ffmpeg,
+            video_path,
+            frame_dir,
+            frame_total_hint,
+            sample_fps,
+            clip_start,
+            clip_end,
+        )
         frame_total = len(frame_paths)
         print(f"[mkv_ingest] extracted {frame_total} frames", flush=True)
 
@@ -879,6 +917,9 @@ def main() -> int:
         prev_gray: Optional[np.ndarray] = None
         kept_frames = 0
         progress_interval = max(1, frame_total // 20)
+        frame_index_offset = 0
+        if clip_start is not None and clip_start > 0:
+            frame_index_offset = int(clip_start * timestamp_fps)
 
         conn.execute("BEGIN")
         print(f"[mkv_ingest] frames: 0/{frame_total} kept=0", flush=True)
@@ -886,6 +927,7 @@ def main() -> int:
             frame_index = frame_index_from_path(frame_path)
             if frame_index is None:
                 continue
+            global_index = frame_index + frame_index_offset
 
             with Image.open(frame_path) as img:
                 img = img.convert("RGB")
@@ -903,10 +945,10 @@ def main() -> int:
                 prev_gray = gray
                 kept_frames += 1
 
-                frame_ts = start_time + timedelta(seconds=frame_index / max(timestamp_fps, 1e-6))
+                frame_ts = start_time + timedelta(seconds=global_index / max(timestamp_fps, 1e-6))
                 stored_path = None
                 if save_frames and output_dir is not None:
-                    fname = f"frame_{frame_index:06d}.{frame_format}"
+                    fname = f"frame_{global_index:06d}.{frame_format}"
                     stored_path = output_dir / fname
                     if frame_format in {"jpg", "jpeg"}:
                         img.save(
@@ -925,7 +967,7 @@ def main() -> int:
                     """,
                     (
                         video_chunk_id,
-                        frame_index,
+                        global_index,
                         frame_ts.isoformat(),
                         str(stored_path.resolve()) if stored_path else None,
                         "",
@@ -992,25 +1034,26 @@ def main() -> int:
 
         conn.commit()
         print(f"[mkv_ingest] kept {kept_frames} frames (dedup={'on' if dedup_enabled else 'off'})", flush=True)
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO video_metadata (
-                video_chunk_id, fps, duration, width, height, frame_count, kept_frames, creation_time, creation_time_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                video_chunk_id,
-                fps,
-                duration,
-                width,
-                height,
-                len(frame_paths),
-                kept_frames,
-                start_time.isoformat(),
-                creation_source,
-            ),
-        )
-        conn.commit()
+        if not skip_metadata:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO video_metadata (
+                    video_chunk_id, fps, duration, width, height, frame_count, kept_frames, creation_time, creation_time_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    video_chunk_id,
+                    fps,
+                    duration,
+                    width,
+                    height,
+                    len(frame_paths),
+                    kept_frames,
+                    start_time.isoformat(),
+                    creation_source,
+                ),
+            )
+            conn.commit()
 
     if cfg["transcribe_audio"]:
         model_size = cfg["whisper_model_size"]

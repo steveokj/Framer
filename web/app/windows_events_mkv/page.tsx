@@ -72,6 +72,37 @@ type EventView = TimestoneEvent & {
   search_blob: string;
 };
 
+type IngestPhase =
+  | "idle"
+  | "starting"
+  | "ingesting"
+  | "processing"
+  | "transcribing"
+  | "transcribed"
+  | "done"
+  | "error";
+
+type IngestProgress = {
+  done: number;
+  total: number;
+  kept?: number | null;
+  phase: "extract" | "process";
+};
+
+type ClipIngestState = {
+  phase: IngestPhase;
+  progress: IngestProgress | null;
+  error: string | null;
+};
+
+type DisplayEvent = {
+  id: string;
+  timeline_seconds: number;
+  event_type: string;
+  description: string;
+  source: EventView;
+};
+
 const DEFAULT_VIDEO = "";
 const EVENT_TYPE_PRESET = [                                                                                      
   "active_window_changed",                                                                                       
@@ -320,6 +351,91 @@ function describeEvent(event: TimestoneEvent): string {
   }
 }
 
+function keyEventToChar(event: EventView): string | null {
+  if (event.event_type !== "key_down") {
+    return null;
+  }
+  const payload = safeJsonParse(event.payload);
+  const raw = payload?.key ?? payload?.vk;
+  if (raw == null) {
+    return null;
+  }
+  const value = String(raw);
+  if (value.length === 1) {
+    return value;
+  }
+  const upper = value.toUpperCase();
+  if (upper === "SPACE" || upper === "VK_SPACE") {
+    return " ";
+  }
+  if (upper === "TAB" || upper === "VK_TAB") {
+    return "\t";
+  }
+  if (upper === "ENTER" || upper === "VK_RETURN") {
+    return "\n";
+  }
+  return null;
+}
+
+function buildDisplayEvents(events: EventView[]): DisplayEvent[] {
+  if (!events.length) {
+    return [];
+  }
+  const sorted = [...events].sort((a, b) => a.timeline_seconds - b.timeline_seconds);
+  const output: DisplayEvent[] = [];
+  let buffer = "";
+  let bufferStart: EventView | null = null;
+  let lastTime = 0;
+  let lastWindow = "";
+
+  const flushBuffer = () => {
+    if (!bufferStart || !buffer) {
+      buffer = "";
+      bufferStart = null;
+      return;
+    }
+    const displayText = buffer.replace(/\n/g, "\\n").replace(/\t/g, "  ");
+    output.push({
+      id: `typed-${bufferStart.id}`,
+      timeline_seconds: bufferStart.timeline_seconds,
+      event_type: "typed",
+      description: `Typed: ${displayText}`,
+      source: bufferStart,
+    });
+    buffer = "";
+    bufferStart = null;
+  };
+
+  for (const event of sorted) {
+    const char = keyEventToChar(event);
+    const windowKey = event.window_title || event.window_class || event.process_name || "";
+    if (char) {
+      const withinWindow = bufferStart ? windowKey === lastWindow : true;
+      const withinGap = bufferStart ? event.timeline_seconds - lastTime <= 0.7 : true;
+      if (!withinWindow || !withinGap) {
+        flushBuffer();
+      }
+      if (!bufferStart) {
+        bufferStart = event;
+        lastWindow = windowKey;
+      }
+      buffer += char;
+      lastTime = event.timeline_seconds;
+      continue;
+    }
+    flushBuffer();
+    output.push({
+      id: String(event.id),
+      timeline_seconds: event.timeline_seconds,
+      event_type: event.event_type,
+      description: event.description,
+      source: event,
+    });
+  }
+  flushBuffer();
+  return output;
+}
+
 function buildWindowClipsFromEvents(events: EventView[], timelineEnd: number | null, originMs: number | null): Clip[] {
   if (!events.length) {
     return [];
@@ -426,6 +542,16 @@ function SubtitleIcon({ size = 20, color = "#f8fafc" }: IconProps) {
   );
 }
 
+function FrameIcon({ size = 18, color = "#f8fafc" }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x={4} y={6} width={16} height={12} rx={2} stroke={color} strokeWidth={1.6} />
+      <path d="M8 6v12" stroke={color} strokeWidth={1.6} strokeLinecap="round" />
+      <path d="M16 6v12" stroke={color} strokeWidth={1.6} strokeLinecap="round" />
+    </svg>
+  );
+}
+
 type ClipCardProps = {
   clip: Clip;
   videoUrl: string | null;
@@ -434,6 +560,8 @@ type ClipCardProps = {
   transcriptSegments: Segment[];
   transcriptForClip: Segment[];
   eventsForClip: EventView[];
+  ingestState: ClipIngestState | null;
+  onIngestFrames: (clip: Clip) => void;
 };
 
 function ClipCard({
@@ -444,6 +572,8 @@ function ClipCard({
   transcriptSegments,
   transcriptForClip,
   eventsForClip,
+  ingestState,
+  onIngestFrames,
 }: ClipCardProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hideControlsTimeoutRef = useRef<number | null>(null);
@@ -457,6 +587,41 @@ function ClipCard({
   const timelineSeconds = clip.start_seconds + clipTime;
   const formattedCurrentTime = useMemo(() => formatTime(clipTime), [clipTime]);
   const formattedTotalTime = useMemo(() => formatTime(clipDuration), [clipDuration]);
+  const displayEvents = useMemo(() => buildDisplayEvents(eventsForClip), [eventsForClip]);
+  const ingestPercent = useMemo(() => {
+    if (!ingestState?.progress || !ingestState.progress.total) {
+      return null;
+    }
+    return Math.min(100, Math.round((ingestState.progress.done / ingestState.progress.total) * 100));
+  }, [ingestState]);
+  const ingestLabel = useMemo(() => {
+    if (!ingestState) {
+      return "";
+    }
+    switch (ingestState.phase) {
+      case "starting":
+        return "Starting";
+      case "ingesting":
+        return "Preparing";
+      case "processing":
+        return "Processing frames";
+      case "transcribing":
+        return "Transcribing";
+      case "transcribed":
+        return "Transcript ready";
+      case "done":
+        return "Frames ready";
+      case "error":
+        return "Error";
+      default:
+        return "";
+    }
+  }, [ingestState]);
+  const ingestBusy =
+    ingestState &&
+    ingestState.phase !== "idle" &&
+    ingestState.phase !== "done" &&
+    ingestState.phase !== "error";
 
   const activeSegment = useMemo(() => {
     if (!transcriptSegments.length) {
@@ -606,7 +771,30 @@ function ClipCard({
         <span style={{ color: "#94a3b8" }}>
           {formatTime(clip.start_seconds)} - {formatTime(clip.end_seconds)}
         </span>
-        <span style={{ color: "#64748b" }}>{eventsForClip.length} events</span>
+        <span style={{ color: "#64748b" }}>{displayEvents.length} events</span>
+        <button
+          type="button"
+          onClick={() => onIngestFrames(clip)}
+          disabled={!videoUrl || ingestBusy}
+          title="Generate frames for this clip"
+          style={{
+            marginLeft: "auto",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "6px 10px",
+            borderRadius: 999,
+            border: "1px solid",
+            borderColor: ingestBusy ? "#1e293b" : "#38bdf8",
+            background: ingestBusy ? "rgba(15, 23, 42, 0.7)" : "rgba(56, 189, 248, 0.18)",
+            color: ingestBusy ? "#94a3b8" : "#e0f2fe",
+            cursor: ingestBusy ? "not-allowed" : "pointer",
+            fontSize: 12,
+          }}
+        >
+          <FrameIcon color={ingestBusy ? "#94a3b8" : "#e0f2fe"} />
+          Frames
+        </button>
       </div>
 
       <div
@@ -758,21 +946,50 @@ function ClipCard({
         )}
       </div>
       {videoError && <div style={{ color: "#fca5a5" }}>{videoError}</div>}
+      {ingestState && ingestState.phase !== "idle" && (
+        <div style={{ display: "grid", gap: 6, color: "#cbd5f5" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+            <strong>Frames:</strong>
+            <span>{ingestLabel}</span>
+            {ingestPercent != null && <span style={{ color: "#94a3b8" }}>{ingestPercent}%</span>}
+          </div>
+          {ingestState.progress && (
+            <>
+              <div style={{ color: "#94a3b8" }}>
+                {ingestState.progress.phase === "extract"
+                  ? `Extracting frames ${ingestState.progress.done}/${ingestState.progress.total}`
+                  : `Processing frames ${ingestState.progress.done}/${ingestState.progress.total}${ingestState.progress.kept != null ? `, kept ${ingestState.progress.kept}` : ""}`}
+              </div>
+              <div style={{ height: 6, background: "#1e293b", borderRadius: 999, overflow: "hidden" }}>
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${ingestPercent ?? 0}%`,
+                    background: ingestState.progress.phase === "extract" ? "#38bdf8" : "#22c55e",
+                    transition: "width 0.2s ease",
+                  }}
+                />
+              </div>
+            </>
+          )}
+          {ingestState.error && <div style={{ color: "#fca5a5" }}>{ingestState.error}</div>}
+        </div>
+      )}
 
       <div style={{ display: "grid", gap: 10 }}>
         <strong>Events</strong>
-        {eventsForClip.length === 0 ? (
+        {displayEvents.length === 0 ? (
           <div style={{ color: "#94a3b8" }}>No events in this window range.</div>
         ) : (
           <div style={{ display: "grid", gap: 8 }}>
-            {eventsForClip.map((eventItem) => {
+            {displayEvents.map((eventItem) => {
               const relativeTime = Math.max(0, eventItem.timeline_seconds - clip.start_seconds);
               const isEventActive = Math.abs(clipTime - relativeTime) < 0.4;
               return (
                 <button
                   key={eventItem.id}
                   type="button"
-                  onClick={() => handleSeekToEvent(eventItem)}
+                  onClick={() => handleSeekToEvent(eventItem.source)}
                   style={{
                     display: "grid",
                     gridTemplateColumns: "80px 1fr",
@@ -857,9 +1074,10 @@ export default function WindowsEventsPage() {
   const [loadingSessions, setLoadingSessions] = useState(false);                                                 
   const [sessionError, setSessionError] = useState<string | null>(null);                                         
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");                                        
-  const [events, setEvents] = useState<TimestoneEvent[]>([]);                                                    
-  const [loadingEvents, setLoadingEvents] = useState(false);                                                     
-  const [eventError, setEventError] = useState<string | null>(null);                                             
+  const [events, setEvents] = useState<TimestoneEvent[]>([]);
+  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [eventError, setEventError] = useState<string | null>(null);
+  const [clipIngest, setClipIngest] = useState<Record<number, ClipIngestState>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [searchWindows, setSearchWindows] = useState(true);
   const [searchEvents, setSearchEvents] = useState(true);
@@ -1027,6 +1245,122 @@ export default function WindowsEventsPage() {
     }                                                                                                            
     return map;                                                                                                  
   }, [clips, filteredEvents]);                                                                                   
+
+  const updateClipIngest = useCallback((clipId: number, next: Partial<ClipIngestState>) => {
+    setClipIngest((prev) => {
+      const current = prev[clipId] ?? { phase: "idle", progress: null, error: null };
+      return { ...prev, [clipId]: { ...current, ...next } };
+    });
+  }, []);
+
+  const startClipIngest = useCallback(
+    async (clip: Clip) => {
+      if (!videoPath.trim()) {
+        return;
+      }
+      updateClipIngest(clip.id, { phase: "starting", progress: null, error: null });
+      try {
+        const res = await fetch("/api/mkv_ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            videoPath,
+            clipStart: clip.start_seconds,
+            clipEnd: clip.end_seconds,
+            fast: true,
+            maxFps: 1,
+            skipMetadata: true,
+            noTranscribe: true,
+          }),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || `Ingest request failed (status ${res.status})`);
+        }
+        const reader = res.body?.getReader();
+        if (!reader) {
+          throw new Error("Ingest stream unavailable");
+        }
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let doneCode: number | null = null;
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) {
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          let separatorIndex = buffer.indexOf("\n\n");
+          while (separatorIndex !== -1) {
+            const chunk = buffer.slice(0, separatorIndex);
+            buffer = buffer.slice(separatorIndex + 2);
+            const lines = chunk.split("\n");
+            let eventType = "message";
+            let data = "";
+            for (const line of lines) {
+              if (line.startsWith("event:")) {
+                eventType = line.slice(6).trim();
+              } else if (line.startsWith("data:")) {
+                data += line.slice(5).trim();
+              }
+            }
+            if (!data) {
+              separatorIndex = buffer.indexOf("\n\n");
+              continue;
+            }
+            let payload: any = null;
+            try {
+              payload = JSON.parse(data);
+            } catch {
+              payload = { line: data };
+            }
+            if (eventType === "log") {
+              const line = payload?.line;
+              if (typeof line === "string") {
+                const extractMatch = line.match(/extract:\s*(\d+)\s*\/\s*(\d+)/i);
+                if (extractMatch) {
+                  const done = Number(extractMatch[1]);
+                  const total = Number(extractMatch[2]);
+                  if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
+                    updateClipIngest(clip.id, { progress: { done, total, kept: null, phase: "extract" } });
+                  }
+                }
+                const progressMatch = line.match(/frames:\s*(\d+)\s*\/\s*(\d+)(?:\s+kept=(\d+))?/i);
+                if (progressMatch) {
+                  const done = Number(progressMatch[1]);
+                  const total = Number(progressMatch[2]);
+                  const kept = progressMatch[3] ? Number(progressMatch[3]) : null;
+                  if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
+                    updateClipIngest(clip.id, { progress: { done, total, kept: kept ?? null, phase: "process" } });
+                  }
+                }
+              }
+            } else if (eventType === "stage") {
+              const stage = payload?.stage as IngestPhase | undefined;
+              if (stage) {
+                updateClipIngest(clip.id, { phase: stage });
+              }
+            } else if (eventType === "done") {
+              doneCode = Number(payload?.code ?? 0);
+            } else if (eventType === "error") {
+              throw new Error(payload?.message || "Ingest failed");
+            }
+            separatorIndex = buffer.indexOf("\n\n");
+          }
+        }
+        if (doneCode && doneCode !== 0) {
+          throw new Error(`Ingest failed (exit ${doneCode})`);
+        }
+        updateClipIngest(clip.id, { phase: "done" });
+      } catch (err) {
+        updateClipIngest(clip.id, {
+          phase: "error",
+          error: err instanceof Error ? err.message : "Ingest failed",
+        });
+      }
+    },
+    [updateClipIngest, videoPath],
+  );
                                                                                                                  
   const filteredClips = useMemo(() => {                                                                          
     if (!normalizedQuery) {                                                                                      
@@ -1167,12 +1501,6 @@ export default function WindowsEventsPage() {
             ? enabledEventTypes
             : [...enabledEventTypes, "active_window_changed"];
         }
-        if (timelineBounds.first != null) {
-          payload.startMs = timelineBounds.first;
-        }
-        if (timelineBounds.last != null) {
-          payload.endMs = timelineBounds.last;
-        }
         const res = await fetch("/api/timestone_events", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1192,7 +1520,7 @@ export default function WindowsEventsPage() {
       }
     };
     fetchEvents();
-  }, [selectedSessionId, enabledEventTypes, timelineBounds.first, timelineBounds.last]);
+  }, [selectedSessionId, enabledEventTypes]);
                                                                                                 
                                                                                                                  
   const handleUseSessionVideo = useCallback(() => {                                                              
@@ -1456,6 +1784,8 @@ export default function WindowsEventsPage() {
                     transcriptSegments={timelineSegments}
                     transcriptForClip={transcriptForClip}
                     eventsForClip={eventsForClip}
+                    ingestState={clipIngest[clip.id] ?? null}
+                    onIngestFrames={startClipIngest}
                   />
                 );
               })}

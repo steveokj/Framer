@@ -83,6 +83,18 @@ export async function POST(req: NextRequest): Promise<Response> {
   const dedupRaw = body?.dedupThreshold;
   const dedupThreshold =
     typeof dedupRaw === "number" ? dedupRaw : typeof dedupRaw === "string" ? Number.parseFloat(dedupRaw) : null;
+  const clipStartRaw = body?.clipStart;
+  const clipEndRaw = body?.clipEnd;
+  const clipStart =
+    typeof clipStartRaw === "number"
+      ? clipStartRaw
+      : typeof clipStartRaw === "string"
+        ? Number.parseFloat(clipStartRaw)
+        : null;
+  const clipEnd =
+    typeof clipEndRaw === "number" ? clipEndRaw : typeof clipEndRaw === "string" ? Number.parseFloat(clipEndRaw) : null;
+  const skipMetadata = Boolean(body?.skipMetadata);
+  const noTranscribe = Boolean(body?.noTranscribe);
   const encoder = new TextEncoder();
   let child: ReturnType<typeof spawn> | null = null;
 
@@ -101,6 +113,18 @@ export async function POST(req: NextRequest): Promise<Response> {
         const fps = maxFps && maxFps > 0 ? maxFps : 1;
         const dedup = dedupThreshold && dedupThreshold > 0 ? dedupThreshold : 0.02;
         args.push("--max-fps", String(fps), "--dedup-threshold", String(dedup));
+      }
+      if (clipStart != null && Number.isFinite(clipStart)) {
+        args.push("--clip-start", String(clipStart));
+      }
+      if (clipEnd != null && Number.isFinite(clipEnd)) {
+        args.push("--clip-end", String(clipEnd));
+      }
+      if (skipMetadata) {
+        args.push("--skip-metadata");
+      }
+      if (noTranscribe) {
+        args.push("--no-transcribe-audio");
       }
       child = spawn(py, ["-u", ...args], {
         cwd: PROJECT_ROOT,
