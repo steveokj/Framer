@@ -542,12 +542,12 @@ function SubtitleIcon({ size = 20, color = "#f8fafc" }: IconProps) {
   );
 }
 
-function FrameIcon({ size = 18, color = "#f8fafc" }: IconProps) {
+function FrameCarouselIcon({ size = 20, color = "#f8fafc" }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x={4} y={6} width={16} height={12} rx={2} stroke={color} strokeWidth={1.6} />
-      <path d="M8 6v12" stroke={color} strokeWidth={1.6} strokeLinecap="round" />
-      <path d="M16 6v12" stroke={color} strokeWidth={1.6} strokeLinecap="round" />
+      <rect x="3.5" y="5.5" width="17" height="13" rx="2" stroke={color} strokeWidth={1.8} />
+      <line x1="9" y1="5.5" x2="9" y2="18.5" stroke={color} strokeWidth={1.4} />
+      <line x1="15" y1="5.5" x2="15" y2="18.5" stroke={color} strokeWidth={1.4} />
     </svg>
   );
 }
@@ -772,29 +772,6 @@ function ClipCard({
           {formatTime(clip.start_seconds)} - {formatTime(clip.end_seconds)}
         </span>
         <span style={{ color: "#64748b" }}>{displayEvents.length} events</span>
-        <button
-          type="button"
-          onClick={() => onIngestFrames(clip)}
-          disabled={!videoUrl || ingestBusy}
-          title="Generate frames for this clip"
-          style={{
-            marginLeft: "auto",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "6px 10px",
-            borderRadius: 999,
-            border: "1px solid",
-            borderColor: ingestBusy ? "#1e293b" : "#38bdf8",
-            background: ingestBusy ? "rgba(15, 23, 42, 0.7)" : "rgba(56, 189, 248, 0.18)",
-            color: ingestBusy ? "#94a3b8" : "#e0f2fe",
-            cursor: ingestBusy ? "not-allowed" : "pointer",
-            fontSize: 12,
-          }}
-        >
-          <FrameIcon color={ingestBusy ? "#94a3b8" : "#e0f2fe"} />
-          Frames
-        </button>
       </div>
 
       <div
@@ -928,6 +905,29 @@ function ClipCard({
                 <span style={{ color: "#e2e8f0", fontVariantNumeric: "tabular-nums" }}>
                   {formattedCurrentTime} / {formattedTotalTime}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => onIngestFrames(clip)}
+                  aria-label="Generate frames"
+                  title="Generate frames for this clip"
+                  disabled={!videoUrl || ingestBusy}
+                  style={{
+                    width: 36,
+                    height: 36,
+                    borderRadius: "50%",
+                    border: "none",
+                    background: ingestBusy ? "rgba(15, 23, 42, 0.35)" : "rgba(30, 64, 175, 0.75)",
+                    color: ingestBusy ? "#475569" : "#f8fafc",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    cursor: ingestBusy ? "not-allowed" : "pointer",
+                    marginLeft: "auto",
+                    transition: "background 0.2s ease",
+                  }}
+                >
+                  <FrameCarouselIcon color={ingestBusy ? "#475569" : "#f8fafc"} />
+                </button>
               </div>
               <input
                 type="range"
@@ -1144,13 +1144,22 @@ export default function WindowsEventsPage() {
     return null;
   }, [timelineBounds.first, events, selectedSession]);
 
+  const monoBaseMs = useMemo(() => {
+    const first = events.find((event) => Number.isFinite(event.ts_wall_ms) && Number.isFinite(event.ts_mono_ms));
+    if (!first) {
+      return null;
+    }
+    return first.ts_wall_ms - first.ts_mono_ms;
+  }, [events]);
+
   const eventsWithTimeline = useMemo<EventView[]>(() => {
     if (!events.length) {
       return [];
     }
     const origin = timelineOriginMs;
     return events.map((event) => {                                                                               
-      const timelineSeconds = origin != null ? (event.ts_wall_ms - origin) / 1000 : 0;                           
+      const monoWall = monoBaseMs != null && Number.isFinite(event.ts_mono_ms) ? monoBaseMs + event.ts_mono_ms : event.ts_wall_ms;
+      const timelineSeconds = origin != null ? (monoWall - origin) / 1000 : 0;                                   
       const description = describeEvent(event);                                                                  
       const searchBlob = [                                                                                       
         description,                                                                                             
@@ -1168,7 +1177,7 @@ export default function WindowsEventsPage() {
         search_blob: searchBlob,                                                                                 
       };
     });
-  }, [events, timelineOriginMs]);
+  }, [events, timelineOriginMs, monoBaseMs]);
 
   const clips = useMemo(
     () => buildWindowClipsFromEvents(eventsWithTimeline, timelineDuration, timelineOriginMs),
@@ -1232,16 +1241,16 @@ export default function WindowsEventsPage() {
     let clipIndex = 0;                                                                                           
     for (const event of filteredEvents) {                                                                        
       const timelineSeconds = event.timeline_seconds;                                                            
-      while (clipIndex < sortedClips.length && timelineSeconds > sortedClips[clipIndex].end_seconds) {           
-        clipIndex += 1;                                                                                          
-      }                                                                                                          
-      if (clipIndex >= sortedClips.length) {                                                                     
-        break;                                                                                                   
-      }                                                                                                          
-      const clip = sortedClips[clipIndex];                                                                       
-      if (timelineSeconds >= clip.start_seconds && timelineSeconds <= clip.end_seconds) {                        
-        map.get(clip.id)?.push(event);                                                                           
-      }                                                                                                          
+      while (clipIndex < sortedClips.length && timelineSeconds >= sortedClips[clipIndex].end_seconds) {
+        clipIndex += 1;
+      }
+      if (clipIndex >= sortedClips.length) {
+        break;
+      }
+      const clip = sortedClips[clipIndex];
+      if (timelineSeconds >= clip.start_seconds && timelineSeconds < clip.end_seconds) {
+        map.get(clip.id)?.push(event);
+      }
     }                                                                                                            
     return map;                                                                                                  
   }, [clips, filteredEvents]);                                                                                   
