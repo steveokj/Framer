@@ -80,7 +80,7 @@ impl Default for RecorderConfig {
             emit_mouse_move: false,
             emit_mouse_scroll: false,
             window_poll_hz: 0,
-            capture_raw_keys: false,
+            capture_raw_keys: true,
             raw_keys_mode: "down".to_string(),
             suppress_raw_keys_on_shortcut: true,
             obs_video_path: None,
@@ -963,6 +963,34 @@ fn send_window_rect_changed(state: &RecorderState, window_info: &WindowInfo) {
     state.sender.try_send(event).ok();
 }
 
+fn send_marker_event(state: &RecorderState, hotkey: &str) {
+    let window_info = active_window_info().map(|(_, info)| info);
+    let (process_name, window_title, window_class, window_rect) = match window_info {
+        Some(info) => (
+            info.process_name.clone(),
+            Some(info.title.clone()),
+            Some(info.class_name.clone()),
+            info.rect.clone(),
+        ),
+        None => (None, None, None, None),
+    };
+    let event = EventRecord {
+        session_id: state.session_id.clone(),
+        ts_wall_ms: now_wall_ms(),
+        ts_mono_ms: now_mono_ms(state),
+        event_type: "marker".to_string(),
+        process_name,
+        window_title,
+        window_class,
+        window_rect,
+        mouse: None,
+        payload: json!({
+            "hotkey": hotkey,
+        }),
+    };
+    state.sender.try_send(event).ok();
+}
+
 unsafe extern "system" fn win_event_proc(
     _hook: HWINEVENTHOOK,
     event: u32,
@@ -1067,6 +1095,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
 
             if is_down || is_up {
                 let mut pressed = state.pressed_keys.lock().unwrap();
+                let was_pressed = pressed.contains(&vk);
                 if is_down {
                     pressed.insert(vk);
                 } else {
@@ -1076,6 +1105,17 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 let modifiers = current_modifiers(&pressed);
                 let is_modifier = is_modifier_key(vk);
                 let is_chorded = !is_modifier && !modifiers.is_empty();
+                let has_ctrl = pressed.contains(&(VK_CONTROL.0 as u32))
+                    || pressed.contains(&(VK_LCONTROL.0 as u32))
+                    || pressed.contains(&(VK_RCONTROL.0 as u32));
+                let has_shift = pressed.contains(&(VK_SHIFT.0 as u32))
+                    || pressed.contains(&(VK_LSHIFT.0 as u32))
+                    || pressed.contains(&(VK_RSHIFT.0 as u32));
+                let has_alt = pressed.contains(&(VK_MENU.0 as u32))
+                    || pressed.contains(&(VK_LMENU.0 as u32))
+                    || pressed.contains(&(VK_RMENU.0 as u32));
+                let has_win =
+                    pressed.contains(&(VK_LWIN.0 as u32)) || pressed.contains(&(VK_RWIN.0 as u32));
                 if is_down && is_chorded {
                     let event = EventRecord {
                         session_id: state.session_id.clone(),
@@ -1095,14 +1135,12 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     state.sender.try_send(event).ok();
                 }
 
-                let has_ctrl = pressed.contains(&(VK_CONTROL.0 as u32))
-                    || pressed.contains(&(VK_LCONTROL.0 as u32))
-                    || pressed.contains(&(VK_RCONTROL.0 as u32));
-                let has_alt = pressed.contains(&(VK_MENU.0 as u32))
-                    || pressed.contains(&(VK_LMENU.0 as u32))
-                    || pressed.contains(&(VK_RMENU.0 as u32));
-                let has_win =
-                    pressed.contains(&(VK_LWIN.0 as u32)) || pressed.contains(&(VK_RWIN.0 as u32));
+                let is_marker_hotkey =
+                    is_down && !was_pressed && vk == 0x30 && has_ctrl && !has_alt && !has_win && !has_shift;
+                if is_marker_hotkey {
+                    flush_text_buffer(state, "marker");
+                    send_marker_event(state, "Ctrl+0");
+                }
 
                 if is_down && !is_modifier && !has_ctrl && !has_alt && !has_win {
                     let window_info = active_window_info().map(|(_, info)| info);
