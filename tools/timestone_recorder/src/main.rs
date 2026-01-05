@@ -541,7 +541,8 @@ fn load_or_create_config(path: &Path) -> Result<RecorderConfig> {
         let contents = fs::read_to_string(path).context("Failed to read config file")?;
         let config: RecorderConfig =
             serde_json::from_str(&contents).context("Failed to parse config file")?;
-        return Ok(config);
+        let refreshed = refresh_config_defaults(&config)?;
+        return Ok(refreshed);
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("Failed to create config directory")?;
@@ -607,6 +608,32 @@ fn normalize_process_list(list: Vec<String>) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn refresh_config_defaults(config: &RecorderConfig) -> Result<RecorderConfig> {
+    let mut default_value = serde_json::to_value(RecorderConfig::default())
+        .context("Failed to serialize default config")?;
+    let user_value = serde_json::to_value(config).context("Failed to serialize user config")?;
+    merge_config_value(&mut default_value, &user_value);
+    serde_json::from_value(default_value).context("Failed to merge config defaults")
+}
+
+fn merge_config_value(target: &mut Value, source: &Value) {
+    match (target, source) {
+        (Value::Object(target_map), Value::Object(source_map)) => {
+            for (key, value) in source_map {
+                match target_map.get_mut(key) {
+                    Some(existing) => merge_config_value(existing, value),
+                    None => {
+                        target_map.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (target_value, source_value) => {
+            *target_value = source_value.clone();
+        }
+    }
 }
 
 fn spawn_stop_watcher(
