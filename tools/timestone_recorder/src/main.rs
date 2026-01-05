@@ -20,7 +20,8 @@ use windows::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, PO
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentThreadId, GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VK_BACK, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
@@ -32,9 +33,9 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, PostQuitMessage, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    GetWindowThreadProcessId, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, OBJID_WINDOW,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT,
     WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP,
 };
@@ -248,6 +249,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     }
 
     let _com_guard = ComGuard::new(config.safe_text_only);
+    let main_thread_id = unsafe { GetCurrentThreadId() };
 
     let session_id = Uuid::new_v4().to_string();
     let start_wall_ms = now_wall_ms();
@@ -297,11 +299,9 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
 
     ctrlc::set_handler({
         let shutdown = shutdown.clone();
+        let main_thread_id = main_thread_id;
         move || {
-            shutdown.store(true, Ordering::SeqCst);
-            unsafe {
-                PostQuitMessage(0);
-            }
+            signal_shutdown(&shutdown, main_thread_id);
         }
     })
     .context("Failed to set Ctrl+C handler")?;
@@ -309,7 +309,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     send_session_event(&state, "session_start", json!({ "note": "manual_start" }));
 
     let stop_signal_path = base_dir.join(STOP_FILE);
-    let stop_handle = spawn_stop_watcher(state.clone(), stop_signal_path, shutdown.clone());
+    let stop_handle = spawn_stop_watcher(state.clone(), stop_signal_path, shutdown.clone(), main_thread_id);
     let snapshot_handle = if config.emit_snapshots {
         Some(spawn_snapshot_loop(
             state.clone(),
@@ -435,6 +435,13 @@ fn write_lock(path: &Path, session: &SessionInfo) -> Result<()> {
     );
     fs::write(path, contents).context("Failed to write lock file")?;
     Ok(())
+}
+
+fn signal_shutdown(shutdown: &AtomicBool, main_thread_id: u32) {
+    shutdown.store(true, Ordering::SeqCst);
+    unsafe {
+        let _ = PostThreadMessageW(main_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+    }
 }
 
 struct LockInfo {
@@ -583,6 +590,7 @@ fn spawn_stop_watcher(
     state: Arc<RecorderState>,
     stop_path: PathBuf,
     shutdown: Arc<AtomicBool>,
+    main_thread_id: u32,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let interval = Duration::from_millis(200);
@@ -590,10 +598,7 @@ fn spawn_stop_watcher(
             if stop_path.exists() {
                 let _ = fs::remove_file(&stop_path);
                 flush_text_buffer(&state, "stop_signal");
-                shutdown.store(true, Ordering::SeqCst);
-                unsafe {
-                    PostQuitMessage(0);
-                }
+                signal_shutdown(&shutdown, main_thread_id);
                 break;
             }
             flush_text_buffer_if_stale(&state, "idle_timeout");
