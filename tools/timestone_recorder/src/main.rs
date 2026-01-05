@@ -16,11 +16,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, STILL_ACTIVE, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VK_BACK, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
@@ -375,6 +375,15 @@ fn stop_recorder() -> Result<()> {
     let stop_path = base_dir.join(STOP_FILE);
     fs::write(stop_path, b"stop")?;
     println!("Stop signal written.");
+    if let Some(info) = read_lock_info(&lock_path) {
+        if let Some(pid) = info.pid {
+            if !is_pid_running(pid) {
+                let _ = fs::remove_file(lock_path);
+                let _ = fs::remove_file(base_dir.join(STOP_FILE));
+                println!("Recorder was not running; stale lock cleared.");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -385,10 +394,26 @@ fn print_status() -> Result<()> {
         println!("Recorder status: stopped");
         return Ok(());
     }
-    let contents = fs::read_to_string(lock_path).unwrap_or_default();
-    println!("Recorder status: running");
-    if !contents.trim().is_empty() {
-        println!("{contents}");
+    if let Some(info) = read_lock_info(&lock_path) {
+        if let Some(pid) = info.pid {
+            if !is_pid_running(pid) {
+                let _ = fs::remove_file(&lock_path);
+                println!("Recorder status: stopped (stale lock cleared)");
+                return Ok(());
+            }
+        }
+        println!("Recorder status: running");
+        if let Some(contents) = info.raw {
+            if !contents.trim().is_empty() {
+                println!("{contents}");
+            }
+        }
+    } else {
+        println!("Recorder status: running");
+        let contents = fs::read_to_string(lock_path).unwrap_or_default();
+        if !contents.trim().is_empty() {
+            println!("{contents}");
+        }
     }
     Ok(())
 }
@@ -410,6 +435,47 @@ fn write_lock(path: &Path, session: &SessionInfo) -> Result<()> {
     );
     fs::write(path, contents).context("Failed to write lock file")?;
     Ok(())
+}
+
+struct LockInfo {
+    pid: Option<u32>,
+    raw: Option<String>,
+}
+
+fn read_lock_info(path: &Path) -> Option<LockInfo> {
+    let contents = fs::read_to_string(path).ok()?;
+    let mut pid = None;
+    for line in contents.lines() {
+        let mut parts = line.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if key == "pid" {
+            if let Ok(parsed) = value.parse::<u32>() {
+                pid = Some(parsed);
+            }
+        }
+    }
+    Some(LockInfo {
+        pid,
+        raw: Some(contents),
+    })
+}
+
+fn is_pid_running(pid: u32) -> bool {
+    let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(handle) => handle,
+        Err(_) => return false,
+    };
+    if handle.is_invalid() {
+        return false;
+    }
+    let mut exit_code: u32 = 0;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) }.is_ok();
+    let _ = unsafe { CloseHandle(handle) };
+    if !ok {
+        return false;
+    }
+    exit_code == STILL_ACTIVE.0 as u32
 }
 
 struct ComGuard {
