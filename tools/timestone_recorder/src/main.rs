@@ -876,7 +876,7 @@ fn update_window_events(state: &RecorderState, hwnd: HWND, window_info: WindowIn
         flush_text_buffer_with_window(state, Some(window_info.clone()), "window_change");
         send_active_window_changed(state, &window_info);
     }
-    if rect_changed {
+    if rect_changed && !is_new {
         send_window_rect_changed(state, &window_info);
     }
 }
