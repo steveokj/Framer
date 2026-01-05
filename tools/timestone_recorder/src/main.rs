@@ -61,6 +61,7 @@ struct RecorderConfig {
     emit_mouse_scroll: bool,
     window_poll_hz: u64,
     capture_raw_keys: bool,
+    raw_keys_mode: String,
     obs_video_path: Option<String>,
     safe_text_only: bool,
     allowlist_processes: Vec<String>,
@@ -79,6 +80,7 @@ impl Default for RecorderConfig {
             emit_mouse_scroll: false,
             window_poll_hz: 0,
             capture_raw_keys: false,
+            raw_keys_mode: "down".to_string(),
             obs_video_path: None,
             safe_text_only: true,
             allowlist_processes: Vec::new(),
@@ -123,6 +125,7 @@ struct RecorderState {
     mouse_move_interval_ms: i64,
     last_mouse_move_ms: AtomicI64,
     capture_raw_keys: bool,
+    raw_keys_mode: RawKeysMode,
     emit_mouse_move: bool,
     emit_mouse_scroll: bool,
     pressed_keys: Mutex<HashSet<u32>>,
@@ -133,6 +136,13 @@ struct RecorderState {
     max_text_len: usize,
     text_buffer: Mutex<TextBuffer>,
     window_tracker: Mutex<WindowTracker>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RawKeysMode {
+    Down,
+    Up,
+    Both,
 }
 
 #[derive(Serialize, Clone, PartialEq)]
@@ -274,6 +284,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         mouse_move_interval_ms: (1000 / config.mouse_hz.max(1)) as i64,
         last_mouse_move_ms: AtomicI64::new(-1),
         capture_raw_keys: config.capture_raw_keys,
+        raw_keys_mode: parse_raw_keys_mode(&config.raw_keys_mode),
         emit_mouse_move: config.emit_mouse_move,
         emit_mouse_scroll: config.emit_mouse_scroll,
         pressed_keys: Mutex::new(HashSet::new()),
@@ -571,6 +582,14 @@ fn normalize_config(mut config: RecorderConfig) -> RecorderConfig {
     config.allowlist_processes = normalize_process_list(config.allowlist_processes);
     config.blocklist_processes = normalize_process_list(config.blocklist_processes);
     config
+}
+
+fn parse_raw_keys_mode(value: &str) -> RawKeysMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "up" => RawKeysMode::Up,
+        "both" => RawKeysMode::Both,
+        _ => RawKeysMode::Down,
+    }
 }
 
 fn normalize_process_list(list: Vec<String>) -> Vec<String> {
@@ -1062,7 +1081,10 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     }
                 }
 
-                if state.capture_raw_keys {
+                if state.capture_raw_keys
+                    && ((is_down && state.raw_keys_mode != RawKeysMode::Up)
+                        || (is_up && state.raw_keys_mode != RawKeysMode::Down))
+                {
                     let event = EventRecord {
                         session_id: state.session_id.clone(),
                         ts_wall_ms: now_wall_ms(),
