@@ -64,6 +64,7 @@ struct RecorderConfig {
     raw_keys_mode: String,
     suppress_raw_keys_on_shortcut: bool,
     obs_video_path: Option<String>,
+    obs_video_dir: Option<String>,
     safe_text_only: bool,
     allowlist_processes: Vec<String>,
     blocklist_processes: Vec<String>,
@@ -84,6 +85,7 @@ impl Default for RecorderConfig {
             raw_keys_mode: "down".to_string(),
             suppress_raw_keys_on_shortcut: true,
             obs_video_path: None,
+            obs_video_dir: None,
             safe_text_only: true,
             allowlist_processes: Vec::new(),
             blocklist_processes: vec![
@@ -104,6 +106,7 @@ struct CliOverrides {
     snapshot_hz: Option<u64>,
     capture_raw_keys: Option<bool>,
     obs_video_path: Option<String>,
+    obs_video_dir: Option<String>,
     safe_text_only: Option<bool>,
 }
 
@@ -204,7 +207,7 @@ fn print_usage() {
     println!("timestone_recorder");
     println!("Usage:");
     println!("  timestone_recorder start [--config PATH] [--safe-text|--no-safe-text] [--raw-keys]");
-    println!("                           [--mouse-hz N] [--snapshot-hz N] [--obs-video PATH]");
+    println!("                           [--mouse-hz N] [--snapshot-hz N] [--obs-video PATH] [--obs-dir PATH]");
     println!("  timestone_recorder stop");
     println!("  timestone_recorder status");
 }
@@ -244,6 +247,11 @@ fn parse_start_args(mut args: impl Iterator<Item = String>) -> CliOverrides {
             "--obs-video" => {
                 if let Some(value) = args.next() {
                     overrides.obs_video_path = Some(value);
+                }
+            }
+            "--obs-dir" => {
+                if let Some(value) = args.next() {
+                    overrides.obs_video_dir = Some(value);
                 }
             }
             _ => {}
@@ -309,8 +317,10 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     let _ = STATE.set(state.clone());
 
     let db_path = base_dir.join(DB_NAME);
+    let db_path_writer = db_path.clone();
     let writer_shutdown = shutdown.clone();
-    let writer_handle = thread::spawn(move || run_writer(rx, &db_path, session, writer_shutdown));
+    let session_for_writer = session.clone();
+    let writer_handle = thread::spawn(move || run_writer(rx, &db_path_writer, session_for_writer, writer_shutdown));
 
     ctrlc::set_handler({
         let shutdown = shutdown.clone();
@@ -376,6 +386,13 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         handle.join().ok();
     }
     writer_handle.join().ok();
+    if session.obs_video_path.is_none() {
+        if let Some(path) = resolve_obs_video_path(&config, &session) {
+            if let Err(err) = update_session_obs_path(&db_path, &session.session_id, &path) {
+                eprintln!("Failed to update obs video path: {err}");
+            }
+        }
+    }
     let _ = fs::remove_file(lock_path);
     Ok(())
 }
@@ -566,6 +583,9 @@ fn apply_overrides(config: &mut RecorderConfig, overrides: &CliOverrides) {
     if let Some(obs_video_path) = overrides.obs_video_path.clone() {
         config.obs_video_path = Some(obs_video_path);
     }
+    if let Some(obs_video_dir) = overrides.obs_video_dir.clone() {
+        config.obs_video_dir = Some(obs_video_dir);
+    }
     if let Some(safe_text_only) = overrides.safe_text_only {
         config.safe_text_only = safe_text_only;
     }
@@ -584,9 +604,66 @@ fn normalize_config(mut config: RecorderConfig) -> RecorderConfig {
             config.obs_video_path = None;
         }
     }
+    if let Some(path) = config.obs_video_dir.as_ref() {
+        if path.trim().is_empty() {
+            config.obs_video_dir = None;
+        }
+    }
     config.allowlist_processes = normalize_process_list(config.allowlist_processes);
     config.blocklist_processes = normalize_process_list(config.blocklist_processes);
     config
+}
+
+fn resolve_obs_video_path(config: &RecorderConfig, session: &SessionInfo) -> Option<String> {
+    if let Some(path) = config.obs_video_path.as_ref() {
+        if !path.trim().is_empty() {
+            return Some(path.clone());
+        }
+    }
+    let dir = config.obs_video_dir.as_ref()?;
+    let dir_path = Path::new(dir);
+    if !dir_path.exists() {
+        return None;
+    }
+    let allowed_ext = ["mkv", "mp4", "mov", "webm"];
+    let mut candidates: Vec<(i64, String)> = Vec::new();
+    let entries = fs::read_dir(dir_path).ok()?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
+        if !allowed_ext.contains(&ext.as_str()) {
+            continue;
+        }
+        let modified = entry.metadata().and_then(|meta| meta.modified()).ok()?;
+        let modified_ms = modified.duration_since(UNIX_EPOCH).ok()?.as_millis() as i64;
+        candidates.push((modified_ms, path.to_string_lossy().to_string()));
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by_key(|(ms, _)| *ms);
+    let best_after_start = candidates
+        .iter()
+        .rev()
+        .find(|(ms, _)| *ms >= session.start_wall_ms)
+        .map(|(_, path)| path.clone());
+    best_after_start.or_else(|| candidates.last().map(|(_, path)| path.clone()))
+}
+
+fn update_session_obs_path(db_path: &Path, session_id: &str, obs_video_path: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "UPDATE sessions SET obs_video_path = ? WHERE session_id = ?",
+        params![obs_video_path, session_id],
+    )?;
+    Ok(())
 }
 
 fn parse_raw_keys_mode(value: &str) -> RawKeysMode {
