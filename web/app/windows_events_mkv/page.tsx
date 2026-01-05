@@ -1559,7 +1559,7 @@ export default function WindowsEventsPage() {
         fontFamily: "\"Space Grotesk\", \"Segoe UI\", system-ui",                                                
       }}                                                                                                         
     >                                                                                                            
-      <div style={{ maxWidth: 1200, margin: "0 auto", display: "grid", gap: 24 }}>                               
+      <div style={{ width: "100%", maxWidth: "100%", margin: "0 auto", display: "grid", gap: 24 }}>
         <header style={{ display: "grid", gap: 8 }}>                                                             
           <h1 style={{ fontSize: 32, margin: 0 }}>Windows App Clips (MKV)</h1>                                   
           <p style={{ margin: 0, color: "#94a3b8" }}>                                                            
