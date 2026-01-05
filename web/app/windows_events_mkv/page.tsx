@@ -176,87 +176,16 @@ function formatTime(seconds: number): string {
 }                                                                                                                
                                                                                                                  
 function getTimelineDuration(meta: Metadata | null): number | null {                                             
-  if (!meta || !meta.frames.length) {                                                                            
+  if (!meta) {                                                                                                   
+    return null;                                                                                                 
+  }                                                                                                              
+  if (Number.isFinite(meta.video.duration ?? NaN)) {                                                             
+    return meta.video.duration as number;                                                                        
+  }                                                                                                              
+  if (!meta.frames.length) {                                                                                     
     return null;                                                                                                 
   }                                                                                                              
   return meta.frames[meta.frames.length - 1].seconds_from_video_start;                                           
-}                                                                                                                
-                                                                                                                 
-function mapVideoTimeToTimeline(videoTime: number, videoDuration: number | null | undefined, meta: Metadata | null): number {                                                                                                     
-  if (!meta || !meta.frames.length) {                                                                            
-    return videoTime;                                                                                            
-  }                                                                                                              
-  const frames = meta.frames;                                                                                    
-  const lastIndex = frames.length - 1;                                                                           
-  if (lastIndex === 0) {                                                                                         
-    return frames[0].seconds_from_video_start;                                                                   
-  }                                                                                                              
-  const duration = Number.isFinite(videoDuration || 0) && (videoDuration || 0) > 0 ? (videoDuration as number) : frames[lastIndex].seconds_from_video_start;                                                                      
-  if (!(duration > 0)) {                                                                                         
-    return videoTime;                                                                                            
-  }                                                                                                              
-  const fraction = Math.min(Math.max(videoTime / duration, 0), 1);                                               
-  const position = fraction * lastIndex;                                                                         
-  const lowerIdx = Math.floor(position);                                                                         
-  const upperIdx = Math.min(lastIndex, lowerIdx + 1);                                                            
-  if (upperIdx === lowerIdx) {                                                                                   
-    return frames[lowerIdx].seconds_from_video_start;                                                            
-  }                                                                                                              
-  const frameFraction = position - lowerIdx;                                                                     
-  const lowerSeconds = frames[lowerIdx].seconds_from_video_start;                                                
-  const upperSeconds = frames[upperIdx].seconds_from_video_start;                                                
-  return lowerSeconds + (upperSeconds - lowerSeconds) * frameFraction;                                           
-}                                                                                                                
-                                                                                                                 
-function mapTimelineToVideo(                                                                                     
-  timelineSeconds: number,                                                                                       
-  videoDuration: number | null | undefined,                                                                      
-  meta: Metadata | null,                                                                                         
-): number {                                                                                                      
-  if (!meta || !meta.frames.length) {                                                                            
-    return Math.max(0, timelineSeconds);                                                                         
-  }                                                                                                              
-  const frames = meta.frames;                                                                                    
-  const lastIndex = frames.length - 1;                                                                           
-  if (lastIndex === 0) {                                                                                         
-    if (videoDuration && videoDuration > 0) {                                                                    
-      return Math.min(Math.max(timelineSeconds, 0), videoDuration);                                              
-    }                                                                                                            
-    return Math.max(0, timelineSeconds);                                                                         
-  }                                                                                                              
-  if (!(videoDuration && videoDuration > 0)) {                                                                   
-    return Math.max(0, timelineSeconds);                                                                         
-  }                                                                                                              
-  const lastTimeline = frames[lastIndex].seconds_from_video_start;                                               
-  if (timelineSeconds <= frames[0].seconds_from_video_start) {                                                   
-    return 0;                                                                                                    
-  }                                                                                                              
-  if (timelineSeconds >= lastTimeline) {                                                                         
-    return videoDuration;                                                                                        
-  }                                                                                                              
-  let lo = 0;                                                                                                    
-  let hi = lastIndex;                                                                                            
-  while (lo <= hi) {                                                                                             
-    const mid = Math.floor((lo + hi) / 2);                                                                       
-    const midVal = frames[mid].seconds_from_video_start;                                                         
-    if (midVal < timelineSeconds) {
-      lo = mid + 1;                                                                                              
-    } else if (midVal > timelineSeconds) {                                                                       
-      hi = mid - 1;                                                                                              
-    } else {                                                                                                     
-      const midFraction = mid / lastIndex;                                                                       
-      return midFraction * videoDuration;                                                                        
-    }                                                                                                            
-  }                                                                                                              
-  const upperIdx = Math.min(lastIndex, Math.max(1, lo));                                                         
-  const lowerIdx = upperIdx - 1;                                                                                 
-  const lowerSeconds = frames[lowerIdx].seconds_from_video_start;                                                
-  const upperSeconds = frames[upperIdx].seconds_from_video_start;                                                
-  const segmentSpan = upperSeconds - lowerSeconds || 1;                                                          
-  const segmentFraction = (timelineSeconds - lowerSeconds) / segmentSpan;                                        
-  const lowerVideo = (lowerIdx / lastIndex) * videoDuration;                                                     
-  const upperVideo = (upperIdx / lastIndex) * videoDuration;                                                     
-  return lowerVideo + (upperVideo - lowerVideo) * segmentFraction;                                               
 }                                                                                                                
                                                                                                                  
 function stripTranscriptTimestamp(text: string): string {
@@ -576,7 +505,6 @@ type ClipCardProps = {
   clip: Clip;
   videoUrl: string | null;
   serverHint: string;
-  metadata: Metadata | null;
   transcriptSegments: Segment[];
   transcriptForClip: Segment[];
   eventsForClip: EventView[];
@@ -588,7 +516,6 @@ function ClipCard({
   clip,
   videoUrl,
   serverHint,
-  metadata,
   transcriptSegments,
   transcriptForClip,
   eventsForClip,
@@ -658,14 +585,11 @@ function ClipCard({
         return;
       }
       const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : videoDuration;
-      const targetVideo = mapTimelineToVideo(targetTimeline, duration ?? null, metadata);
-      if (Number.isFinite(targetVideo)) {
-        let nextTime = Math.max(0, targetVideo);
-        if (duration != null && Number.isFinite(duration)) {
-          nextTime = Math.min(nextTime, duration);
-        }
-        video.currentTime = nextTime;
+      let nextTime = Math.max(0, targetTimeline);
+      if (duration != null && Number.isFinite(duration)) {
+        nextTime = Math.min(nextTime, duration);
       }
+      video.currentTime = nextTime;
       const relative = Math.max(0, targetTimeline - clip.start_seconds);
       setClipTime(Math.min(relative, clipDuration));
       if (shouldPlay) {
@@ -674,7 +598,7 @@ function ClipCard({
         });
       }
     },
-    [clip.start_seconds, clipDuration, metadata, videoDuration],
+    [clip.start_seconds, clipDuration, videoDuration],
   );
 
   const handleTogglePlayback = useCallback(() => {
@@ -731,12 +655,13 @@ function ClipCard({
       return;
     }
     const duration = Number.isFinite(video.duration) ? video.duration : videoDuration;
-    const currentTimeline = mapVideoTimeToTimeline(video.currentTime, duration ?? null, metadata);
+    const currentTimeline = video.currentTime;
     if (currentTimeline >= clip.end_seconds - 0.01) {
-      const endVideo = mapTimelineToVideo(clip.end_seconds, duration ?? null, metadata);
-      if (Number.isFinite(endVideo)) {
-        video.currentTime = endVideo;
+      let endVideo = clip.end_seconds;
+      if (duration != null && Number.isFinite(duration)) {
+        endVideo = Math.min(endVideo, duration);
       }
+      video.currentTime = Math.max(0, endVideo);
       video.pause();
       setIsPlaying(false);
       setClipTime(clipDuration);
@@ -744,7 +669,7 @@ function ClipCard({
     }
     const relative = Math.max(0, currentTimeline - clip.start_seconds);
     setClipTime(Math.min(relative, clipDuration));
-  }, [clip.end_seconds, clip.start_seconds, clipDuration, metadata, videoDuration]);
+  }, [clip.end_seconds, clip.start_seconds, clipDuration, videoDuration]);
 
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
@@ -1827,7 +1752,6 @@ export default function WindowsEventsPage() {
                     clip={clip}
                     videoUrl={videoUrl}
                     serverHint={serverHint}
-                    metadata={metadata}
                     transcriptSegments={timelineSegments}
                     transcriptForClip={transcriptForClip}
                     eventsForClip={eventsForClip}

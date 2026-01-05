@@ -325,8 +325,7 @@ export default function AlignmentTestPage() {
       return [];                                                                                                  
     }                                                                                                             
     return events.map((event) => {                                                                                
-      const monoWall = monoBaseMs != null && Number.isFinite(event.ts_mono_ms) ? monoBaseMs + event.ts_mono_ms : e
-vent.ts_wall_ms;                                                                                                  
+      const monoWall = monoBaseMs != null && Number.isFinite(event.ts_mono_ms) ? monoBaseMs + event.ts_mono_ms : event.ts_wall_ms;                                                                                                  
       const timelineSeconds = originMs != null ? (monoWall - originMs) / 1000 : 0;                                
       const description = describeEvent(event);                                                                   
       return {                                                                                                    
@@ -447,25 +446,17 @@ vent.ts_wall_ms;
   const formattedDuration = useMemo(() => formatTime(videoDuration ?? 0), [videoDuration]);                       
   const offsetPreview = useMemo(() => (Number.isFinite(offsetSeconds) ? offsetSeconds : 0), [offsetSeconds]);     
                                                                                                                   
-  return (                                                                                                        
-    <main                                                                                                         
-      style={{                                                                                                    
-        minHeight: "100vh",                                                                                       
-        background: "linear-gradient(180deg, #070b16 0%, #0a1224 40%, #0b1120 100%)",                             
-        color: "#e2e8f0",                                                                                         
-        padding: "32px 24px 80px",                                                                                
-        fontFamily: '"Space Grotesk", "Segoe UI", system-ui',                                                     
-      }}                                                                                                          
-    >                                                                                                             
-      <div style={{ maxWidth: 1280, margin: "0 auto", display: "grid", gap: 24 }}>                                
+  return (      
+    <>                                                                                                  
+    <main style={{ minHeight: "100vh", background: "linear-gradient(180deg, #070b16 0%, #0a1224 40%, #0b1120 100%)", color: "#e2e8f0", padding: "32px 24px 80px", fontFamily: '"Space Grotesk", "Segoe UI", system-ui', }}> 
+        <div style={{ maxWidth: 1280, margin: "0 auto", display: "grid", gap: 24 }}>                                
         <header style={{ display: "grid", gap: 8 }}>                                                              
           <h1 style={{ fontSize: 32, margin: 0 }}>Timestone Alignment Test</h1>                                   
           <p style={{ margin: 0, color: "#94a3b8" }}>                                                             
             Use this page to compare raw timestone events against a single MKV file and capture offsets for alignm
 ent.                                                                                                              
           </p>                                                                                                    
-        </header>                                                                                                 
-                                                                                                                  
+        </header>                                                                                                                                                                                            
         <section                                                                                                  
           style={{                                                                                                
             background: "rgba(15, 23, 42, 0.7)",                                                                  
@@ -555,9 +546,7 @@ ent.
                 <select                                                                                           
                   value={originMode}                                                                              
                   onChange={(e) => setOriginMode(e.target.value as "video" | "session" | "first_event")}          
-                  style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120
-", color: "#e2e8f0" }}                                                                                            
-                >                                                                                                 
+                  style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120", color: "#e2e8f0" }}>                                                                                                 
                   <option value="video">Video start</option>                                                      
                   <option value="session">Session start</option>                                                  
                   <option value="first_event">First event</option>                                                
@@ -569,9 +558,7 @@ ent.
                   value={videoStartOverride}                                                                      
                   onChange={(e) => setVideoStartOverride(e.target.value)}                                         
                   placeholder="2026-01-05T00:36:35 or 1767579736494"                                              
-                  style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120
-", color: "#e2e8f0" }}                                                                                            
-                />                                                                                                
+                  style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120", color: "#e2e8f0" }}/>                                                                                                
               </label>                                                                                            
               <label style={{ display: "grid", gap: 6 }}>                                                         
                 <span style={{ color: "#cbd5f5" }}>Offset seconds</span>
@@ -580,8 +567,7 @@ ent.
                   step="0.01"                                                                                     
                   value={Number.isFinite(offsetSeconds) ? offsetSeconds : 0}                                      
                   onChange={(e) => setOffsetSeconds(Number(e.target.value || "0"))}                               
-                  style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120
-", color: "#e2e8f0", width: 140 }}                                                                                
+                  style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120", color: "#e2e8f0", width: 140 }}                                                                                
                 />                                                                                                
               </label>                                                                                            
               <button                                                                                             
@@ -611,8 +597,7 @@ ent.
             </div>                                                                                                
                                                                                                                   
             <div style={{ display: "flex", flexWrap: "wrap", gap: 18, color: "#94a3b8", fontSize: 13 }}>          
-              <span>Video start: {videoStartWallMs ? `${videoStartWallMs} (${new Date(videoStartWallMs).toISOStrin
-g()})` : "n/a"}</span>                                                                                            
+              <span>Video start: {videoStartWallMs ? `${videoStartWallMs} (${new Date(videoStartWallMs).toISOString()})` : "n/a"}</span>                                                                                            
               <span>Origin: {originMs ? `${originMs} (${new Date(originMs).toISOString()})` : "n/a"}</span>       
               <span>Mono base: {monoBaseMs != null ? monoBaseMs : "n/a"}</span>                                   
               <span>Current offset: {offsetPreview.toFixed(2)}s</span>
@@ -725,8 +710,7 @@ s this file.`)}
             </div>                                                                                                
             {videoError && <div style={{ color: "#fca5a5" }}>{videoError}</div>}                                  
                                                                                                                   
-            <div style={{ display: "grid", gap: 8, background: "#0f172a", color: "#f8fafc", padding: 16, borderRad
-ius: 8 }}>                                                                                                        
+            <div style={{ display: "grid", gap: 8, background: "#0f172a", color: "#f8fafc", padding: 16, borderRadius: 8 }}>                                                                                                        
               <strong>Alignment readout</strong>                                                                  
               <div>Current video time: {currentTime.toFixed(2)}s</div>                                            
               {selectedEvent ? (                                                                                  
@@ -742,8 +726,7 @@ ius: 8 }}>
             </div>                                                                                                
                                                                                                                   
             {syncPoints.length > 0 && (                                                                           
-              <div style={{ display: "grid", gap: 10, background: "#0b1120", borderRadius: 10, padding: 12, border
-: "1px solid #1e293b" }}>                                                                                         
+              <div style={{ display: "grid", gap: 10, background: "#0b1120", borderRadius: 10, padding: 12, border: "1px solid #1e293b" }}>                                                                                         
                 <strong>Captured sync points</strong>                                                             
                 {syncPoints.map((point) => (                                                                      
                   <button                                                                                         
@@ -809,19 +792,16 @@ ius: 8 }}>
                       }}                                                                                          
                     >                                                                                             
                       <div style={{ display: "grid", gap: 6 }}>                                                   
-                        <span style={{ fontVariantNumeric: "tabular-nums", color: "#cbd5f5" }}>{formatSignedTime(a
-djusted)}</span>                                                                                                  
+                        <span style={{ fontVariantNumeric: "tabular-nums", color: "#cbd5f5" }}>{formatSignedTime(adjusted)}</span>                                                                                                  
                         <span style={{ fontSize: 12, color: "#64748b" }}>{formatSignedTime(event.timeline_seconds)
 }</span>                                                                                                          
                       </div>                                                                                      
                       <div style={{ display: "grid", gap: 4 }}>                                                   
-                        <span style={{ fontWeight: 600, textTransform: "capitalize" }}>{event.event_type.replace(/
-_/g, " ")}</span>                                                                                                 
+                        <span style={{ fontWeight: 600, textTransform: "capitalize" }}>{event.event_type.replace(/_/g, " ")}</span>                                                                                                 
                         <span>{event.description}</span>                                                          
                         {event.payload_preview && <span style={{ color: "#94a3b8", fontSize: 12 }}>Payload: {event
 .payload_preview}</span>}                                                                                         
-                        {event.mouse_preview && <span style={{ color: "#94a3b8", fontSize: 12 }}>Mouse: {event.mou
-se_preview}</span>}                                                                                               
+                        {event.mouse_preview && <span style={{ color: "#94a3b8", fontSize: 12 }}>Mouse: {event.mouse_preview}</span>}                                                                                               
                         <span style={{ color: "#64748b", fontSize: 12 }}>                                         
                           wall {event.wall_iso} | id {event.id}                                                   
                         </span>                                                                                   
@@ -834,7 +814,8 @@ se_preview}</span>}
           </div>                                                                                                  
         </section>                                                                                                
       </div>                                                                                                      
-    </main>                                                                                                       
+    </main>  
+    </>                                                                                                     
   );                                                                                                              
 }                                                                                                                 
                        
