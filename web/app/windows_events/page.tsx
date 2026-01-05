@@ -21,52 +21,31 @@ type Clip = {
   frame_count: number;                                                                                           
 };                                                                                                               
                                                                                                                  
-type FrameEntry = {                                                                                              
-  offset_index: number;                                                                                          
-  timestamp: string;                                                                                             
-  seconds_from_video_start: number;                                                                              
-};                                                                                                               
+type FrameEntry = {
+  offset_index: number;
+  timestamp: string | null;
+  seconds_from_video_start: number;
+  frame_path?: string | null;
+};
+
+type VideoMeta = {
+  path: string;
+  fps: number | null;
+  duration: number | null;
+  width: number | null;
+  height: number | null;
+  frame_count: number | null;
+  kept_frames: number | null;
+  creation_time: string | null;
+};
+
+type Metadata = {
+  video: VideoMeta;
+  frames: FrameEntry[];
+  transcription?: string | null;
+};
                                                                                                                  
-type Metadata = {                                                                                                
-  video: {                                                                                                       
-    path: string;                                                                                                
-    frame_count: number;                                                                                         
-    first_timestamp: string;                                                                                     
-    last_timestamp: string;                                                                                      
-  };                                                                                                             
-  audio: {                                                                                                       
-    path: string;                                                                                                
-    session_id: number | null;                                                                                   
-    start_timestamp: string;                                                                                     
-    end_timestamp: string;                                                                                       
-    duration_seconds: number;                                                                                    
-  };                                                                                                             
-  alignment: {                                                                                                   
-    origin_timestamp: string;                                                                                    
-    timeline_end_timestamp: string;                                                                              
-    audio_offset_seconds: number;                                                                                
-    audio_lead_seconds: number;                                                                                  
-    audio_delay_seconds: number;                                                                                 
-  };                                                                                                             
-  frames: FrameEntry[];                                                                                          
-};                                                                                                               
-                                                                                                                 
-type WindowClipsResponse = {                                                                                     
-  first_timestamp: string | null;                                                                                
-  last_timestamp: string | null;                                                                                 
-  clips: Array<{                                                                                                 
-    window_name: string;                                                                                         
-    start_seconds: number;                                                                                       
-    end_seconds: number;                                                                                         
-    start_timestamp: string;                                                                                     
-    end_timestamp: string;                                                                                       
-    start_offset_index: number;                                                                                  
-    end_offset_index: number;                                                                                    
-    frame_count: number;                                                                                         
-  }>;                                                                                                            
-};                                                                                                               
-                                                                                                                 
-type TimestoneSession = {                                                                                        
+type TimestoneSession = {
   session_id: string;                                                                                            
   start_wall_ms: number;                                                                                         
   start_wall_iso: string;                                                                                        
@@ -87,14 +66,30 @@ type TimestoneEvent = {
   payload: string | null;                                                                                        
 };                                                                                                               
                                                                                                                  
-type EventView = TimestoneEvent & {                                                                              
-  timeline_seconds: number;                                                                                      
-  description: string;                                                                                           
-  search_blob: string;                                                                                           
-};                                                                                                               
-                                                                                                                 
-const DEFAULT_VIDEO = "";                                                                                        
-const DEFAULT_AUDIO = "";                                                                                        
+type EventView = TimestoneEvent & {
+  timeline_seconds: number;
+  description: string;
+  search_blob: string;
+};
+
+type IngestPhase =
+  | "idle"
+  | "starting"
+  | "ingesting"
+  | "processing"
+  | "transcribing"
+  | "transcribed"
+  | "done"
+  | "error";
+
+type IngestProgress = {
+  done: number;
+  total: number;
+  kept?: number | null;
+  phase: "extract" | "process";
+};
+
+const DEFAULT_VIDEO = "";
 const EVENT_TYPE_PRESET = [                                                                                      
   "active_window_changed",                                                                                       
   "window_rect_changed",                                                                                         
@@ -147,17 +142,6 @@ function formatTime(seconds: number): string {
 , "0")}`;                                                                                                        
   }                                                                                                              
   return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;                              
-}                                                                                                                
-                                                                                                                 
-function formatOffset(offset: number): string {                                                                  
-  const abs = Math.abs(offset).toFixed(2);                                                                       
-  if (offset > 0) {                                                                                              
-    return `+${abs}s`;                                                                                           
-  }                                                                                                              
-  if (offset < 0) {                                                                                              
-    return `-${abs}s`;                                                                                           
-  }                                                                                                              
-  return "0.00s";                                                                                                
 }                                                                                                                
                                                                                                                  
 function getTimelineDuration(meta: Metadata | null): number | null {                                             
@@ -244,10 +228,47 @@ function mapTimelineToVideo(
   return lowerVideo + (upperVideo - lowerVideo) * segmentFraction;                                               
 }                                                                                                                
                                                                                                                  
-function stripTranscriptTimestamp(text: string): string {                                                        
-  return text.replace(/\[\s*\d+(\.\d+)?s?\s*->\s*\d+(\.\d+)?s?\s*\]\s*/gi, "").trim();                           
-}                                                                                                                
-                                                                                                                 
+function stripTranscriptTimestamp(text: string): string {
+  return text.replace(/\[\s*\d+(\.\d+)?s?\s*->\s*\d+(\.\d+)?s?\s*\]\s*/gi, "").trim();
+}
+
+function buildTranscriptSegments(text: string | null | undefined, duration: number | null): Segment[] {
+  if (!text) {
+    return [];
+  }
+  const cleaned = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!cleaned) {
+    return [];
+  }
+  const pieces = cleaned
+    .split(/(?<=[.!?])\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (pieces.length === 0) {
+    return [];
+  }
+  const totalDuration = duration && duration > 0 ? duration : pieces.length;
+  const weights = pieces.map((part) => Math.max(part.length, 1));
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0) || 1;
+  let cursor = 0;
+  return pieces.map((part, index) => {
+    const segmentDuration = (weights[index] / totalWeight) * totalDuration;
+    const start = cursor;
+    const end = index === pieces.length - 1 ? totalDuration : cursor + segmentDuration;
+    cursor = end;
+    return {
+      id: index + 1,
+      start,
+      end,
+      text: part,
+    };
+  });
+}
+
 function safeJsonParse(input: string | null): any | null {                                                       
   if (!input) {                                                                                                  
     return null;                                                                                                 
@@ -279,11 +300,11 @@ function formatShortcut(payload: any): string | null {
   return parts.join("+");                                                                                        
 }                                                                                                                
                                                                                                                  
-function describeEvent(event: TimestoneEvent): string {                                                          
-  const payload = safeJsonParse(event.payload);                                                                  
-  const mouse = safeJsonParse(event.mouse);                                                                      
-  const windowLabel = event.window_title || event.window_class || "";                                            
-  switch (event.event_type) {                                                                                    
+function describeEvent(event: TimestoneEvent): string {
+  const payload = safeJsonParse(event.payload);
+  const mouse = safeJsonParse(event.mouse);
+  const windowLabel = event.window_title || event.window_class || "";
+  switch (event.event_type) {
     case "marker": {                                                                                             
       const note = payload?.note ? String(payload.note) : "Marker";                                              
       return windowLabel ? `${note} @ ${windowLabel}` : note;                                                    
@@ -312,14 +333,70 @@ function describeEvent(event: TimestoneEvent): string {
     case "window_rect_changed":                                                                                  
       return windowLabel ? `Window resized: ${windowLabel}` : "Window rect changed";                             
     default:                                                                                                     
-      return windowLabel ? `${event.event_type} @ ${windowLabel}` : event.event_type;                            
-  }                                                                                                              
-}                                                                                                                
-                                                                                                                 
-type IconProps = {                                                                                               
-  size?: number;                                                                                                 
-  color?: string;                                                                                                
-};                                                                                                               
+      return windowLabel ? `${event.event_type} @ ${windowLabel}` : event.event_type;
+  }
+}
+
+function buildWindowClipsFromEvents(events: EventView[], timelineEnd: number | null, originMs: number | null): Clip[] {
+  if (!events.length) {
+    return [];
+  }
+  const windowEvents = events
+    .filter((event) => event.event_type === "active_window_changed")
+    .map((event) => ({
+      event,
+      name: event.window_title || event.window_class || event.process_name || "Unknown window",
+    }))
+    .sort((a, b) => a.event.timeline_seconds - b.event.timeline_seconds);
+  const sortedEvents = [...events].sort((a, b) => a.timeline_seconds - b.timeline_seconds);
+  const fallbackEnd = timelineEnd ?? (sortedEvents.length ? sortedEvents[sortedEvents.length - 1].timeline_seconds : 0) + 1;
+  if (windowEvents.length === 0) {
+    if (!sortedEvents.length) {
+      return [];
+    }
+    const first = sortedEvents[0];
+    const name = first.window_title || first.window_class || first.process_name || "Unknown window";
+    const startWall = originMs != null ? originMs : first.ts_wall_ms;
+    const endWall = originMs != null ? originMs + fallbackEnd * 1000 : first.ts_wall_ms + fallbackEnd * 1000;
+    return [
+      {
+        id: 0,
+        window_name: name,
+        start_seconds: 0,
+        end_seconds: Math.max(0.05, fallbackEnd),
+        start_timestamp: new Date(startWall).toISOString(),
+        end_timestamp: new Date(endWall).toISOString(),
+        start_offset_index: 0,
+        end_offset_index: 0,
+        frame_count: 0,
+      },
+    ];
+  }
+  const endFallback = timelineEnd ?? windowEvents[windowEvents.length - 1].event.timeline_seconds + 1;
+  return windowEvents.map((entry, index) => {
+    const startSeconds = Math.max(0, entry.event.timeline_seconds);
+    const next = windowEvents[index + 1];
+    const endSeconds = Math.max(startSeconds + 0.05, next ? next.event.timeline_seconds : endFallback);
+    const startWall = originMs != null ? originMs + startSeconds * 1000 : entry.event.ts_wall_ms;
+    const endWall = originMs != null ? originMs + endSeconds * 1000 : entry.event.ts_wall_ms + (endSeconds - startSeconds) * 1000;
+    return {
+      id: index,
+      window_name: entry.name,
+      start_seconds: startSeconds,
+      end_seconds: endSeconds,
+      start_timestamp: new Date(startWall).toISOString(),
+      end_timestamp: new Date(endWall).toISOString(),
+      start_offset_index: 0,
+      end_offset_index: 0,
+      frame_count: 0,
+    };
+  });
+}
+
+type IconProps = {
+  size?: number;
+  color?: string;
+};
                                                                                                                  
 function PlayIcon({ size = 20, color = "#f8fafc" }: IconProps) {                                                 
   return (                                                                                                       
@@ -366,20 +443,18 @@ function SubtitleIcon({ size = 20, color = "#f8fafc" }: IconProps) {
   );                                                                                                             
 }                                                                                                                
                                                                                                                  
-export default function WindowsEventsPage() {                                                                    
-  const [videoInput, setVideoInput] = useState(DEFAULT_VIDEO);                                                   
-  const [audioInput, setAudioInput] = useState(DEFAULT_AUDIO);                                                   
-  const [videoPath, setVideoPath] = useState(DEFAULT_VIDEO);                                                     
-  const [audioPath, setAudioPath] = useState(DEFAULT_AUDIO);                                                     
-  const [metadata, setMetadata] = useState<Metadata | null>(null);                                               
-  const [loadingMetadata, setLoadingMetadata] = useState(false);                                                 
-  const [metadataError, setMetadataError] = useState<string | null>(null);                                       
-  const [clips, setClips] = useState<Clip[]>([]);                                                                
-  const [loadingClips, setLoadingClips] = useState(false);                                                       
-  const [clipError, setClipError] = useState<string | null>(null);                                               
-  const [clipBounds, setClipBounds] = useState<{ first: string | null; last: string | null }>({ first: null, last
-: null });                                                                                                       
-  const [segments, setSegments] = useState<Segment[]>([]);                                                       
+export default function WindowsEventsPage() {
+  const [videoInput, setVideoInput] = useState(DEFAULT_VIDEO);
+  const [videoPath, setVideoPath] = useState(DEFAULT_VIDEO);
+  const [metadata, setMetadata] = useState<Metadata | null>(null);
+  const [loadingMetadata, setLoadingMetadata] = useState(false);
+  const [metadataError, setMetadataError] = useState<string | null>(null);
+  const [ingestPhase, setIngestPhase] = useState<IngestPhase>("idle");
+  const [ingestProgress, setIngestProgress] = useState<IngestProgress | null>(null);
+  const [ingestError, setIngestError] = useState<string | null>(null);
+  const [ingestTargetPath, setIngestTargetPath] = useState<string | null>(null);
+  const [metadataRefreshKey, setMetadataRefreshKey] = useState(0);
+  const [segments, setSegments] = useState<Segment[]>([]);
   const [loadingTranscript, setLoadingTranscript] = useState(false);                                             
   const [transcriptError, setTranscriptError] = useState<string | null>(null);                                   
   const [sessions, setSessions] = useState<TimestoneSession[]>([]);                                              
@@ -401,16 +476,49 @@ export default function WindowsEventsPage() {
   const [controlsVisible, setControlsVisible] = useState(true);                                                  
   const [captionsEnabled, setCaptionsEnabled] = useState(true);                                                  
                                                                                                                  
-  const videoRef = useRef<HTMLVideoElement>(null);                                                               
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const autoIngestedRef = useRef<Set<string>>(new Set());
   const hideControlsTimeoutRef = useRef<number | null>(null);                                                    
                                                                                                                  
   const { url: videoUrl, warning: videoWarning } = useMemo(() => buildFileUrl(videoPath), [videoPath]);          
   const serverHint = API_BASE || "http://localhost:8001";                                                        
                                                                                                                  
-  const timelineDuration = useMemo(() => getTimelineDuration(metadata), [metadata]);                             
-  const sliderMax = timelineDuration ?? videoDuration ?? 0;                                                      
-  const formattedCurrentTime = useMemo(() => formatTime(currentTime), [currentTime]);                            
-  const formattedTotalTime = useMemo(() => formatTime(sliderMax), [sliderMax]);                                  
+  const timelineDuration = useMemo(() => getTimelineDuration(metadata), [metadata]);
+  const sliderMax = timelineDuration ?? videoDuration ?? 0;
+  const formattedCurrentTime = useMemo(() => formatTime(currentTime), [currentTime]);
+  const formattedTotalTime = useMemo(() => formatTime(sliderMax), [sliderMax]);
+  const ingestPercent = useMemo(() => {
+    if (!ingestProgress || !ingestProgress.total) {
+      return null;
+    }
+    return Math.min(100, Math.round((ingestProgress.done / ingestProgress.total) * 100));
+  }, [ingestProgress]);
+  const ingestInProgressForVideo =
+    Boolean(ingestTargetPath) &&
+    Boolean(videoPath) &&
+    ingestTargetPath === videoPath &&
+    ingestPhase !== "done" &&
+    ingestPhase !== "error";
+  const ingestStatusLabel = useMemo(() => {
+    switch (ingestPhase) {
+      case "starting":
+        return "Starting";
+      case "ingesting":
+        return "Preparing";
+      case "processing":
+        return "Processing frames";
+      case "transcribing":
+        return "Transcribing audio";
+      case "transcribed":
+        return "Transcription ready";
+      case "done":
+        return "Complete";
+      case "error":
+        return "Error";
+      default:
+        return "Idle";
+    }
+  }, [ingestPhase]);
                                                                                                                  
   const selectedSession = useMemo(                                                                               
     () => sessions.find((session) => session.session_id === selectedSessionId) ?? null,                          
@@ -427,24 +535,37 @@ export default function WindowsEventsPage() {
     return Array.from(set);                                                                                      
   }, [events]);                                                                                                  
                                                                                                                  
-  const timelineOriginMs = useMemo(() => {                                                                       
-    const candidates = [metadata?.video.first_timestamp, clipBounds.first]                                       
-      .map((value) => (value ? Date.parse(value) : NaN))                                                         
-      .filter((value) => Number.isFinite(value));                                                                
-    if (candidates.length > 0) {                                                                                 
-      return candidates[0] as number;                                                                            
-    }                                                                                                            
-    if (selectedSession?.start_wall_ms) {                                                                        
-      return selectedSession.start_wall_ms;                                                                      
-    }                                                                                                            
-    return null;                                                                                                 
-  }, [metadata, clipBounds.first, selectedSession]);                                                             
-                                                                                                                 
-  const eventsWithTimeline = useMemo<EventView[]>(() => {                                                        
-    if (!events.length) {                                                                                        
-      return [];                                                                                                 
-    }                                                                                                            
-    const origin = timelineOriginMs;                                                                             
+  const timelineBounds = useMemo(() => {
+    if (!metadata?.frames?.length) {
+      return { first: null as number | null, last: null as number | null };
+    }
+    const firstTs = metadata.frames[0]?.timestamp ? Date.parse(metadata.frames[0].timestamp as string) : NaN;
+    const lastFrame = metadata.frames[metadata.frames.length - 1];
+    const lastTs = lastFrame?.timestamp ? Date.parse(lastFrame.timestamp as string) : NaN;
+    return {
+      first: Number.isFinite(firstTs) ? firstTs : null,
+      last: Number.isFinite(lastTs) ? lastTs : null,
+    };
+  }, [metadata]);
+
+  const timelineOriginMs = useMemo(() => {
+    if (timelineBounds.first != null) {
+      return timelineBounds.first;
+    }
+    if (events.length > 0) {
+      return events[0].ts_wall_ms;
+    }
+    if (selectedSession?.start_wall_ms) {
+      return selectedSession.start_wall_ms;
+    }
+    return null;
+  }, [timelineBounds.first, events, selectedSession]);
+
+  const eventsWithTimeline = useMemo<EventView[]>(() => {
+    if (!events.length) {
+      return [];
+    }
+    const origin = timelineOriginMs;
     return events.map((event) => {                                                                               
       const timelineSeconds = origin != null ? (event.ts_wall_ms - origin) / 1000 : 0;                           
       const description = describeEvent(event);                                                                  
@@ -462,9 +583,14 @@ export default function WindowsEventsPage() {
         timeline_seconds: timelineSeconds,                                                                       
         description,                                                                                             
         search_blob: searchBlob,                                                                                 
-      };                                                                                                         
-    });                                                                                                          
-  }, [events, timelineOriginMs]);                                                                                
+      };
+    });
+  }, [events, timelineOriginMs]);
+
+  const clips = useMemo(
+    () => buildWindowClipsFromEvents(eventsWithTimeline, timelineDuration, timelineOriginMs),
+    [eventsWithTimeline, timelineDuration, timelineOriginMs],
+  );
                                                                                                                  
   const normalizedQuery = useMemo(
     () => searchQuery.trim().toLowerCase(),
@@ -484,16 +610,9 @@ export default function WindowsEventsPage() {
     });                                                                                                          
   }, [eventsWithTimeline, enabledEventTypes, normalizedQuery, searchEvents]);                                    
                                                                                                                  
-  const audioOffset = metadata?.alignment.audio_offset_seconds ?? 0;                                             
-  const timelineSegments = useMemo(() => {                                                                       
-    return segments.map((segment) => ({                                                                          
-      ...segment,                                                                                                
-      start: segment.start - audioOffset,                                                                        
-      end: segment.end - audioOffset,                                                                            
-    }));                                                                                                         
-  }, [segments, audioOffset]);                                                                                   
+  const timelineSegments = useMemo(() => segments, [segments]);
                                                                                                                  
-  const clipTranscriptMap = useMemo(() => {                                                                      
+  const clipTranscriptMap = useMemo(() => {
     const map = new Map<number, Segment[]>();                                                                    
     for (const clip of clips) {                                                                                  
       const segs = timelineSegments                                                                              
@@ -515,8 +634,109 @@ export default function WindowsEventsPage() {
         });                                                                                                      
       map.set(clip.id, segs);                                                                                    
     }                                                                                                            
-    return map;                                                                                                  
-  }, [clips, timelineSegments]);                                                                                 
+    return map;
+  }, [clips, timelineSegments]);
+
+  const startIngest = useCallback(async (video: string) => {
+    setIngestPhase("starting");
+    setIngestProgress(null);
+    setIngestError(null);
+    setIngestTargetPath(video);
+    try {
+      const res = await fetch("/api/mkv_ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          videoPath: video,
+          fast: true,
+          maxFps: 1,
+        }),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Ingest request failed (status ${res.status})`);
+      }
+      const reader = res.body?.getReader();
+      if (!reader) {
+        throw new Error("Ingest stream unavailable");
+      }
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let doneCode: number | null = null;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        let separatorIndex = buffer.indexOf("\n\n");
+        while (separatorIndex !== -1) {
+          const chunk = buffer.slice(0, separatorIndex);
+          buffer = buffer.slice(separatorIndex + 2);
+          const lines = chunk.split("\n");
+          let eventType = "message";
+          let data = "";
+          for (const line of lines) {
+            if (line.startsWith("event:")) {
+              eventType = line.slice(6).trim();
+            } else if (line.startsWith("data:")) {
+              data += line.slice(5).trim();
+            }
+          }
+          if (!data) {
+            separatorIndex = buffer.indexOf("\n\n");
+            continue;
+          }
+          let payload: any = null;
+          try {
+            payload = JSON.parse(data);
+          } catch {
+            payload = { line: data };
+          }
+          if (eventType === "log") {
+            const line = payload?.line;
+            if (typeof line === "string") {
+              const extractMatch = line.match(/extract:\s*(\d+)\s*\/\s*(\d+)/i);
+              if (extractMatch) {
+                const done = Number(extractMatch[1]);
+                const total = Number(extractMatch[2]);
+                if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
+                  setIngestProgress({ done, total, kept: null, phase: "extract" });
+                }
+              }
+              const progressMatch = line.match(/frames:\s*(\d+)\s*\/\s*(\d+)(?:\s+kept=(\d+))?/i);
+              if (progressMatch) {
+                const done = Number(progressMatch[1]);
+                const total = Number(progressMatch[2]);
+                const kept = progressMatch[3] ? Number(progressMatch[3]) : null;
+                if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
+                  setIngestProgress({ done, total, kept: kept ?? null, phase: "process" });
+                }
+              }
+            }
+          } else if (eventType === "stage") {
+            const stage = payload?.stage as IngestPhase | undefined;
+            if (stage) {
+              setIngestPhase(stage);
+            }
+          } else if (eventType === "done") {
+            doneCode = Number(payload?.code ?? 0);
+          } else if (eventType === "error") {
+            throw new Error(payload?.message || "Ingest failed");
+          }
+          separatorIndex = buffer.indexOf("\n\n");
+        }
+      }
+      if (doneCode && doneCode !== 0) {
+        throw new Error(`Ingest failed (exit ${doneCode})`);
+      }
+      setIngestPhase("done");
+    } catch (err) {
+      setIngestPhase("error");
+      setIngestError(err instanceof Error ? err.message : "Ingest failed");
+      throw err;
+    }
+  }, []);
                                                                                                                  
   const clipEventsMap = useMemo(() => {                                                                          
     const map = new Map<number, EventView[]>();                                                                  
@@ -617,180 +837,135 @@ export default function WindowsEventsPage() {
     }                                                                                                            
   }, [sessions, selectedSessionId]);                                                                             
                                                                                                                  
-  useEffect(() => {                                                                                              
-    if (!selectedSession?.obs_video_path) {                                                                      
-      return;                                                                                                    
-    }                                                                                                            
+  useEffect(() => {
+    if (!selectedSession?.obs_video_path) {
+      return;
+    }
     if (!videoInput.trim()) {                                                                                    
       setVideoInput(selectedSession.obs_video_path);                                                             
       setVideoPath(selectedSession.obs_video_path);                                                              
     }                                                                                                            
-  }, [selectedSession, videoInput]);                                                                             
+  }, [selectedSession, videoInput]);
+
+  useEffect(() => {
+    if (ingestTargetPath && ingestTargetPath !== videoPath && ingestPhase !== "idle") {
+      setIngestPhase("idle");
+      setIngestProgress(null);
+      setIngestError(null);
+      setIngestTargetPath(null);
+    }
+  }, [videoPath, ingestTargetPath, ingestPhase]);
                                                                                                                  
-  useEffect(() => {                                                                                              
-    const fetchMetadata = async () => {                                                                          
-      if (!videoPath.trim() || !audioPath.trim()) {                                                              
-        setMetadata(null);                                                                                       
-        setMetadataError(null);                                                                                  
-        return;                                                                                                  
-      }                                                                                                          
-      setLoadingMetadata(true);                                                                                  
-      setMetadataError(null);                                                                                    
-      try {                                                                                                      
-        const res = await fetch("/api/video_web_playback", {                                                     
-          method: "POST",                                                                                        
-          headers: { "Content-Type": "application/json" },                                                       
-          body: JSON.stringify({ videoPath, audioPath }),                                                        
-        });                                                                                                      
-        if (!res.ok) {                                                                                           
-          const payload = await res.json().catch(() => ({}));                                                    
-          throw new Error(payload.error || `Metadata request failed (status ${res.status})`);                    
-        }                                                                                                        
-        const data: Metadata = await res.json();                                                                 
-        setMetadata(data);                                                                                       
-      } catch (err) {                                                                                            
-        setMetadata(null);                                                                                       
-        setMetadataError(err instanceof Error ? err.message : "Failed to load metadata");
-      } finally {                                                                                                
-        setLoadingMetadata(false);                                                                               
-      }                                                                                                          
-    };                                                                                                           
-    fetchMetadata();                                                                                             
-  }, [videoPath, audioPath]);                                                                                    
+  useEffect(() => {
+    const fetchMetadata = async () => {
+      if (!videoPath.trim()) {
+        setMetadata(null);
+        setMetadataError(null);
+        return;
+      }
+      setLoadingMetadata(true);
+      setMetadataError(null);
+      try {
+        const res = await fetch("/api/mkv_playback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ videoPath }),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || `Metadata request failed (status ${res.status})`);
+        }
+        const data: Metadata = await res.json();
+        setMetadata(data);
+      } catch (err) {
+        setMetadata(null);
+        const message = err instanceof Error ? err.message : "Failed to load metadata";
+        setMetadataError(message);
+        const lower = message.toLowerCase();
+        const missing = lower.includes("no video record");
+        if (missing && !ingestInProgressForVideo && !autoIngestedRef.current.has(videoPath)) {
+          autoIngestedRef.current.add(videoPath);
+          startIngest(videoPath)
+            .then(() => setMetadataRefreshKey((prev) => prev + 1))
+            .catch(() => {
+              /* handled by ingest state */
+            });
+        }
+      } finally {
+        setLoadingMetadata(false);
+      }
+    };
+    fetchMetadata();
+  }, [videoPath, metadataRefreshKey, ingestInProgressForVideo, startIngest]);
+
                                                                                                                  
-  useEffect(() => {                                                                                              
-    const fetchClips = async () => {                                                                             
-      if (!videoPath.trim()) {                                                                                   
-        setClips([]);                                                                                            
-        setClipError(null);                                                                                      
-        setClipBounds({ first: null, last: null });                                                              
-        return;                                                                                                  
-      }                                                                                                          
-      setLoadingClips(true);                                                                                     
-      setClipError(null);                                                                                        
-      try {                                                                                                      
-        const res = await fetch("/api/mkv_window_clips", {
-          method: "POST",                                                                                        
-          headers: { "Content-Type": "application/json" },                                                       
-          body: JSON.stringify({ videoPath }),                                                                   
-        });                                                                                                      
-        if (!res.ok) {                                                                                           
-          const payload = await res.json().catch(() => ({}));                                                    
-          throw new Error(payload.error || `Failed to load window clips (status ${res.status})`);                
-        }                                                                                                        
-        const data: WindowClipsResponse = await res.json();                                                      
-        const mapped: Clip[] = data.clips.map((clip, idx) => ({                                                  
-          id: idx,                                                                                               
-          window_name: clip.window_name || "Unknown window",                                                     
-          start_seconds: clip.start_seconds,                                                                     
-          end_seconds: clip.end_seconds,                                                                         
-          start_timestamp: clip.start_timestamp,                                                                 
-          end_timestamp: clip.end_timestamp,                                                                     
-          start_offset_index: clip.start_offset_index,                                                           
-          end_offset_index: clip.end_offset_index,                                                               
-          frame_count: clip.frame_count,                                                                         
-        }));                                                                                                     
-        setClips(mapped);                                                                                        
-        setClipBounds({ first: data.first_timestamp ?? null, last: data.last_timestamp ?? null });               
-      } catch (err) {                                                                                            
-        setClips([]);                                                                                            
-        setClipBounds({ first: null, last: null });                                                              
-        setClipError(err instanceof Error ? err.message : "Failed to load window clips");                        
-      } finally {                                                                                                
-        setLoadingClips(false);                                                                                  
-      }                                                                                                          
-    };                                                                                                           
-    fetchClips();                                                                                                
-  }, [videoPath]);                                                                                               
+  useEffect(() => {
+    if (!metadata?.transcription) {
+      setSegments([]);
+      setTranscriptError(null);
+      setLoadingTranscript(false);
+      return;
+    }
+    setLoadingTranscript(true);
+    setTranscriptError(null);
+    try {
+      const duration = metadata.video.duration ?? getTimelineDuration(metadata);
+      const derived = buildTranscriptSegments(metadata.transcription, duration ?? null);
+      setSegments(derived);
+    } catch (err) {
+      setSegments([]);
+      setTranscriptError(err instanceof Error ? err.message : "Failed to parse transcript");
+    } finally {
+      setLoadingTranscript(false);
+    }
+  }, [metadata]);
                                                                                                                  
-  useEffect(() => {                                                                                              
-    const fetchTranscript = async () => {                                                                        
-      if (!audioPath.trim()) {                                                                                   
-        setSegments([]);                                                                                         
-        setTranscriptError(null);                                                                                
-        return;                                                                                                  
-      }                                                                                                          
-      setLoadingTranscript(true);                                                                                
-      setTranscriptError(null);                                                                                  
-      try {                                                                                                      
-        const res = await fetch("/api/transcribe", {                                                             
-          method: "POST",                                                                                        
-          headers: { "Content-Type": "application/json" },                                                       
-          body: JSON.stringify({ audioPath }),                                                                   
-        });                                                                                                      
-        if (!res.ok) {                                                                                           
-          const payload = await res.json().catch(() => ({}));                                                    
-          throw new Error(payload.error || `Transcription failed (status ${res.status})`);                       
-        }                                                                                                        
-        const data = await res.json();                                                                           
-        setSegments(Array.isArray(data?.segments) ? data.segments : []);                                         
-      } catch (err) {                                                                                            
-        setSegments([]);                                                                                         
-        setTranscriptError(err instanceof Error ? err.message : "Failed to load transcript");                    
-      } finally {                                                                                                
-        setLoadingTranscript(false);                                                                             
-      }                                                                                                          
-    };                                                                                                           
-    fetchTranscript();                                                                                           
-  }, [audioPath]);                                                                                               
-                                                                                                                 
-  useEffect(() => {                                                                                              
-    const fetchEvents = async () => {                                                                            
-      if (!selectedSessionId) {                                                                                  
-        setEvents([]);                                                                                           
-        setEventError(null);                                                                                     
-        return;                                                                                                  
-      }                                                                                                          
-      setLoadingEvents(true);                                                                                    
-      setEventError(null);                                                                                       
-      try {                                                                                                      
-        const payload: any = {                                                                                   
-          sessionId: selectedSessionId,                                                                          
-        };                                                                                                       
-        if (enabledEventTypes.length > 0) {                                                                      
-          payload.eventTypes = enabledEventTypes;                                                                
-        }                                                                                                        
-        if (normalizedQuery && searchEvents) {                                                                   
-          payload.search = normalizedQuery;                                                                      
-        }                                                                                                        
-        if (clipBounds.first) {                                                                                  
-          const startMs = Date.parse(clipBounds.first);                                                          
-          if (Number.isFinite(startMs)) {                                                                        
-            payload.startMs = startMs;                                                                           
-          }                                                                                                      
-        }                                                                                                        
-        if (clipBounds.last) {                                                                                   
-          const endMs = Date.parse(clipBounds.last);                                                             
-          if (Number.isFinite(endMs)) {                                                                          
-            payload.endMs = endMs;                                                                               
-          }                                                                                                      
-        }                                                                                                        
-        const res = await fetch("/api/timestone_events", {                                                       
-          method: "POST",                                                                                        
-          headers: { "Content-Type": "application/json" },                                                       
-          body: JSON.stringify(payload),                                                                         
-        });                                                                                                      
-        if (!res.ok) {                                                                                           
-          const body = await res.json().catch(() => ({}));                                                       
-          throw new Error(body.error || `Failed to load events (status ${res.status})`);                         
-        }                                                                                                        
-        const data = await res.json();                                                                           
-        setEvents(Array.isArray(data?.events) ? (data.events as TimestoneEvent[]) : []);                         
-      } catch (err) {                                                                                            
-        setEvents([]);                                                                                           
-        setEventError(err instanceof Error ? err.message : "Failed to load events");                             
-      } finally {                                                                                                
-        setLoadingEvents(false);                                                                                 
-      }                                                                                                          
-    };                                                                                                           
-    fetchEvents();                                                                                               
-  }, [selectedSessionId, enabledEventTypes, normalizedQuery, searchEvents, clipBounds.first, clipBounds.last]);  
-                                                                                                                 
-  useEffect(() => {                                                                                              
-    if (!videoUrl) {                                                                                             
-      setVideoLoadError(null);                                                                                   
-    }                                                                                                            
-  }, [videoUrl]);                                                                                                
+  useEffect(() => {
+    const fetchEvents = async () => {
+      if (!selectedSessionId) {
+        setEvents([]);
+        setEventError(null);
+        return;
+      }
+      setLoadingEvents(true);
+      setEventError(null);
+      try {
+        const payload: any = {
+          sessionId: selectedSessionId,
+        };
+        if (enabledEventTypes.length > 0) {
+          payload.eventTypes = enabledEventTypes;
+        }
+        if (normalizedQuery && searchEvents) {
+          payload.search = normalizedQuery;
+        }
+        if (timelineBounds.first != null) {
+          payload.startMs = timelineBounds.first;
+        }
+        if (timelineBounds.last != null) {
+          payload.endMs = timelineBounds.last;
+        }
+        const res = await fetch("/api/timestone_events", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || `Failed to load events (status ${res.status})`);
+        }
+        const data = await res.json();
+        setEvents(Array.isArray(data?.events) ? (data.events as TimestoneEvent[]) : []);
+      } catch (err) {
+        setEvents([]);
+        setEventError(err instanceof Error ? err.message : "Failed to load events");
+      } finally {
+        setLoadingEvents(false);
+      }
+    };
+    fetchEvents();
+  }, [selectedSessionId, enabledEventTypes, normalizedQuery, searchEvents, timelineBounds.first, timelineBounds.last]);
+                                                                                                
                                                                                                                  
   const handleTogglePlayback = useCallback(() => {                                                               
     const video = videoRef.current;                                                                              
@@ -1088,49 +1263,61 @@ ols as
           )}                                                                                                     
         </section>                                                                                               
                                                                                                                  
-        <section style={{ background: "rgba(11, 17, 32, 0.8)", borderRadius: 14, padding: 20, display: "grid", gap: 16 }}>                                                                                                        
-          <div style={{ display: "grid", gap: 12 }}>                                                             
-            <label style={{ display: "grid", gap: 6 }}>                                                          
-              <span style={{ color: "#cbd5f5" }}>Video path (absolute or project-relative)</span>                
-              <input                                                                                             
-                value={videoInput}                                                                               
-                onChange={(e) => setVideoInput(e.target.value)}                                                  
-                placeholder="C:\\path\\to\\video.mp4"                                                            
-                style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120"
-, color: "#e2e8f0" }}                                                                                            
-              />                                                                                                 
-            </label>                                                                                             
-            <label style={{ display: "grid", gap: 6 }}>                                                          
-              <span style={{ color: "#cbd5f5" }}>Audio path (for transcript)</span>                              
-              <input                                                                                             
-                value={audioInput}                                                                               
-                onChange={(e) => setAudioInput(e.target.value)}                                                  
-                placeholder="C:\\path\\to\\audio.wav"                                                            
-                style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120"
-, color: "#e2e8f0" }}                                                                                            
-              />                                                                                                 
-            </label>                                                                                             
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>                                         
-              <button                                                                                            
-                type="button"                                                                                    
-                onClick={() => setVideoPath(videoInput.trim())}                                                  
-                style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #1e293b", background: "#0f172a"
-, color: "#e2e8f0" }}                                                                                            
-              >                                                                                                  
-                Load video                                                                                       
-              </button>                                                                                          
-              <button                                                                                            
-                type="button"                                                                                    
-                onClick={() => setAudioPath(audioInput.trim())}                                                  
-                style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #1e293b", background: "#0f172a"
-, color: "#e2e8f0" }}                                                                                            
-              >                                                                                                  
-                Load audio                                                                                       
-              </button>                                                                                          
-              {videoWarning && <span style={{ color: "#fca5a5" }}>{videoWarning}</span>}                         
-            </div>                                                                                               
-          </div>                                                                                                 
-        </section>                                                                                               
+        <section style={{ background: "rgba(11, 17, 32, 0.8)", borderRadius: 14, padding: 20, display: "grid", gap: 16 }}>
+          <div style={{ display: "grid", gap: 12 }}>
+            <label style={{ display: "grid", gap: 6 }}>
+              <span style={{ color: "#cbd5f5" }}>Video path (absolute or project-relative)</span>
+              <input
+                value={videoInput}
+                onChange={(e) => setVideoInput(e.target.value)}
+                placeholder="C:\\path\\to\\video.mp4"
+                style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120", color: "#e2e8f0" }}
+              />
+            </label>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => setVideoPath(videoInput.trim())}
+                style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #1e293b", background: "#0f172a", color: "#e2e8f0" }}
+              >
+                Load video
+              </button>
+              {videoWarning && <span style={{ color: "#fca5a5" }}>{videoWarning}</span>}
+            </div>
+          </div>
+        </section>
+
+        {ingestPhase !== "idle" && (
+          <section style={{ background: "rgba(15, 23, 42, 0.6)", borderRadius: 12, padding: 16, display: "grid", gap: 8 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+              <strong>Ingest status:</strong>
+              <span style={{ color: "#cbd5f5" }}>{ingestStatusLabel}</span>
+              {ingestPercent != null && <span style={{ color: "#94a3b8" }}>{ingestPercent}%</span>}
+            </div>
+            {ingestProgress && (
+              <>
+                <div style={{ color: "#94a3b8" }}>
+                  {ingestProgress.phase === "extract"
+                    ? `Extracting frames ${ingestProgress.done}/${ingestProgress.total}`
+                    : `Processing frames ${ingestProgress.done}/${ingestProgress.total}${ingestProgress.kept != null ? `, kept ${ingestProgress.kept}` : ""}`}
+                </div>
+                <div style={{ height: 8, background: "#1e293b", borderRadius: 999, overflow: "hidden" }}>
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${ingestPercent ?? 0}%`,
+                      background: ingestProgress.phase === "extract" ? "#38bdf8" : "#22c55e",
+                      transition: "width 0.2s ease",
+                    }}
+                  />
+                </div>
+              </>
+            )}
+            {ingestInProgressForVideo && <div style={{ color: "#cbd5f5" }}>Auto-ingesting this video...</div>}
+            {ingestError && <div style={{ color: "#fca5a5" }}>{ingestError}</div>}
+          </section>
+        )}
+                                                                                               
                                                                                                                  
         <section style={{ display: "grid", gap: 16 }}>                                                           
           <div                                                                                                   
@@ -1285,40 +1472,39 @@ ath is correct.`,
           {videoLoadError && <div style={{ color: "#fca5a5" }}>{videoLoadError}</div>}                           
         </section>                                                                                               
                                                                                                                  
-        <section style={{ background: "#0f172a", color: "#f8fafc", padding: 16, borderRadius: 8, display: "grid",
- gap: 12 }}>                                                                                                     
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>                     
-            <strong>Alignment:</strong>                                                                          
-            {loadingMetadata && <span style={{ color: "#94a3b8" }}>Loading metadata...</span>}                   
-            {metadataError && <span style={{ color: "#fca5a5" }}>{metadataError}</span>}                         
-            {metadata && (                                                                                       
-              <>                                                                                                 
-                <span>frames = {metadata.video.frame_count}</span>                                               
-                <span>timelineScale = {(timelineDuration && videoDuration ? timelineDuration / videoDuration : 1)
-.toFixed(3)}x</span>                                                                                             
-                <span>audioOffset = {formatOffset(metadata.alignment.audio_offset_seconds)}</span>               
-              </>                                                                                                
-            )}                                                                                                   
-          </div>                                                                                                 
-          <div>                                                                                                  
-            <strong>Current transcript:</strong>                                                                 
-            <div style={{ marginTop: 8, minHeight: 40 }}>                                                        
-              {activeSegmentText ? activeSegmentText : loadingTranscript ? "Loading..." : "--"}                  
-            </div>                                                                                               
-          </div>                                                                                                 
-          {transcriptError && <div style={{ color: "#fca5a5" }}>{transcriptError}</div>}                         
-        </section>                                                                                               
+        <section style={{ background: "#0f172a", color: "#f8fafc", padding: 16, borderRadius: 8, display: "grid", gap: 12 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+            <strong>Ingest summary:</strong>
+            {loadingMetadata && <span style={{ color: "#94a3b8" }}>Loading metadata...</span>}
+            {metadataError && !ingestInProgressForVideo && <span style={{ color: "#fca5a5" }}>{metadataError}</span>}
+            {metadata && (
+              <>
+                <span>frames = {metadata.video.frame_count ?? metadata.frames.length}</span>
+                <span>kept = {metadata.video.kept_frames ?? metadata.frames.length}</span>
+                <span>fps = {metadata.video.fps ?? "--"}</span>
+                <span>duration = {metadata.video.duration ? `${metadata.video.duration.toFixed(2)}s` : "--"}</span>
+                <span>
+                  size = {metadata.video.width && metadata.video.height ? `${metadata.video.width}x${metadata.video.height}` : "--"}
+                </span>
+              </>
+            )}
+          </div>
+          <div>
+            <strong>Current transcript:</strong>
+            <div style={{ marginTop: 8, minHeight: 40 }}>
+              {activeSegmentText ? activeSegmentText : loadingTranscript ? "Loading..." : "--"}
+            </div>
+          </div>
+          {transcriptError && <div style={{ color: "#fca5a5" }}>{transcriptError}</div>}
+        </section>
                                                                                                                  
         <section style={{ display: "grid", gap: 16 }}>                                                           
           <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>                     
             <h2 style={{ margin: 0 }}>Window clips</h2>                                                          
-            {loadingClips && <span style={{ color: "#64748b" }}>Loading clips...</span>}                         
-            {clipError && <span style={{ color: "#fca5a5" }}>{clipError}</span>}                                 
             <span style={{ color: "#94a3b8" }}>{filteredClips.length} clips</span>                               
             <span style={{ color: "#94a3b8" }}>{filteredEvents.length} events</span>                             
           </div>                                                                                                 
-                                                                                                                 
-          {filteredClips.length === 0 && !loadingClips ? (                                                       
+          {filteredClips.length === 0 ? (                                                                        
             <div style={{ color: "#94a3b8" }}>No window clips match this search.</div>                           
           ) : (                                                                                                  
             <div style={{ display: "grid", gap: 16 }}>                                                           
@@ -1343,7 +1529,7 @@ ath is correct.`,
                       <span style={{ color: "#94a3b8" }}>                                                        
                         {formatTime(clip.start_seconds)} - {formatTime(clip.end_seconds)}                        
                       </span>                                                                                    
-                      <span style={{ color: "#64748b" }}>{clip.frame_count} frames</span>                        
+                      <span style={{ color: "#64748b" }}>{eventsForClip.length} events</span>
                     </div>                                                                                       
                                                                                                                  
                     <div style={{ display: "grid", gap: 10 }}>                                                   
