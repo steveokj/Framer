@@ -62,6 +62,7 @@ struct RecorderConfig {
     window_poll_hz: u64,
     capture_raw_keys: bool,
     raw_keys_mode: String,
+    suppress_raw_keys_on_shortcut: bool,
     obs_video_path: Option<String>,
     safe_text_only: bool,
     allowlist_processes: Vec<String>,
@@ -81,6 +82,7 @@ impl Default for RecorderConfig {
             window_poll_hz: 0,
             capture_raw_keys: false,
             raw_keys_mode: "down".to_string(),
+            suppress_raw_keys_on_shortcut: true,
             obs_video_path: None,
             safe_text_only: true,
             allowlist_processes: Vec::new(),
@@ -126,6 +128,7 @@ struct RecorderState {
     last_mouse_move_ms: AtomicI64,
     capture_raw_keys: bool,
     raw_keys_mode: RawKeysMode,
+    suppress_raw_keys_on_shortcut: bool,
     emit_mouse_move: bool,
     emit_mouse_scroll: bool,
     pressed_keys: Mutex<HashSet<u32>>,
@@ -285,6 +288,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         last_mouse_move_ms: AtomicI64::new(-1),
         capture_raw_keys: config.capture_raw_keys,
         raw_keys_mode: parse_raw_keys_mode(&config.raw_keys_mode),
+        suppress_raw_keys_on_shortcut: config.suppress_raw_keys_on_shortcut,
         emit_mouse_move: config.emit_mouse_move,
         emit_mouse_scroll: config.emit_mouse_scroll,
         pressed_keys: Mutex::new(HashSet::new()),
@@ -1044,7 +1048,8 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
 
                 let modifiers = current_modifiers(&pressed);
                 let is_modifier = is_modifier_key(vk);
-                if is_down && !is_modifier && !modifiers.is_empty() {
+                let is_chorded = !is_modifier && !modifiers.is_empty();
+                if is_down && is_chorded {
                     let event = EventRecord {
                         session_id: state.session_id.clone(),
                         ts_wall_ms: now_wall_ms(),
@@ -1084,6 +1089,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 if state.capture_raw_keys
                     && ((is_down && state.raw_keys_mode != RawKeysMode::Up)
                         || (is_up && state.raw_keys_mode != RawKeysMode::Down))
+                    && !(state.suppress_raw_keys_on_shortcut && is_chorded)
                 {
                     let event = EventRecord {
                         session_id: state.session_id.clone(),
