@@ -80,6 +80,7 @@ web/.env.test.local
 .ipynb_checkpoints/
 
 # Node/Next.js artifacts
+node_modules/
 web/node_modules/
 web/.next/
 web/out/
@@ -100,3 +101,9 @@ web/pnpm-debug.log*
 # OS generated
 .DS_Store
 Thumbs.db
+
+# Rust build artifacts
+tools/timestone_recorder/target/
+
+# Local recorder config
+data/timestone/config.json
