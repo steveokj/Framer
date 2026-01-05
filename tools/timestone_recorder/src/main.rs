@@ -16,22 +16,23 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::ProcessStatus::QueryFullProcessImageNameW;
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    CallNextHookEx, GetKeyboardLayout, GetKeyboardState, SetWindowsHookExW, ToUnicodeEx, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT,
-    VK_BACK, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT,
-    VK_RWIN, VK_SHIFT, VK_TAB, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VK_BACK, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+    VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    CUIAutomation, IUIAutomation, UIA_CONTROLTYPE_ID, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-    PostQuitMessage, TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, PostQuitMessage, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK,
+    KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP,
 };
@@ -108,7 +109,6 @@ struct RecorderState {
     session_id: String,
     sender: Sender<EventRecord>,
     start_instant: Instant,
-    shutdown: Arc<AtomicBool>,
     mouse_move_interval_ms: i64,
     last_mouse_move_ms: AtomicI64,
     capture_raw_keys: bool,
@@ -121,7 +121,7 @@ struct RecorderState {
     text_buffer: Mutex<TextBuffer>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq)]
 struct RectInfo {
     left: i32,
     top: i32,
@@ -256,7 +256,6 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         session_id: session_id.clone(),
         sender: tx.clone(),
         start_instant,
-        shutdown: shutdown.clone(),
         mouse_move_interval_ms: (1000 / config.mouse_hz.max(1)) as i64,
         last_mouse_move_ms: AtomicI64::new(-1),
         capture_raw_keys: config.capture_raw_keys,
@@ -310,8 +309,8 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     shutdown.store(true, Ordering::SeqCst);
     send_session_event(&state, "session_stop", json!({ "note": "manual_stop" }));
     unsafe {
-        UnhookWindowsHookEx(mouse_hook);
-        UnhookWindowsHookEx(keyboard_hook);
+        let _ = UnhookWindowsHookEx(mouse_hook);
+        let _ = UnhookWindowsHookEx(keyboard_hook);
     }
 
     snapshot_handle.join().ok();
@@ -504,8 +503,8 @@ fn spawn_snapshot_loop(
                         ts_mono_ms: now_mono_ms(&state),
                         event_type: "active_window_changed".to_string(),
                         process_name: window_info.process_name.clone(),
-                        window_title: window_info.title.clone(),
-                        window_class: window_info.class_name.clone(),
+                        window_title: Some(window_info.title.clone()),
+                        window_class: Some(window_info.class_name.clone()),
                         window_rect: window_info.rect.clone(),
                         mouse: None,
                         payload: json!({}),
@@ -521,8 +520,8 @@ fn spawn_snapshot_loop(
                         ts_mono_ms: now_mono_ms(&state),
                         event_type: "window_rect_changed".to_string(),
                         process_name: window_info.process_name.clone(),
-                        window_title: window_info.title.clone(),
-                        window_class: window_info.class_name.clone(),
+                        window_title: Some(window_info.title.clone()),
+                        window_class: Some(window_info.class_name.clone()),
                         window_rect: window_info.rect.clone(),
                         mouse: None,
                         payload: json!({}),
@@ -538,14 +537,16 @@ fn spawn_snapshot_loop(
 
 fn install_hooks() -> Result<(HHOOK, HHOOK)> {
     unsafe {
-        let module = GetModuleHandleW(None).unwrap_or(HINSTANCE::default());
-        let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), module, 0);
+        let module = GetModuleHandleW(None).unwrap_or(HMODULE::default());
+        let mouse_hook =
+            SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), module, 0).context("Failed to install mouse hook")?;
         if mouse_hook.0 == 0 {
             anyhow::bail!("Failed to install mouse hook");
         }
-        let keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), module, 0);
+        let keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), module, 0)
+            .context("Failed to install keyboard hook")?;
         if keyboard_hook.0 == 0 {
-            UnhookWindowsHookEx(mouse_hook);
+            let _ = UnhookWindowsHookEx(mouse_hook);
             anyhow::bail!("Failed to install keyboard hook");
         }
         Ok((mouse_hook, keyboard_hook))
@@ -613,7 +614,7 @@ struct WindowInfo {
 fn cursor_position() -> Option<(i32, i32)> {
     unsafe {
         let mut pt = POINT::default();
-        if windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt).as_bool() {
+        if windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt).is_ok() {
             Some((pt.x, pt.y))
         } else {
             None
@@ -668,7 +669,7 @@ fn get_window_class(hwnd: HWND) -> String {
 fn get_window_rect(hwnd: HWND) -> Option<RectInfo> {
     unsafe {
         let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).as_bool() {
+        if GetWindowRect(hwnd, &mut rect).is_ok() {
             Some(RectInfo {
                 left: rect.left,
                 top: rect.top,
@@ -690,13 +691,22 @@ fn get_process_name(hwnd: HWND) -> Option<String> {
         if pid == 0 {
             return None;
         }
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(handle) => handle,
+            Err(_) => return None,
+        };
         if handle.is_invalid() {
             return None;
         }
         let mut buffer = vec![0u16; 512];
         let mut size: u32 = buffer.len() as u32;
-        let ok = QueryFullProcessImageNameW(handle, 0, &mut buffer, &mut size).as_bool();
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
+        .is_ok();
         let _ = CloseHandle(handle);
         if !ok {
             return None;
@@ -923,27 +933,25 @@ fn should_capture_text(state: &RecorderState, window_info: Option<&WindowInfo>) 
     let Some(uia) = get_uia() else {
         return false;
     };
-    let element = match uia.GetFocusedElement() {
+    let element = match unsafe { uia.GetFocusedElement() } {
         Ok(element) => element,
         Err(_) => return false,
     };
-    let has_focus = element
-        .CurrentHasKeyboardFocus()
+    let has_focus = unsafe { element.CurrentHasKeyboardFocus() }
         .ok()
         .map(|value| value.as_bool())
         .unwrap_or(false);
     if !has_focus {
         return false;
     }
-    let is_password = element
-        .CurrentIsPassword()
+    let is_password = unsafe { element.CurrentIsPassword() }
         .ok()
         .map(|value| value.as_bool())
         .unwrap_or(false);
     if is_password {
         return false;
     }
-    let control_type = element.CurrentControlType().unwrap_or(0);
+    let control_type = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     if control_type != UIA_EditControlTypeId && control_type != UIA_DocumentControlTypeId {
         return false;
     }
@@ -1020,20 +1028,12 @@ fn handle_text_key(state: &RecorderState, window_info: Option<WindowInfo>, vk: u
 fn translate_vk_to_text(vk: u32, scan_code: u32) -> Option<String> {
     unsafe {
         let mut key_state = [0u8; 256];
-        if !GetKeyboardState(&mut key_state).as_bool() {
+        if GetKeyboardState(&mut key_state).is_err() {
             return None;
         }
         let layout = GetKeyboardLayout(0);
         let mut buffer = [0u16; 8];
-        let written = ToUnicodeEx(
-            vk,
-            scan_code,
-            &key_state,
-            PWSTR(buffer.as_mut_ptr()),
-            buffer.len() as i32,
-            0,
-            layout,
-        );
+        let written = ToUnicodeEx(vk, scan_code, &key_state, &mut buffer, 0, layout);
         if written <= 0 {
             return None;
         }
@@ -1114,7 +1114,7 @@ fn send_text_event(state: &RecorderState, window_info: Option<WindowInfo>, text:
 }
 
 fn run_writer(rx: Receiver<EventRecord>, db_path: &Path, session: SessionInfo, shutdown: Arc<AtomicBool>) {
-    let conn = match Connection::open(db_path) {
+    let mut conn = match Connection::open(db_path) {
         Ok(conn) => conn,
         Err(err) => {
             eprintln!("DB open failed: {err}");
@@ -1137,7 +1137,7 @@ fn run_writer(rx: Receiver<EventRecord>, db_path: &Path, session: SessionInfo, s
             Ok(event) => {
                 buffer.push(event);
                 if buffer.len() >= 200 {
-                    if let Err(err) = flush_events(&conn, &buffer) {
+                    if let Err(err) = flush_events(&mut conn, &buffer) {
                         eprintln!("Event flush failed: {err}");
                     }
                     buffer.clear();
@@ -1145,7 +1145,7 @@ fn run_writer(rx: Receiver<EventRecord>, db_path: &Path, session: SessionInfo, s
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 if !buffer.is_empty() {
-                    if let Err(err) = flush_events(&conn, &buffer) {
+                    if let Err(err) = flush_events(&mut conn, &buffer) {
                         eprintln!("Event flush failed: {err}");
                     }
                     buffer.clear();
@@ -1205,37 +1205,39 @@ fn insert_session(conn: &Connection, session: &SessionInfo) -> Result<()> {
     Ok(())
 }
 
-fn flush_events(conn: &Connection, events: &[EventRecord]) -> Result<()> {
+fn flush_events(conn: &mut Connection, events: &[EventRecord]) -> Result<()> {
     let tx = conn.transaction()?;
-    let mut stmt = tx.prepare(
-        "INSERT INTO events (
-            session_id, ts_wall_ms, ts_mono_ms, event_type, process_name, window_title, window_class, window_rect, mouse, payload
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO events (
+                session_id, ts_wall_ms, ts_mono_ms, event_type, process_name, window_title, window_class, window_rect, mouse, payload
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )?;
 
-    for event in events {
-        let window_rect = event
-            .window_rect
-            .as_ref()
-            .and_then(|rect| serde_json::to_string(rect).ok());
-        let mouse = event
-            .mouse
-            .as_ref()
-            .and_then(|m| serde_json::to_string(m).ok());
-        let payload = serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".to_string());
+        for event in events {
+            let window_rect = event
+                .window_rect
+                .as_ref()
+                .and_then(|rect| serde_json::to_string(rect).ok());
+            let mouse = event
+                .mouse
+                .as_ref()
+                .and_then(|m| serde_json::to_string(m).ok());
+            let payload = serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".to_string());
 
-        stmt.execute(params![
-            event.session_id,
-            event.ts_wall_ms,
-            event.ts_mono_ms,
-            event.event_type,
-            event.process_name,
-            event.window_title,
-            event.window_class,
-            window_rect,
-            mouse,
-            payload,
-        ])?;
+            stmt.execute(params![
+                event.session_id,
+                event.ts_wall_ms,
+                event.ts_mono_ms,
+                event.event_type,
+                event.process_name,
+                event.window_title,
+                event.window_class,
+                window_rect,
+                mouse,
+                payload,
+            ])?;
+        }
     }
     tx.commit()?;
     Ok(())
