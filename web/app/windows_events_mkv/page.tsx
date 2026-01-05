@@ -122,11 +122,28 @@ const API_BASE = (
     : "http://localhost:8001"                                                                                    
 ).replace(/\/$/, "");                                                                                            
                                                                                                                  
-const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;                                                               
-                                                                                                                 
-function normalisePath(input: string): string {                                                                  
-  return input.replace(/\\/g, "/").replace(/^\.?\//, "");                                                        
-}                                                                                                                
+const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
+
+function normalisePath(input: string): string {
+  return input.replace(/\\/g, "/").replace(/^\.?\//, "");
+}
+
+function parseObsStartMs(pathValue: string): number | null {
+  const trimmed = pathValue.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const baseName = trimmed.split(/[/\\]/).pop() || "";
+  const match = baseName.match(/(\d{4}-\d{2}-\d{2})[ _T](\d{2})[-.](\d{2})[-.](\d{2})/);
+  if (!match) {
+    return null;
+  }
+  const datePart = match[1];
+  const timePart = `${match[2]}:${match[3]}:${match[4]}`;
+  const parsed = new Date(`${datePart}T${timePart}`);
+  const ms = parsed.getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
                                                                                                                  
 function buildFileUrl(pathInput: string): { url: string | null; warning: string | null } {                       
   const trimmed = pathInput.trim();                                                                              
@@ -473,9 +490,12 @@ function buildWindowClipsFromEvents(events: EventView[], timelineEnd: number | n
   }
   const endFallback = timelineEnd ?? windowEvents[windowEvents.length - 1].event.timeline_seconds + 1;
   return windowEvents.map((entry, index) => {
-    const startSeconds = Math.max(0, entry.event.timeline_seconds);
+    const startSeconds = entry.event.timeline_seconds;
     const next = windowEvents[index + 1];
-    const endSeconds = Math.max(startSeconds + 0.05, next ? next.event.timeline_seconds : endFallback);
+    let endSeconds = next ? next.event.timeline_seconds : endFallback;
+    if (endSeconds < startSeconds) {
+      endSeconds = startSeconds;
+    }
     const startWall = originMs != null ? originMs + startSeconds * 1000 : entry.event.ts_wall_ms;
     const endWall = originMs != null ? originMs + endSeconds * 1000 : entry.event.ts_wall_ms + (endSeconds - startSeconds) * 1000;
     return {
@@ -640,7 +660,11 @@ function ClipCard({
       const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : videoDuration;
       const targetVideo = mapTimelineToVideo(targetTimeline, duration ?? null, metadata);
       if (Number.isFinite(targetVideo)) {
-        video.currentTime = Math.max(0, targetVideo);
+        let nextTime = Math.max(0, targetVideo);
+        if (duration != null && Number.isFinite(duration)) {
+          nextTime = Math.min(nextTime, duration);
+        }
+        video.currentTime = nextTime;
       }
       const relative = Math.max(0, targetTimeline - clip.start_seconds);
       setClipTime(Math.min(relative, clipDuration));
@@ -1131,9 +1155,23 @@ export default function WindowsEventsPage() {
     };
   }, [metadata]);
 
+  const videoStartWallMs = useMemo(() => {
+    const parsed = parseObsStartMs(videoPath);
+    if (parsed != null) {
+      return parsed;
+    }
+    if (metadata?.video.creation_time) {
+      const parsedMeta = Date.parse(metadata.video.creation_time);
+      if (Number.isFinite(parsedMeta)) {
+        return parsedMeta;
+      }
+    }
+    return null;
+  }, [videoPath, metadata]);
+
   const timelineOriginMs = useMemo(() => {
-    if (timelineBounds.first != null) {
-      return timelineBounds.first;
+    if (videoStartWallMs != null) {
+      return videoStartWallMs;
     }
     if (events.length > 0) {
       return events[0].ts_wall_ms;
@@ -1142,7 +1180,7 @@ export default function WindowsEventsPage() {
       return selectedSession.start_wall_ms;
     }
     return null;
-  }, [timelineBounds.first, events, selectedSession]);
+  }, [videoStartWallMs, events, selectedSession]);
 
   const monoBaseMs = useMemo(() => {
     const first = events.find((event) => Number.isFinite(event.ts_wall_ms) && Number.isFinite(event.ts_mono_ms));
