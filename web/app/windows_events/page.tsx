@@ -934,10 +934,9 @@ export default function WindowsEventsPage() {
           sessionId: selectedSessionId,
         };
         if (enabledEventTypes.length > 0) {
-          payload.eventTypes = enabledEventTypes;
-        }
-        if (normalizedQuery && searchEvents) {
-          payload.search = normalizedQuery;
+          payload.eventTypes = enabledEventTypes.includes("active_window_changed")
+            ? enabledEventTypes
+            : [...enabledEventTypes, "active_window_changed"];
         }
         if (timelineBounds.first != null) {
           payload.startMs = timelineBounds.first;
