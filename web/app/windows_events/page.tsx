@@ -669,7 +669,7 @@ export default function WindowsEventsPage() {
       setLoadingClips(true);                                                                                     
       setClipError(null);                                                                                        
       try {                                                                                                      
-        const res = await fetch("/api/windows_clips", {                                                          
+        const res = await fetch("/api/mkv_window_clips", {
           method: "POST",                                                                                        
           headers: { "Content-Type": "application/json" },                                                       
           body: JSON.stringify({ videoPath }),                                                                   
