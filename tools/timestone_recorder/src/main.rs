@@ -3,8 +3,9 @@ use chrono::{DateTime, Local};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use once_cell::sync::OnceCell;
 use rusqlite::{params, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -14,13 +15,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::QueryFullProcessImageNameW;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    CallNextHookEx, SetWindowsHookExW, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
-    VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    CallNextHookEx, GetKeyboardLayout, GetKeyboardState, SetWindowsHookExW, ToUnicodeEx, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT,
+    VK_BACK, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT,
+    VK_RWIN, VK_SHIFT, VK_TAB, WH_KEYBOARD_LL, WH_MOUSE_LL,
+};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
@@ -33,15 +40,55 @@ const APP_DIR: &str = "data\\timestone";
 const DB_NAME: &str = "timestone_events.sqlite3";
 const LOCK_FILE: &str = "recorder.lock";
 const STOP_FILE: &str = "stop.signal";
+const CONFIG_FILE: &str = "config.json";
 
 static STATE: OnceCell<Arc<RecorderState>> = OnceCell::new();
+thread_local! {
+    static UIA: RefCell<Option<IUIAutomation>> = RefCell::new(None);
+}
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct RecorderConfig {
     mouse_hz: u64,
     snapshot_hz: u64,
     capture_raw_keys: bool,
     obs_video_path: Option<String>,
+    safe_text_only: bool,
+    allowlist_processes: Vec<String>,
+    blocklist_processes: Vec<String>,
+    text_flush_ms: u64,
+    max_text_len: usize,
+}
+
+impl Default for RecorderConfig {
+    fn default() -> Self {
+        Self {
+            mouse_hz: 30,
+            snapshot_hz: 1,
+            capture_raw_keys: false,
+            obs_video_path: None,
+            safe_text_only: true,
+            allowlist_processes: Vec::new(),
+            blocklist_processes: vec![
+                "1password.exe".to_string(),
+                "keepass.exe".to_string(),
+                "bitwarden.exe".to_string(),
+            ],
+            text_flush_ms: 1500,
+            max_text_len: 2000,
+        }
+    }
+}
+
+#[derive(Default)]
+struct CliOverrides {
+    config_path: Option<PathBuf>,
+    mouse_hz: Option<u64>,
+    snapshot_hz: Option<u64>,
+    capture_raw_keys: Option<bool>,
+    obs_video_path: Option<String>,
+    safe_text_only: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -50,6 +97,11 @@ struct SessionInfo {
     start_wall_ms: i64,
     start_wall_iso: String,
     obs_video_path: Option<String>,
+}
+
+struct TextBuffer {
+    text: String,
+    last_ts_ms: i64,
 }
 
 struct RecorderState {
@@ -61,6 +113,12 @@ struct RecorderState {
     last_mouse_move_ms: AtomicI64,
     capture_raw_keys: bool,
     pressed_keys: Mutex<HashSet<u32>>,
+    safe_text_only: bool,
+    allowlist_processes: Vec<String>,
+    blocklist_processes: Vec<String>,
+    text_flush_ms: i64,
+    max_text_len: usize,
+    text_buffer: Mutex<TextBuffer>,
 }
 
 #[derive(Serialize, Clone)]
@@ -99,8 +157,8 @@ fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("start") => {
-            let config = parse_start_args(args);
-            run_recorder(config)?;
+            let overrides = parse_start_args(args);
+            run_recorder(overrides)?;
         }
         Some("stop") => {
             stop_recorder()?;
@@ -118,55 +176,65 @@ fn main() -> Result<()> {
 fn print_usage() {
     println!("timestone_recorder");
     println!("Usage:");
-    println!("  timestone_recorder start [--raw-keys] [--mouse-hz N] [--snapshot-hz N] [--obs-video PATH]");
+    println!("  timestone_recorder start [--config PATH] [--safe-text|--no-safe-text] [--raw-keys]");
+    println!("                           [--mouse-hz N] [--snapshot-hz N] [--obs-video PATH]");
     println!("  timestone_recorder stop");
     println!("  timestone_recorder status");
 }
 
-fn parse_start_args(mut args: impl Iterator<Item = String>) -> RecorderConfig {
-    let mut config = RecorderConfig {
-        mouse_hz: 30,
-        snapshot_hz: 1,
-        capture_raw_keys: false,
-        obs_video_path: None,
-    };
+fn parse_start_args(mut args: impl Iterator<Item = String>) -> CliOverrides {
+    let mut overrides = CliOverrides::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--config" => {
+                if let Some(value) = args.next() {
+                    overrides.config_path = Some(PathBuf::from(value));
+                }
+            }
+            "--safe-text" => {
+                overrides.safe_text_only = Some(true);
+            }
+            "--no-safe-text" => {
+                overrides.safe_text_only = Some(false);
+            }
             "--raw-keys" => {
-                config.capture_raw_keys = true;
+                overrides.capture_raw_keys = Some(true);
             }
             "--mouse-hz" => {
                 if let Some(value) = args.next() {
                     if let Ok(parsed) = value.parse::<u64>() {
-                        config.mouse_hz = parsed.max(1);
+                        overrides.mouse_hz = Some(parsed.max(1));
                     }
                 }
             }
             "--snapshot-hz" => {
                 if let Some(value) = args.next() {
                     if let Ok(parsed) = value.parse::<u64>() {
-                        config.snapshot_hz = parsed.max(1);
+                        overrides.snapshot_hz = Some(parsed.max(1));
                     }
                 }
             }
             "--obs-video" => {
                 if let Some(value) = args.next() {
-                    config.obs_video_path = Some(value);
+                    overrides.obs_video_path = Some(value);
                 }
             }
             _ => {}
         }
     }
-    config
+    overrides
 }
 
-fn run_recorder(config: RecorderConfig) -> Result<()> {
+fn run_recorder(overrides: CliOverrides) -> Result<()> {
     let base_dir = ensure_app_dir()?;
+    let config = load_config(&base_dir, &overrides)?;
     let lock_path = base_dir.join(LOCK_FILE);
     if lock_path.exists() {
         println!("Recorder already running (lock file present).");
         return Ok(());
     }
+
+    let _com_guard = ComGuard::new(config.safe_text_only);
 
     let session_id = Uuid::new_v4().to_string();
     let start_wall_ms = now_wall_ms();
@@ -193,6 +261,15 @@ fn run_recorder(config: RecorderConfig) -> Result<()> {
         last_mouse_move_ms: AtomicI64::new(-1),
         capture_raw_keys: config.capture_raw_keys,
         pressed_keys: Mutex::new(HashSet::new()),
+        safe_text_only: config.safe_text_only,
+        allowlist_processes: config.allowlist_processes.clone(),
+        blocklist_processes: config.blocklist_processes.clone(),
+        text_flush_ms: config.text_flush_ms as i64,
+        max_text_len: config.max_text_len,
+        text_buffer: Mutex::new(TextBuffer {
+            text: String::new(),
+            last_ts_ms: 0,
+        }),
     });
     let _ = STATE.set(state.clone());
 
@@ -229,6 +306,7 @@ fn run_recorder(config: RecorderConfig) -> Result<()> {
         }
     }
 
+    flush_text_buffer(&state, "session_end");
     shutdown.store(true, Ordering::SeqCst);
     send_session_event(&state, "session_stop", json!({ "note": "manual_stop" }));
     unsafe {
@@ -289,6 +367,106 @@ fn write_lock(path: &Path, session: &SessionInfo) -> Result<()> {
     Ok(())
 }
 
+struct ComGuard {
+    initialized: bool,
+}
+
+impl ComGuard {
+    fn new(warn_on_fail: bool) -> Self {
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+        if warn_on_fail {
+            if !initialized {
+                eprintln!("Warning: COM init failed, safe text capture disabled.");
+            }
+        }
+        Self { initialized }
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
+fn load_config(base_dir: &Path, overrides: &CliOverrides) -> Result<RecorderConfig> {
+    let config_path = overrides
+        .config_path
+        .clone()
+        .unwrap_or_else(|| base_dir.join(CONFIG_FILE));
+    let mut config = load_or_create_config(&config_path)?;
+    apply_overrides(&mut config, overrides);
+    Ok(normalize_config(config))
+}
+
+fn load_or_create_config(path: &Path) -> Result<RecorderConfig> {
+    if path.exists() {
+        let contents = fs::read_to_string(path).context("Failed to read config file")?;
+        let config: RecorderConfig =
+            serde_json::from_str(&contents).context("Failed to parse config file")?;
+        return Ok(config);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("Failed to create config directory")?;
+    }
+    let config = RecorderConfig::default();
+    let payload = serde_json::to_string_pretty(&config).context("Failed to serialize config")?;
+    fs::write(path, payload).context("Failed to write config file")?;
+    Ok(config)
+}
+
+fn apply_overrides(config: &mut RecorderConfig, overrides: &CliOverrides) {
+    if let Some(mouse_hz) = overrides.mouse_hz {
+        config.mouse_hz = mouse_hz;
+    }
+    if let Some(snapshot_hz) = overrides.snapshot_hz {
+        config.snapshot_hz = snapshot_hz;
+    }
+    if let Some(capture_raw_keys) = overrides.capture_raw_keys {
+        config.capture_raw_keys = capture_raw_keys;
+    }
+    if let Some(obs_video_path) = overrides.obs_video_path.clone() {
+        config.obs_video_path = Some(obs_video_path);
+    }
+    if let Some(safe_text_only) = overrides.safe_text_only {
+        config.safe_text_only = safe_text_only;
+    }
+}
+
+fn normalize_config(mut config: RecorderConfig) -> RecorderConfig {
+    config.mouse_hz = config.mouse_hz.max(1);
+    config.snapshot_hz = config.snapshot_hz.max(1);
+    config.text_flush_ms = config.text_flush_ms.max(250);
+    if config.max_text_len < 16 {
+        config.max_text_len = 16;
+    }
+    if let Some(path) = config.obs_video_path.as_ref() {
+        if path.trim().is_empty() {
+            config.obs_video_path = None;
+        }
+    }
+    config.allowlist_processes = normalize_process_list(config.allowlist_processes);
+    config.blocklist_processes = normalize_process_list(config.blocklist_processes);
+    config
+}
+
+fn normalize_process_list(list: Vec<String>) -> Vec<String> {
+    list.into_iter()
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_ascii_lowercase())
+            }
+        })
+        .collect()
+}
+
 fn spawn_snapshot_loop(
     state: Arc<RecorderState>,
     stop_path: PathBuf,
@@ -302,12 +480,15 @@ fn spawn_snapshot_loop(
         while !shutdown.load(Ordering::SeqCst) {
             if stop_path.exists() {
                 let _ = fs::remove_file(&stop_path);
+                flush_text_buffer(&state, "stop_signal");
                 shutdown.store(true, Ordering::SeqCst);
                 unsafe {
                     PostQuitMessage(0);
                 }
                 break;
             }
+
+            flush_text_buffer_if_stale(&state, "idle_timeout");
 
             if let Some(snapshot) = build_snapshot(&state) {
                 state.sender.try_send(snapshot).ok();
@@ -316,6 +497,7 @@ fn spawn_snapshot_loop(
             if let Some((hwnd, window_info)) = active_window_info() {
                 if hwnd != last_hwnd {
                     last_hwnd = hwnd;
+                    flush_text_buffer_with_window(&state, Some(window_info.clone()), "window_change");
                     let event = EventRecord {
                         session_id: state.session_id.clone(),
                         ts_wall_ms: now_wall_ms(),
@@ -614,6 +796,24 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     state.sender.try_send(event).ok();
                 }
 
+                let has_ctrl = pressed.contains(&(VK_CONTROL.0 as u32))
+                    || pressed.contains(&(VK_LCONTROL.0 as u32))
+                    || pressed.contains(&(VK_RCONTROL.0 as u32));
+                let has_alt = pressed.contains(&(VK_MENU.0 as u32))
+                    || pressed.contains(&(VK_LMENU.0 as u32))
+                    || pressed.contains(&(VK_RMENU.0 as u32));
+                let has_win =
+                    pressed.contains(&(VK_LWIN.0 as u32)) || pressed.contains(&(VK_RWIN.0 as u32));
+
+                if is_down && !is_modifier && !has_ctrl && !has_alt && !has_win {
+                    let window_info = active_window_info().map(|(_, info)| info);
+                    if !should_capture_text(state, window_info.as_ref()) {
+                        flush_text_buffer_with_window(state, window_info, "unsafe_target");
+                    } else {
+                        handle_text_key(state, window_info, vk, data.scanCode);
+                    }
+                }
+
                 if state.capture_raw_keys {
                     let event = EventRecord {
                         session_id: state.session_id.clone(),
@@ -695,6 +895,222 @@ fn vk_to_name(vk: u32) -> String {
         0x70..=0x7B => format!("F{}", vk - 0x6F),
         _ => format!("VK_{vk:02X}"),
     }
+}
+
+fn get_uia() -> Option<IUIAutomation> {
+    UIA.with(|cell| {
+        let mut stored = cell.borrow_mut();
+        if stored.is_none() {
+            if let Ok(automation) = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) } {
+                *stored = Some(automation);
+            }
+        }
+        stored.clone()
+    })
+}
+
+fn should_capture_text(state: &RecorderState, window_info: Option<&WindowInfo>) -> bool {
+    let process_name = window_info.and_then(|info| info.process_name.as_deref());
+    if process_is_blocked(state, process_name) {
+        return false;
+    }
+    if !process_is_allowed(state, process_name) {
+        return false;
+    }
+    if !state.safe_text_only {
+        return true;
+    }
+    let Some(uia) = get_uia() else {
+        return false;
+    };
+    let element = match uia.GetFocusedElement() {
+        Ok(element) => element,
+        Err(_) => return false,
+    };
+    let has_focus = element
+        .CurrentHasKeyboardFocus()
+        .ok()
+        .map(|value| value.as_bool())
+        .unwrap_or(false);
+    if !has_focus {
+        return false;
+    }
+    let is_password = element
+        .CurrentIsPassword()
+        .ok()
+        .map(|value| value.as_bool())
+        .unwrap_or(false);
+    if is_password {
+        return false;
+    }
+    let control_type = element.CurrentControlType().unwrap_or(0);
+    if control_type != UIA_EditControlTypeId && control_type != UIA_DocumentControlTypeId {
+        return false;
+    }
+    true
+}
+
+fn process_is_allowed(state: &RecorderState, process_name: Option<&str>) -> bool {
+    if state.allowlist_processes.is_empty() {
+        return true;
+    }
+    let Some(name) = process_name else {
+        return false;
+    };
+    let normalized = normalize_process_name(name);
+    state.allowlist_processes.iter().any(|entry| entry == &normalized)
+}
+
+fn process_is_blocked(state: &RecorderState, process_name: Option<&str>) -> bool {
+    if state.blocklist_processes.is_empty() {
+        return false;
+    }
+    let Some(name) = process_name else {
+        return false;
+    };
+    let normalized = normalize_process_name(name);
+    state.blocklist_processes.iter().any(|entry| entry == &normalized)
+}
+
+fn normalize_process_name(process_name: &str) -> String {
+    Path::new(process_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(process_name)
+        .to_ascii_lowercase()
+}
+
+fn handle_text_key(state: &RecorderState, window_info: Option<WindowInfo>, vk: u32, scan_code: u32) {
+    let now_ms = now_mono_ms(state);
+    flush_text_buffer_if_stale_with_window(state, window_info.clone(), now_ms, "timeout");
+
+    if vk == VK_BACK.0 as u32 {
+        let mut buffer = state.text_buffer.lock().unwrap();
+        if buffer.text.pop().is_some() {
+            buffer.last_ts_ms = now_ms;
+        }
+        return;
+    }
+    if vk == VK_RETURN.0 as u32 {
+        flush_text_buffer_with_window(state, window_info, "enter");
+        return;
+    }
+    if vk == VK_TAB.0 as u32 {
+        flush_text_buffer_with_window(state, window_info, "tab");
+        return;
+    }
+
+    let Some(text) = translate_vk_to_text(vk, scan_code) else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    let should_flush = {
+        let mut buffer = state.text_buffer.lock().unwrap();
+        buffer.text.push_str(&text);
+        buffer.last_ts_ms = now_ms;
+        buffer.text.len() >= state.max_text_len
+    };
+    if should_flush {
+        flush_text_buffer_with_window(state, window_info, "max_len");
+    }
+}
+
+fn translate_vk_to_text(vk: u32, scan_code: u32) -> Option<String> {
+    unsafe {
+        let mut key_state = [0u8; 256];
+        if !GetKeyboardState(&mut key_state).as_bool() {
+            return None;
+        }
+        let layout = GetKeyboardLayout(0);
+        let mut buffer = [0u16; 8];
+        let written = ToUnicodeEx(
+            vk,
+            scan_code,
+            &key_state,
+            PWSTR(buffer.as_mut_ptr()),
+            buffer.len() as i32,
+            0,
+            layout,
+        );
+        if written <= 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buffer[..written as usize]))
+    }
+}
+
+fn flush_text_buffer_if_stale(state: &RecorderState, reason: &str) {
+    let now_ms = now_mono_ms(state);
+    let should_flush = {
+        let buffer = state.text_buffer.lock().unwrap();
+        !buffer.text.is_empty() && now_ms - buffer.last_ts_ms >= state.text_flush_ms
+    };
+    if should_flush {
+        flush_text_buffer(state, reason);
+    }
+}
+
+fn flush_text_buffer_if_stale_with_window(
+    state: &RecorderState,
+    window_info: Option<WindowInfo>,
+    now_ms: i64,
+    reason: &str,
+) {
+    let should_flush = {
+        let buffer = state.text_buffer.lock().unwrap();
+        !buffer.text.is_empty() && now_ms - buffer.last_ts_ms >= state.text_flush_ms
+    };
+    if should_flush {
+        flush_text_buffer_with_window(state, window_info, reason);
+    }
+}
+
+fn flush_text_buffer(state: &RecorderState, reason: &str) {
+    let window_info = active_window_info().map(|(_, info)| info);
+    flush_text_buffer_with_window(state, window_info, reason);
+}
+
+fn flush_text_buffer_with_window(state: &RecorderState, window_info: Option<WindowInfo>, reason: &str) {
+    let now_ms = now_mono_ms(state);
+    let text = {
+        let mut buffer = state.text_buffer.lock().unwrap();
+        if buffer.text.is_empty() {
+            return;
+        }
+        buffer.last_ts_ms = now_ms;
+        std::mem::take(&mut buffer.text)
+    };
+    send_text_event(state, window_info, text, reason);
+}
+
+fn send_text_event(state: &RecorderState, window_info: Option<WindowInfo>, text: String, reason: &str) {
+    let (process_name, window_title, window_class, window_rect) = match window_info {
+        Some(info) => (
+            info.process_name.clone(),
+            Some(info.title.clone()),
+            Some(info.class_name.clone()),
+            info.rect.clone(),
+        ),
+        None => (None, None, None, None),
+    };
+    let event = EventRecord {
+        session_id: state.session_id.clone(),
+        ts_wall_ms: now_wall_ms(),
+        ts_mono_ms: now_mono_ms(state),
+        event_type: "text_input".to_string(),
+        process_name,
+        window_title,
+        window_class,
+        window_rect,
+        mouse: None,
+        payload: json!({
+            "text": text,
+            "reason": reason,
+        }),
+    };
+    state.sender.try_send(event).ok();
 }
 
 fn run_writer(rx: Receiver<EventRecord>, db_path: &Path, session: SessionInfo, shutdown: Arc<AtomicBool>) {
