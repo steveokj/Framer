@@ -129,9 +129,55 @@ function SubtitleIcon({ size = 20, color = "#f8fafc" }: IconProps) {
   );
 }
 
+function SearchIcon({ size = 18, color = "#f8fafc" }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx={11} cy={11} r={7} stroke={color} strokeWidth={1.6} />
+      <path d="m16.5 16.5 4 4" stroke={color} strokeWidth={1.6} strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SettingsIcon({ size = 18, color = "#f8fafc" }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path
+        d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"
+        stroke={color}
+        strokeWidth={1.6}
+      />
+      <path
+        d="M19.4 13.5a1 1 0 0 0 .2 1.1l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V19a2 2 0 0 1-4 0v-.1a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H5a2 2 0 0 1 0-4h.1a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V5a2 2 0 0 1 4 0v.1a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H19a2 2 0 0 1 0 4h-.1a1 1 0 0 0-.9.6Z"
+        stroke={color}
+        strokeWidth={1.4}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 const DEFAULT_VIDEO = "";
 const LAST_VIDEO_STORAGE_KEY = "timestone:lastVideoPath:one";
 const LAST_SESSION_STORAGE_KEY = "timestone:lastSessionId:one";
+
+const EVENT_TYPE_OPTIONS = [
+  { type: "transcript", label: "Transcript" },
+  { type: "typed", label: "Typed" },
+  { type: "key_shortcut", label: "Shortcut" },
+  { type: "key_down", label: "Key down" },
+  { type: "key_up", label: "Key up" },
+  { type: "text_input", label: "Text input" },
+  { type: "marker", label: "Marker" },
+  { type: "mouse_click", label: "Mouse click" },
+  { type: "mouse_move", label: "Mouse move" },
+  { type: "mouse_scroll", label: "Mouse scroll" },
+  { type: "active_window_changed", label: "Active window" },
+  { type: "window_rect_changed", label: "Window rect" },
+  { type: "snapshot", label: "Snapshot" },
+];
+
+const DEFAULT_VISIBLE_TYPES = new Set(["transcript", "typed", "key_shortcut"]);
 const API_BASE = (                                                                                               
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0                         
     ? process.env.NEXT_PUBLIC_API_BASE                                                                           
@@ -406,6 +452,7 @@ function buildTimelineItems(displayEvents: DisplayEvent[], segments: Segment[]):
       timeline_seconds: segment.start,
       end_seconds: segment.end,
       label: stripTranscriptTimestamp(segment.text),
+      event_type: "transcript",
       segment,
     });
   }
@@ -471,11 +518,30 @@ export default function OnePage() {
   const [loadingSessions, setLoadingSessions] = useState(false);                                                 
   const [sessionError, setSessionError] = useState<string | null>(null);                                         
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");                                        
-  const [events, setEvents] = useState<TimestoneEvent[]>([]);                                                    
+  const [events, setEvents] = useState<TimestoneEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [eventError, setEventError] = useState<string | null>(null);
   const [detailsMaxWidth, setDetailsMaxWidth] = useState(420);
   const [alignmentOffsetSeconds, setAlignmentOffsetSeconds] = useState(0);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchModalOpen, setSearchModalOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [eventVisibility, setEventVisibility] = useState<Record<string, boolean>>(() => {
+    const initial: Record<string, boolean> = {};
+    for (const option of EVENT_TYPE_OPTIONS) {
+      initial[option.type] = DEFAULT_VISIBLE_TYPES.has(option.type);
+    }
+    return initial;
+  });
+  const [searchScopes, setSearchScopes] = useState<Record<string, boolean>>({
+    transcript: true,
+    typed: true,
+    shortcut: true,
+    key: true,
+    window: true,
+    mouse: false,
+    marker: false,
+  });
   const [videoWarning, setVideoWarning] = useState<string | null>(null);
   const [videoError, setVideoError] = useState<string | null>(null);                                             
   const [controlsVisible, setControlsVisible] = useState(true);                                                  
@@ -885,6 +951,35 @@ timelineDuration]);
   const videoMaxHeight = metadata?.video.height ? `min(100%, ${metadata.video.height}px)` : "100%";
   const sliderMax = videoDuration ?? 0;
   const subtitleIconColor = captionsEnabled ? "#0f172a" : "#f8fafc";
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+
+  const isScopeEnabled = (type: string | undefined) => {
+    if (!type) {
+      return false;
+    }
+    if (type === "transcript") {
+      return searchScopes.transcript;
+    }
+    if (type === "typed") {
+      return searchScopes.typed;
+    }
+    if (type === "key_shortcut") {
+      return searchScopes.shortcut;
+    }
+    if (type === "key_down" || type === "key_up") {
+      return searchScopes.key;
+    }
+    if (type.startsWith("mouse_")) {
+      return searchScopes.mouse;
+    }
+    if (type === "marker") {
+      return searchScopes.marker;
+    }
+    if (type.includes("window")) {
+      return searchScopes.window;
+    }
+    return true;
+  };
                                                                                                                  
   return (                                                                                                       
     <main
@@ -1230,6 +1325,59 @@ timelineDuration]);
               {loadingEvents && <span style={{ color: "#94a3b8" }}>Loading events...</span>}
               {eventError && <span style={{ color: "#fca5a5" }}>{eventError}</span>}
             </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+              <input
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search events or transcripts"
+                style={{
+                  flex: "1 1 220px",
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "1px solid #1e293b",
+                  background: "#0b1120",
+                  color: "#e2e8f0",
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => setSearchModalOpen(true)}
+                title="Search filters"
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 10,
+                  border: "1px solid #1e293b",
+                  background: "#0f172a",
+                  color: "#e2e8f0",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "pointer",
+                }}
+              >
+                <SearchIcon size={16} />
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                title="Event settings"
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 10,
+                  border: "1px solid #1e293b",
+                  background: "#0f172a",
+                  color: "#e2e8f0",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "pointer",
+                }}
+              >
+                <SettingsIcon size={16} />
+              </button>
+            </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", color: "#94a3b8" }}>
               <span>Event offset</span>
               <button type="button" onClick={() => setAlignmentOffsetSeconds((prev) => prev - 3)} style={{ padding: "6px 10px" }}>
@@ -1275,6 +1423,30 @@ timelineDuration]);
                   const displayEvents = buildDisplayEvents(eventsForSpan);
                   const transcriptForSpan = windowTranscriptMap.get(span.id) ?? [];
                   const timelineItems = buildTimelineItems(displayEvents, transcriptForSpan);
+                  const windowLabel = span.window_name || "";
+                  const windowBlob = windowLabel.toLowerCase();
+                  const windowMatches = Boolean(normalizedQuery && searchScopes.window && windowBlob.includes(normalizedQuery));
+                  const filteredItems = timelineItems.filter((item) => {
+                    const type = item.event_type || (item.kind === "transcript" ? "transcript" : "");
+                    if (!eventVisibility[type]) {
+                      return false;
+                    }
+                    if (!normalizedQuery) {
+                      return true;
+                    }
+                    if (windowMatches) {
+                      return true;
+                    }
+                    if (!isScopeEnabled(type)) {
+                      return false;
+                    }
+                    const baseText = item.label.toLowerCase();
+                    const sourceText = item.sourceEvent?.search_blob ?? "";
+                    return `${baseText} ${sourceText}`.includes(normalizedQuery);
+                  });
+                  if (normalizedQuery && filteredItems.length === 0) {
+                    return null;
+                  }
                   const spanActive = currentTime >= span.start_seconds && currentTime <= span.end_seconds;
                   return (
                     <div
@@ -1294,7 +1466,7 @@ timelineDuration]);
                           {formatTime(span.start_seconds)} - {formatTime(span.end_seconds)}
                         </span>
                         <span style={{ color: spanActive ? "#38bdf8" : "#64748b" }}>
-                          {spanActive ? "Active now" : `${timelineItems.length} items`}
+                          {spanActive ? "Active now" : `${filteredItems.length} items`}
                         </span>
                       </div>
 
@@ -1327,11 +1499,11 @@ timelineDuration]);
 
                       <div style={{ display: "grid", gap: 10 }}>
                         <strong>Events</strong>
-                        {timelineItems.length === 0 ? (
+                        {filteredItems.length === 0 ? (
                           <div style={{ color: "#94a3b8" }}>No events in this window.</div>
                         ) : (
                           <div style={{ display: "grid", gap: 8 }}>
-                            {timelineItems.map((item) => {
+                            {filteredItems.map((item) => {
                               const relativeStart = Math.max(0, item.timeline_seconds - span.start_seconds);
                               const relativeEnd =
                                 item.end_seconds != null
@@ -1400,6 +1572,173 @@ timelineDuration]);
             )}
           </div>
         </section>
+        {settingsOpen && (
+          <div
+            role="dialog"
+            aria-label="Event settings"
+            onClick={() => setSettingsOpen(false)}
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(5, 10, 20, 0.6)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 80,
+            }}
+          >
+            <div
+              onClick={(event) => event.stopPropagation()}
+              style={{
+                width: "min(480px, 92vw)",
+                background: "#0f172a",
+                borderRadius: 12,
+                border: "1px solid #1e293b",
+                padding: 18,
+                display: "grid",
+                gap: 12,
+                color: "#e2e8f0",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <strong>Event visibility</strong>
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(false)}
+                  style={{ border: "none", background: "transparent", color: "#94a3b8", cursor: "pointer" }}
+                >
+                  Close
+                </button>
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {EVENT_TYPE_OPTIONS.map((option) => (
+                  <label key={option.type} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={eventVisibility[option.type] ?? false}
+                      onChange={(event) =>
+                        setEventVisibility((prev) => ({ ...prev, [option.type]: event.target.checked }))
+                      }
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const next: Record<string, boolean> = {};
+                  for (const option of EVENT_TYPE_OPTIONS) {
+                    next[option.type] = DEFAULT_VISIBLE_TYPES.has(option.type);
+                  }
+                  setEventVisibility(next);
+                }}
+                style={{ padding: "6px 10px", width: "fit-content" }}
+              >
+                Reset to defaults
+              </button>
+            </div>
+          </div>
+        )}
+        {searchModalOpen && (
+          <div
+            role="dialog"
+            aria-label="Search filters"
+            onClick={() => setSearchModalOpen(false)}
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(5, 10, 20, 0.6)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 80,
+            }}
+          >
+            <div
+              onClick={(event) => event.stopPropagation()}
+              style={{
+                width: "min(440px, 92vw)",
+                background: "#0f172a",
+                borderRadius: 12,
+                border: "1px solid #1e293b",
+                padding: 18,
+                display: "grid",
+                gap: 12,
+                color: "#e2e8f0",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <strong>Search scope</strong>
+                <button
+                  type="button"
+                  onClick={() => setSearchModalOpen(false)}
+                  style={{ border: "none", background: "transparent", color: "#94a3b8", cursor: "pointer" }}
+                >
+                  Close
+                </button>
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {[
+                  { key: "transcript", label: "Transcript" },
+                  { key: "typed", label: "Typed" },
+                  { key: "shortcut", label: "Shortcut" },
+                  { key: "key", label: "Key events" },
+                  { key: "window", label: "Window title/class" },
+                  { key: "mouse", label: "Mouse events" },
+                  { key: "marker", label: "Markers" },
+                ].map((scope) => (
+                  <label key={scope.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={searchScopes[scope.key]}
+                      onChange={(event) =>
+                        setSearchScopes((prev) => ({ ...prev, [scope.key]: event.target.checked }))
+                      }
+                    />
+                    <span>{scope.label}</span>
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSearchScopes({
+                      transcript: true,
+                      typed: true,
+                      shortcut: true,
+                      key: true,
+                      window: true,
+                      mouse: true,
+                      marker: true,
+                    })
+                  }
+                  style={{ padding: "6px 10px" }}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSearchScopes({
+                      transcript: false,
+                      typed: false,
+                      shortcut: false,
+                      key: false,
+                      window: false,
+                      mouse: false,
+                      marker: false,
+                    })
+                  }
+                  style={{ padding: "6px 10px" }}
+                >
+                  None
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );                                                                                                             
