@@ -68,6 +68,17 @@ type DisplayEvent = {
   source: EventView;
 };
 
+type TimelineItem = {
+  id: string;
+  kind: "event" | "transcript";
+  timeline_seconds: number;
+  end_seconds?: number;
+  label: string;
+  event_type?: string;
+  sourceEvent?: EventView;
+  segment?: Segment;
+};
+
 type IconProps = {
   size?: number;
   color?: string;
@@ -119,6 +130,7 @@ function SubtitleIcon({ size = 20, color = "#f8fafc" }: IconProps) {
 }
 
 const DEFAULT_VIDEO = "";
+const LAST_VIDEO_STORAGE_KEY = "timestone:lastVideoPath:one";
 const API_BASE = (                                                                                               
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0                         
     ? process.env.NEXT_PUBLIC_API_BASE                                                                           
@@ -315,10 +327,10 @@ function keyEventToChar(event: EventView): string | null {
   return null;                                                                                                   
 }                                                                                                                
                                                                                                                  
-function buildDisplayEvents(events: EventView[]): DisplayEvent[] {                                               
-  if (!events.length) {                                                                                          
-    return [];                                                                                                   
-  }                                                                                                              
+function buildDisplayEvents(events: EventView[]): DisplayEvent[] {
+  if (!events.length) {
+    return [];
+  }
   const sorted = [...events].sort((a, b) => a.timeline_seconds - b.timeline_seconds);                            
   const output: DisplayEvent[] = [];                                                                             
   let buffer = "";                                                                                               
@@ -370,14 +382,39 @@ function buildDisplayEvents(events: EventView[]): DisplayEvent[] {
       source: event,                                                                                             
     });                                                                                                          
   }                                                                                                              
-  flushBuffer();                                                                                                 
-  return output;                                                                                                 
-}                                                                                                                
-                                                                                                                 
-function buildWindowSpans(events: EventView[], timelineEnd: number | null): WindowSpan[] {                       
-  if (!events.length) {                                                                                          
-    return [];                                                                                                   
-  }                                                                                                              
+  flushBuffer();
+  return output;
+}
+
+function buildTimelineItems(displayEvents: DisplayEvent[], segments: Segment[]): TimelineItem[] {
+  const items: TimelineItem[] = [];
+  for (const event of displayEvents) {
+    items.push({
+      id: `event-${event.id}`,
+      kind: "event",
+      timeline_seconds: event.timeline_seconds,
+      label: event.description,
+      event_type: event.event_type,
+      sourceEvent: event.source,
+    });
+  }
+  for (const segment of segments) {
+    items.push({
+      id: `seg-${segment.id}-${segment.start.toFixed(2)}`,
+      kind: "transcript",
+      timeline_seconds: segment.start,
+      end_seconds: segment.end,
+      label: stripTranscriptTimestamp(segment.text),
+      segment,
+    });
+  }
+  return items.sort((a, b) => a.timeline_seconds - b.timeline_seconds);
+}
+
+function buildWindowSpans(events: EventView[], timelineEnd: number | null): WindowSpan[] {
+  if (!events.length) {
+    return [];
+  }
   const windowEvents = events                                                                                    
     .filter((event) => event.event_type === "active_window_changed")                                             
     .map((event) => ({                                                                                           
@@ -433,10 +470,11 @@ export default function OnePage() {
   const [sessionError, setSessionError] = useState<string | null>(null);                                         
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");                                        
   const [events, setEvents] = useState<TimestoneEvent[]>([]);                                                    
-  const [loadingEvents, setLoadingEvents] = useState(false);                                                     
-  const [eventError, setEventError] = useState<string | null>(null);                                             
-  const [detailsMaxWidth, setDetailsMaxWidth] = useState(420);                                                   
-  const [videoWarning, setVideoWarning] = useState<string | null>(null);                                         
+  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [eventError, setEventError] = useState<string | null>(null);
+  const [detailsMaxWidth, setDetailsMaxWidth] = useState(420);
+  const [alignmentOffsetSeconds, setAlignmentOffsetSeconds] = useState(0);
+  const [videoWarning, setVideoWarning] = useState<string | null>(null);
   const [videoError, setVideoError] = useState<string | null>(null);                                             
   const [controlsVisible, setControlsVisible] = useState(true);                                                  
   const [isPlaying, setIsPlaying] = useState(false);                                                             
@@ -444,12 +482,28 @@ export default function OnePage() {
   const [currentTime, setCurrentTime] = useState(0);                                                             
   const [videoDuration, setVideoDuration] = useState<number | null>(null);                                       
                                                                                                                  
-  const { url: videoUrl, warning: fileWarning } = useMemo(() => buildFileUrl(videoPath), [videoPath]);           
-  const serverHint = API_BASE || "http://localhost:8001";                                                        
-                                                                                                                 
-  useEffect(() => {                                                                                              
-    setVideoWarning(fileWarning);                                                                                
-  }, [fileWarning]);                                                                                             
+  const { url: videoUrl, warning: fileWarning } = useMemo(() => buildFileUrl(videoPath), [videoPath]);
+  const serverHint = API_BASE || "http://localhost:8001";
+
+  useEffect(() => {
+    const saved = localStorage.getItem(LAST_VIDEO_STORAGE_KEY);
+    if (saved) {
+      setVideoInput(saved);
+      setVideoPath(saved);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!videoPath.trim()) {
+      localStorage.removeItem(LAST_VIDEO_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(LAST_VIDEO_STORAGE_KEY, videoPath);
+  }, [videoPath]);
+
+  useEffect(() => {
+    setVideoWarning(fileWarning);
+  }, [fileWarning]);
                                                                                                                  
   const selectedSession = useMemo(                                                                               
     () => sessions.find((session) => session.session_id === selectedSessionId) ?? null,                          
@@ -618,33 +672,34 @@ export default function OnePage() {
     return first.ts_wall_ms - first.ts_mono_ms;                                                                  
   }, [events]);                                                                                                  
                                                                                                                  
-  const eventsWithTimeline = useMemo<EventView[]>(() => {                                                        
-    if (!events.length) {                                                                                        
-      return [];                                                                                                 
-    }                                                                                                            
-    const origin = timelineOriginMs;                                                                             
-    return events.map((event) => {                                                                               
-      const monoWall =                                                                                           
-        monoBaseMs != null && Number.isFinite(event.ts_mono_ms) ? monoBaseMs + event.ts_mono_ms : event.ts_wall_ms;                                                                                                               
-      const timelineSeconds = origin != null ? (monoWall - origin) / 1000 : 0;                                   
-      const description = describeEvent(event);                                                                  
-      const searchBlob = [                                                                                       
-        description,                                                                                             
-        event.event_type,                                                                                        
+  const eventsWithTimeline = useMemo<EventView[]>(() => {
+    if (!events.length) {
+      return [];
+    }
+    const origin = timelineOriginMs;
+    return events.map((event) => {
+      const monoWall =
+        monoBaseMs != null && Number.isFinite(event.ts_mono_ms) ? monoBaseMs + event.ts_mono_ms : event.ts_wall_ms;
+      const timelineSeconds =
+        origin != null ? (monoWall - origin) / 1000 + alignmentOffsetSeconds : alignmentOffsetSeconds;
+      const description = describeEvent(event);
+      const searchBlob = [
+        description,
+        event.event_type,
         event.process_name || "",                                                                                
         event.window_title || "",                                                                                
         event.window_class || "",                                                                                
       ]                                                                                                          
         .join(" ")                                                                                               
         .toLowerCase();                                                                                          
-      return {                                                                                                   
-        ...event,                                                                                                
-        timeline_seconds: timelineSeconds,                                                                       
-        description,                                                                                             
-        search_blob: searchBlob,                                                                                 
-      };                                                                                                         
-    });                                                                                                          
-  }, [events, timelineOriginMs, monoBaseMs]);
+      return {
+        ...event,
+        timeline_seconds: timelineSeconds,
+        description,
+        search_blob: searchBlob,
+      };
+    });
+  }, [events, timelineOriginMs, monoBaseMs, alignmentOffsetSeconds]);
                                                                                                                  
   const windowSpans = useMemo(() => buildWindowSpans(eventsWithTimeline, timelineDuration), [eventsWithTimeline, 
 timelineDuration]);                                                                                              
@@ -676,10 +731,10 @@ timelineDuration]);
     return map;                                                                                                  
   }, [windowSpans, timelineSegments]);                                                                           
                                                                                                                  
-  const windowEventsMap = useMemo(() => {                                                                        
-    const map = new Map<number, EventView[]>();                                                                  
-    if (!windowSpans.length) {                                                                                   
-      return map;                                                                                                
+  const windowEventsMap = useMemo(() => {
+    const map = new Map<number, EventView[]>();
+    if (!windowSpans.length) {
+      return map;
     }                                                                                                            
     const sorted = [...windowSpans].sort((a, b) => a.start_seconds - b.start_seconds);                           
     for (const span of sorted) {                                                                                 
@@ -699,9 +754,9 @@ timelineDuration]);
         map.get(span.id)?.push(event);                                                                           
       }                                                                                                          
     }                                                                                                            
-    return map;                                                                                                  
-  }, [windowSpans, eventsWithTimeline]);                                                                         
-                                                                                                                 
+    return map;
+  }, [windowSpans, eventsWithTimeline]);
+
   const activeSegment = useMemo(() => {                                                                          
     if (!segments.length) {                                                                                      
       return null;                                                                                               
@@ -914,388 +969,386 @@ timelineDuration]);
               {videoWarning && <span style={{ color: "#fca5a5" }}>{videoWarning}</span>}                         
             </div>                                                                                               
           </div>                                                                                                 
-        </section>                                                                                               
-                                                                                                                 
-        <section style={{ display: "grid", gap: 16 }}>                                                           
-          <div                                                                                                   
-            style={{                                                                                             
-              width: "100%",                                                                                     
-              maxWidth: videoMaxWidth,                                                                           
-              margin: "0 auto",
-              position: "relative",                                                                              
-              background: "#111",                                                                                
-              minHeight: 240,                                                                                    
-              height: videoMaxHeight,                                                                            
-              borderRadius: 12,                                                                                  
-              overflow: "hidden",                                                                                
-            }}                                                                                                   
-            onMouseMove={handlePlayerPointerMove}                                                                
-            onMouseLeave={handlePlayerPointerLeave}                                                              
-            onTouchStart={handlePlayerPointerMove}                                                               
-            onFocusCapture={handlePlayerPointerMove}                                                             
-          >                                                                                                      
-            {videoUrl ? (                                                                                        
-              <>                                                                                                 
-                <video                                                                                           
-                  ref={videoRef}                                                                                 
-                  src={videoUrl}                                                                                 
-                  style={{ width: "100%", height: "100%", objectFit: "contain", background: "#0f172a" }}         
-                  preload="metadata"                                                                             
-                  onClick={handleTogglePlayback}                                                                 
-                  onError={() =>                                                                                 
-                    setVideoError(                                                                               
-                      `Video failed to load. Ensure the FastAPI server at ${serverHint} is running and the file path is correct.`,                                                                                                
-                    )                                                                                            
-                  }                                                                                              
-                  onLoadedData={() => setVideoError(null)}                                                       
-                  onLoadedMetadata={handleLoadedMetadata}                                                        
-                  onTimeUpdate={handleTimeUpdate}                                                                
-                  onPlay={() => setIsPlaying(true)}                                                              
-                  onPause={() => setIsPlaying(false)}                                                            
-                  playsInline                                                                                    
-                />                                                                                               
-                {captionsEnabled && activeSegmentText && (                                                       
-                  <div                                                                                           
-                    style={{                                                                                     
-                      position: "absolute",                                                                      
-                      left: "8%",                                                                                
-                      right: "8%",                                                                               
-                      bottom: 64,                                                                                
-                      padding: "8px 12px",                                                                       
-                      borderRadius: 8,                                                                           
-                      background: "rgba(15, 23, 42, 0.75)",                                                      
-                      color: "#f8fafc",                                                                          
-                      textAlign: "center",                                                                       
-                      fontSize: 16,                                                                              
-                      lineHeight: 1.4,                                                                           
-                      textShadow: "0 1px 2px rgba(0,0,0,0.6)",                                                   
-                      pointerEvents: "none",                                                                     
-                    }}
-                  >                                                                                              
-                    {activeSegmentText}                                                                          
-                  </div>                                                                                         
-                )}                                                                                               
-                <div                                                                                             
-                  style={{                                                                                       
-                    position: "absolute",                                                                        
-                    left: 0,                                                                                     
-                    right: 0,                                                                                    
-                    bottom: 0,                                                                                   
-                    padding: "16px 20px",                                                                        
-                    background: "linear-gradient(180deg, rgba(15,23,42,0) 0%, rgba(15,23,42,0.85) 100%)",        
-                    display: controlsVisible ? "grid" : "none",                                                  
-                    gap: 12,                                                                                     
-                  }}                                                                                             
-                >                                                                                                
-                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>                               
-                    <button                                                                                      
-                      type="button"                                                                              
-                      onClick={handleTogglePlayback}                                                             
-                      aria-label={isPlaying ? "Pause" : "Play"}                                                  
-                      title={isPlaying ? "Pause" : "Play"}                                                       
-                      style={{                                                                                   
-                        width: 40,                                                                               
-                        height: 40,                                                                              
-                        borderRadius: "50%",                                                                     
-                        border: "none",                                                                          
-                        background: "rgba(15, 23, 42, 0.75)",                                                    
-                        color: "#f8fafc",                                                                        
-                        display: "flex",                                                                         
-                        alignItems: "center",                                                                    
-                        justifyContent: "center",                                                                
-                        cursor: "pointer",                                                                       
-                      }}                                                                                         
+        </section>
+
+        <section
+          style={{
+            display: "grid",
+            gap: 24,
+            gridTemplateColumns: `minmax(0, 1fr) minmax(280px, ${detailsMaxWidth}px)`,
+            alignItems: "start",
+          }}
+        >
+          <div style={{ display: "grid", gap: 16 }}>
+            <div
+              style={{
+                width: "100%",
+                maxWidth: videoMaxWidth,
+                margin: "0 auto",
+                position: "relative",
+                background: "#111",
+                minHeight: 240,
+                height: videoMaxHeight,
+                borderRadius: 12,
+                overflow: "hidden",
+              }}
+              onMouseMove={handlePlayerPointerMove}
+              onMouseLeave={handlePlayerPointerLeave}
+              onTouchStart={handlePlayerPointerMove}
+              onFocusCapture={handlePlayerPointerMove}
+            >
+              {videoUrl ? (
+                <>
+                  <video
+                    ref={videoRef}
+                    src={videoUrl}
+                    style={{ width: "100%", height: "100%", objectFit: "contain", background: "#0f172a" }}
+                    preload="metadata"
+                    onClick={handleTogglePlayback}
+                    onError={() =>
+                      setVideoError(
+                        `Video failed to load. Ensure the FastAPI server at ${serverHint} is running and the file path is correct.`,
+                      )
+                    }
+                    onLoadedData={() => setVideoError(null)}
+                    onLoadedMetadata={handleLoadedMetadata}
+                    onTimeUpdate={handleTimeUpdate}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                    playsInline
+                  />
+                  {captionsEnabled && activeSegmentText && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: "8%",
+                        right: "8%",
+                        bottom: 64,
+                        padding: "8px 12px",
+                        borderRadius: 8,
+                        background: "rgba(15, 23, 42, 0.75)",
+                        color: "#f8fafc",
+                        textAlign: "center",
+                        fontSize: 16,
+                        lineHeight: 1.4,
+                        textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+                        pointerEvents: "none",
+                      }}
                     >
-                      {isPlaying ? <PauseIcon /> : <PlayIcon />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCaptionsEnabled((prev) => !prev)}
-                      aria-label={captionsEnabled ? "Disable subtitles" : "Enable subtitles"}                    
-                      title={captionsEnabled ? "Disable subtitles" : "Enable subtitles"}                         
-                      style={{                                                                                   
-                        width: 40,                                                                               
-                        height: 40,                                                                              
-                        borderRadius: "50%",                                                                     
-                        border: "none",                                                                          
-                        background: captionsEnabled ? "rgba(56, 189, 248, 0.8)" : "rgba(15, 23, 42, 0.55)",      
-                        color: captionsEnabled ? "#0f172a" : "#f8fafc",                                          
-                        display: "flex",                                                                         
-                        alignItems: "center",                                                                    
-                        justifyContent: "center",                                                                
-                        cursor: "pointer",                                                                       
-                      }}                                                                                         
-                    >
-                      <SubtitleIcon color={subtitleIconColor} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleRestart}
-                      aria-label="Restart"
-                      title="Restart"                                                                            
-                      style={{                                                                                   
-                        width: 40,                                                                               
-                        height: 40,                                                                              
-                        borderRadius: "50%",                                                                     
-                        border: "none",                                                                          
-                        background: "rgba(15, 23, 42, 0.55)",                                                    
-                        color: "#f8fafc",                                                                        
-                        display: "flex",                                                                         
-                        alignItems: "center",                                                                    
-                        justifyContent: "center",                                                                
-                        cursor: "pointer",                                                                       
-                      }}                                                                                         
-                    >
-                      <RestartIcon />
-                    </button>
-                    <span style={{ color: "#e2e8f0", fontVariantNumeric: "tabular-nums" }}>                      
-                      {formatTime(currentTime)} / {formatTime(videoDuration ?? 0)}                               
-                    </span>                                                                                      
-                  </div>                                                                                         
-                  <input                                                                                         
-                    type="range"                                                                                 
-                    min={0}                                                                                      
-                    max={sliderMax}                                                                              
-                    step={0.05}                                                                                  
-                    value={currentTime}                                                                          
-                    onChange={handleSliderChange}                                                                
-                    style={{ width: "100%", accentColor: "#38bdf8" }}                                            
-                    disabled={sliderMax <= 0.05}                                                                 
-                  />                                                                                             
-                </div>                                                                                           
-              </>                                                                                                
-            ) : (                                                                                                
-              <div style={{ padding: 40, color: "#eee" }}>Enter a video path to start playback.</div>            
-            )}                                                                                                   
-          </div>                                                                                                 
-          {videoError && <div style={{ color: "#fca5a5" }}>{videoError}</div>}                                   
-        </section>                                                                                               
-                                                                                                                 
-        <section style={{ background: "#0f172a", color: "#f8fafc", padding: 16, borderRadius: 8, display: "grid",
- gap: 12 }}>                                                                                                     
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>                     
-            <strong>Video summary:</strong>                                                                      
-            {loadingMetadata && <span style={{ color: "#94a3b8" }}>Loading metadata...</span>}                   
-            {metadataError && <span style={{ color: "#fca5a5" }}>{metadataError}</span>}                         
-            {metadata && (                                                                                       
-              <>                                                                                                 
-                <span>fps = {metadata.video.fps ?? "--"}</span>                                                  
-                <span>duration = {metadata.video.duration ? `${metadata.video.duration.toFixed(2)}s` : "--"}</span>                                                                                                               
-                <span>                                                                                           
-                  size = {metadata.video.width && metadata.video.height ? `${metadata.video.width}x${metadata.video.height}` : "--"}                                                                                              
-                </span>                                                                                          
-              </>                                                                                                
-            )}                                                                                                   
-          </div>                                                                                                 
-          <div>                                                                                                  
-            <strong>Transcript:</strong>                                                                         
-            <div style={{ marginTop: 8, minHeight: 24 }}>                                                        
-              {loadingTranscript                                                                                 
-                ? "Loading transcript..."                                                                        
-                : segments.length > 0                                                                            
-                  ? `${segments.length} segments loaded`                                                         
-                  : "No transcript loaded"}                                                                      
-            </div>                                                                                               
-          </div>                                                                                                 
-          {transcriptError && <div style={{ color: "#fca5a5" }}>{transcriptError}</div>}                         
-        </section>                                                                                               
-                                                                                                                 
-        <section style={{ display: "grid", gap: 16 }}>                                                           
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>                     
-            <h2 style={{ margin: 0 }}>Window sections</h2>                                                       
-            <span style={{ color: "#94a3b8" }}>{windowSpans.length} windows</span>                               
-            <span style={{ color: "#94a3b8" }}>{eventsWithTimeline.length} events</span>
-            {loadingEvents && <span style={{ color: "#94a3b8" }}>Loading events...</span>}                       
-            {eventError && <span style={{ color: "#fca5a5" }}>{eventError}</span>}                               
-            <label style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto", color: "#94a3b8" }
-}>                                                                                                               
-              <span>Details width</span>                                                                         
-              <input                                                                                             
-                type="range"                                                                                     
-                min={280}                                                                                        
-                max={640}                                                                                        
-                step={20}                                                                                        
-                value={detailsMaxWidth}                                                                          
-                onChange={(e) => setDetailsMaxWidth(Number(e.target.value || "420"))}                            
-                style={{ accentColor: "#38bdf8" }}                                                               
-              />                                                                                                 
-              <span style={{ minWidth: 48 }}>{detailsMaxWidth}px</span>                                          
-            </label>                                                                                             
-          </div>                                                                                                 
-          {windowSpans.length === 0 ? (                                                                          
-            <div style={{ color: "#94a3b8" }}>No window sections found yet.</div>                                
-          ) : (                                                                                                  
-            <div style={{ display: "grid", gap: 16 }}>                                                           
-              {windowSpans.map((span) => {                                                                       
-                const eventsForSpan = windowEventsMap.get(span.id) ?? [];                                        
-                const displayEvents = buildDisplayEvents(eventsForSpan);                                         
-                const transcriptForSpan = windowTranscriptMap.get(span.id) ?? [];                                
-                const spanActive = currentTime >= span.start_seconds && currentTime <= span.end_seconds;         
-                return (                                                                                         
-                  <div                                                                                           
-                    key={span.id}                                                                                
-                    style={{                                                                                     
-                      border: "1px solid #1e293b",                                                               
-                      borderRadius: 12,                                                                          
-                      padding: 16,                                                                               
-                      background: spanActive ? "rgba(15, 23, 42, 0.9)" : "rgba(11, 17, 32, 0.9)",                
-                      display: "grid",                                                                           
-                      gap: 12,                                                                                   
-                      gridTemplateColumns: "minmax(0, 1fr) auto",                                                
-                      alignItems: "start",                                                                       
-                    }}                                                                                           
-                  >                                                                                              
-                    <div style={{ gridColumn: "1 / -1", display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>                                                                                                      
-                      <strong style={{ fontSize: 18 }}>{span.window_name}</strong>                               
-                      <span style={{ color: "#94a3b8" }}>                                                        
-                        {formatTime(span.start_seconds)} - {formatTime(span.end_seconds)}                        
-                      </span>                                                                                    
-                      <span style={{ color: spanActive ? "#38bdf8" : "#64748b" }}>                               
-                        {spanActive ? "Active now" : `${displayEvents.length} events`}                           
-                      </span>                                                                                    
-                    </div>                                                                                       
-                                                                                                                 
-                    <div style={{ gridColumn: "1 / 2", display: "grid", gap: 10 }}>                              
-                      <div style={{ color: "#94a3b8", fontSize: 13 }}>Timeline</div>                             
-                      <div style={{ height: 6, background: "#1e293b", borderRadius: 999, overflow: "hidden" }}>  
-                        <div                                                                                     
-                          style={{                                                                               
-                            width: `${spanActive ? Math.min(100, ((currentTime - span.start_seconds) / Math.max(0.1, span.end_seconds - span.start_seconds)) * 100) : 0}%`,                                                       
-                            height: "100%",                                                                      
-                            background: "#38bdf8",                                                               
-                          }}                                                                                     
-                        />                                                                                       
-                      </div>                                                                                     
-                      <button                                                                                    
-                        type="button"                                                                            
-                        onClick={() => {                                                                         
-                          if (videoRef.current) {                                                                
-                            videoRef.current.currentTime = Math.max(0, span.start_seconds);                      
-                            videoRef.current.play().catch(() => {                                                
-                              /* ignore */                                                                       
-                            });                                                                                  
-                          }                                                                                      
-                        }}                                                                                       
-                        style={{ padding: "6px 10px", width: "fit-content" }}                                    
-                      >                                                                                          
-                        Jump to start                                                                            
-                      </button>                                                                                  
-                    </div>                                                                                       
-                                                                                                                 
-                    <div                                                                                         
-                      style={{                                                                                   
-                        gridColumn: "2 / 3",                                                                     
-                        justifySelf: "end",                                                                      
-                        width: `min(100%, ${detailsMaxWidth}px)`,                                                
-                        maxWidth: detailsMaxWidth,                                                               
-                        display: "grid",                                                                         
-                        gap: 12,                                                                                 
-                      }}                                                                                         
-                    >                                                                                            
-                      <div style={{ display: "grid", gap: 10 }}>                                                 
-                        <strong>Events</strong>                                                                  
-                        {displayEvents.length === 0 ? (                                                          
-                          <div style={{ color: "#94a3b8" }}>No events in this window.</div>                      
-                        ) : (                                                                                    
-                          <div style={{ display: "grid", gap: 8 }}>                                              
-                            {displayEvents.map((eventItem) => {                                                  
-                              const relativeTime = Math.max(0, eventItem.timeline_seconds - span.start_seconds); 
-                              const isEventActive = Math.abs(currentTime - eventItem.timeline_seconds) < 0.4;    
-                              return (                                                                           
-                                <button                                                                          
-                                  key={eventItem.id}                                                             
-                                  type="button"                                                                  
-                                  onClick={() => {                                                               
-                                    if (videoRef.current) {                                                      
-                                      videoRef.current.currentTime = Math.max(0, eventItem.timeline_seconds);    
-                                      videoRef.current.play().catch(() => {                                      
-                                        /* ignore */                                                             
-                                      });                                                                        
-                                    }                                                                            
-                                  }}                                                                             
-                                  style={{                                                                       
-                                    display: "grid",                                                             
-                                    gridTemplateColumns: "80px 1fr",                                             
-                                    gap: 12,                                                                     
-                                    padding: "10px 12px",                                                        
-                                    borderRadius: 8,                                                             
-                                    border: "1px solid",                                                         
-                                    borderColor: isEventActive ? "#38bdf8" : "#1e293b",                          
-                                    background: isEventActive ? "rgba(56, 189, 248, 0.15)" : "rgba(15, 23, 42, 0.7)",                                                                                                             
-                                    color: "#e2e8f0",                                                            
-                                    textAlign: "left",                                                           
-                                    cursor: "pointer",                                                           
-                                  }}                                                                             
-                                >                                                                                
-                                  <span style={{ fontVariantNumeric: "tabular-nums", color: "#cbd5f5" }}>        
-                                    {formatTime(relativeTime)}                                                   
-                                  </span>                                                                        
-                                  <span>                                                                         
-                                    <strong style={{ textTransform: "capitalize" }}>{eventItem.event_type.replace
-(/_/g, " ")}</strong>                                                                                            
-                                    {eventItem.description ? ` - ${eventItem.description}` : ""}                 
-                                  </span>                                                                        
-                                </button>                                                                        
-                              );                                                                                 
-                            })}                                                                                  
-                          </div>                                                                                 
-                        )}                                                                                       
-                      </div>                                                                                     
-                                                                                                                 
-                      <div style={{ display: "grid", gap: 10 }}>                                                 
-                        <strong>Transcript</strong>                                                              
-                        {transcriptForSpan.length === 0 ? (                                                      
-                          <div style={{ color: "#94a3b8" }}>No transcript segments in this window.</div>         
-                        ) : (                                                                                    
-                          <div style={{ display: "grid", gap: 8 }}>                                              
-                            {transcriptForSpan.map((segment) => {                                                
-                              const relativeStart = Math.max(0, segment.start - span.start_seconds);             
-                              const relativeEnd = Math.max(relativeStart, segment.end - span.start_seconds);     
-                              const isSegmentActive = currentTime >= segment.start && currentTime <= segment.end;
-                              return (                                                                           
-                                <button                                                                          
-                                  key={`${span.id}-${segment.id}-${segment.start.toFixed(2)}`}                   
-                                  type="button"                                                                  
-                                  onClick={() => {                                                               
-                                    if (videoRef.current) {                                                      
-                                      videoRef.current.currentTime = Math.max(0, segment.start);                 
-                                      videoRef.current.play().catch(() => {                                      
-                                        /* ignore */                                                             
-                                      });                                                                        
-                                    }                                                                            
-                                  }}                                                                             
-                                  style={{                                                                       
-                                    display: "grid",                                                             
-                                    gridTemplateColumns: "120px 1fr",                                            
-                                    gap: 12,                                                                     
-                                    padding: "10px 12px",                                                        
-                                    borderRadius: 8,                                                             
-                                    border: "1px solid",                                                         
-                                    borderColor: isSegmentActive ? "#22c55e" : "#1e293b",                        
-                                    background: isSegmentActive ? "rgba(34, 197, 94, 0.15)" : "rgba(15, 23, 42, 0.7)",                                                                                                            
-                                    color: "#e2e8f0",                                                            
-                                    textAlign: "left",                                                           
-                                    cursor: "pointer",                                                           
-                                  }}                                                                             
-                                >                                                                                
-                                  <span style={{ fontVariantNumeric: "tabular-nums", color: "#cbd5f5" }}>        
-                                    {formatTime(relativeStart)} - {formatTime(relativeEnd)}                      
-                                  </span>                                                                        
-                                  <span>{stripTranscriptTimestamp(segment.text)}</span>                          
-                                </button>                                                                        
-                              );                                                                                 
-                            })}                                                                                  
-                          </div>                                                                                 
-                        )}                                                                                       
-                      </div>                                                                                     
+                      {activeSegmentText}
                     </div>
-                  </div>                                                                                         
-                );                                                                                               
-              })}                                                                                                
-            </div>                                                                                               
-          )}                                                                                                     
-        </section>                                                                                               
-      </div>                                                                                                     
-    </main>                                                                                                      
+                  )}
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      padding: "16px 20px",
+                      background: "linear-gradient(180deg, rgba(15,23,42,0) 0%, rgba(15,23,42,0.85) 100%)",
+                      display: controlsVisible ? "grid" : "none",
+                      gap: 12,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <button
+                        type="button"
+                        onClick={handleTogglePlayback}
+                        aria-label={isPlaying ? "Pause" : "Play"}
+                        title={isPlaying ? "Pause" : "Play"}
+                        style={{
+                          width: 40,
+                          height: 40,
+                          borderRadius: "50%",
+                          border: "none",
+                          background: "rgba(15, 23, 42, 0.75)",
+                          color: "#f8fafc",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {isPlaying ? <PauseIcon /> : <PlayIcon />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCaptionsEnabled((prev) => !prev)}
+                        aria-label={captionsEnabled ? "Disable subtitles" : "Enable subtitles"}
+                        title={captionsEnabled ? "Disable subtitles" : "Enable subtitles"}
+                        style={{
+                          width: 40,
+                          height: 40,
+                          borderRadius: "50%",
+                          border: "none",
+                          background: captionsEnabled ? "rgba(56, 189, 248, 0.8)" : "rgba(15, 23, 42, 0.55)",
+                          color: captionsEnabled ? "#0f172a" : "#f8fafc",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <SubtitleIcon color={subtitleIconColor} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRestart}
+                        aria-label="Restart"
+                        title="Restart"
+                        style={{
+                          width: 40,
+                          height: 40,
+                          borderRadius: "50%",
+                          border: "none",
+                          background: "rgba(15, 23, 42, 0.55)",
+                          color: "#f8fafc",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <RestartIcon />
+                      </button>
+                      <span style={{ color: "#e2e8f0", fontVariantNumeric: "tabular-nums" }}>
+                        {formatTime(currentTime)} / {formatTime(videoDuration ?? 0)}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={sliderMax}
+                      step={0.05}
+                      value={currentTime}
+                      onChange={handleSliderChange}
+                      style={{ width: "100%", accentColor: "#38bdf8" }}
+                      disabled={sliderMax <= 0.05}
+                    />
+                  </div>
+                </>
+              ) : (
+                <div style={{ padding: 40, color: "#eee" }}>Enter a video path to start playback.</div>
+              )}
+            </div>
+            {videoError && <div style={{ color: "#fca5a5" }}>{videoError}</div>}
+
+            <section
+              style={{
+                background: "#0f172a",
+                color: "#f8fafc",
+                padding: 16,
+                borderRadius: 8,
+                display: "grid",
+                gap: 12,
+              }}
+            >
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                <strong>Video summary:</strong>
+                {loadingMetadata && <span style={{ color: "#94a3b8" }}>Loading metadata...</span>}
+                {metadataError && <span style={{ color: "#fca5a5" }}>{metadataError}</span>}
+                {metadata && (
+                  <>
+                    <span>fps = {metadata.video.fps ?? "--"}</span>
+                    <span>duration = {metadata.video.duration ? `${metadata.video.duration.toFixed(2)}s` : "--"}</span>
+                    <span>
+                      size = {metadata.video.width && metadata.video.height ? `${metadata.video.width}x${metadata.video.height}` : "--"}
+                    </span>
+                  </>
+                )}
+              </div>
+              <div>
+                <strong>Transcript:</strong>
+                <div style={{ marginTop: 8, minHeight: 24 }}>
+                  {loadingTranscript
+                    ? "Loading transcript..."
+                    : segments.length > 0
+                      ? `${segments.length} segments loaded`
+                      : "No transcript loaded"}
+                </div>
+              </div>
+              {transcriptError && <div style={{ color: "#fca5a5" }}>{transcriptError}</div>}
+            </section>
+          </div>
+
+          <div style={{ display: "grid", gap: 16, alignContent: "start" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+              <h2 style={{ margin: 0 }}>Window sections</h2>
+              <span style={{ color: "#94a3b8" }}>{windowSpans.length} windows</span>
+              <span style={{ color: "#94a3b8" }}>{eventsWithTimeline.length} events</span>
+              {loadingEvents && <span style={{ color: "#94a3b8" }}>Loading events...</span>}
+              {eventError && <span style={{ color: "#fca5a5" }}>{eventError}</span>}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", color: "#94a3b8" }}>
+              <span>Event offset</span>
+              <button type="button" onClick={() => setAlignmentOffsetSeconds((prev) => prev - 3)} style={{ padding: "6px 10px" }}>
+                -3s
+              </button>
+              <button type="button" onClick={() => setAlignmentOffsetSeconds((prev) => prev - 1)} style={{ padding: "6px 10px" }}>
+                -1s
+              </button>
+              <button type="button" onClick={() => setAlignmentOffsetSeconds((prev) => prev + 1)} style={{ padding: "6px 10px" }}>
+                +1s
+              </button>
+              <button type="button" onClick={() => setAlignmentOffsetSeconds((prev) => prev + 3)} style={{ padding: "6px 10px" }}>
+                +3s
+              </button>
+              <button type="button" onClick={() => setAlignmentOffsetSeconds(0)} style={{ padding: "6px 10px" }}>
+                Reset
+              </button>
+              <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                {alignmentOffsetSeconds >= 0 ? "+" : ""}
+                {alignmentOffsetSeconds.toFixed(1)}s
+              </span>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, color: "#94a3b8" }}>
+              <span>Details width</span>
+              <input
+                type="range"
+                min={280}
+                max={720}
+                step={20}
+                value={detailsMaxWidth}
+                onChange={(e) => setDetailsMaxWidth(Number(e.target.value || "420"))}
+                style={{ accentColor: "#38bdf8" }}
+              />
+              <span style={{ minWidth: 48 }}>{detailsMaxWidth}px</span>
+            </label>
+
+            {windowSpans.length === 0 ? (
+              <div style={{ color: "#94a3b8" }}>No window sections found yet.</div>
+            ) : (
+              <div style={{ display: "grid", gap: 16 }}>
+                {windowSpans.map((span) => {
+                  const eventsForSpan = windowEventsMap.get(span.id) ?? [];
+                  const displayEvents = buildDisplayEvents(eventsForSpan);
+                  const transcriptForSpan = windowTranscriptMap.get(span.id) ?? [];
+                  const timelineItems = buildTimelineItems(displayEvents, transcriptForSpan);
+                  const spanActive = currentTime >= span.start_seconds && currentTime <= span.end_seconds;
+                  return (
+                    <div
+                      key={span.id}
+                      style={{
+                        border: "1px solid #1e293b",
+                        borderRadius: 12,
+                        padding: 16,
+                        background: spanActive ? "rgba(15, 23, 42, 0.9)" : "rgba(11, 17, 32, 0.9)",
+                        display: "grid",
+                        gap: 12,
+                      }}
+                    >
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                        <strong style={{ fontSize: 18 }}>{span.window_name}</strong>
+                        <span style={{ color: "#94a3b8" }}>
+                          {formatTime(span.start_seconds)} - {formatTime(span.end_seconds)}
+                        </span>
+                        <span style={{ color: spanActive ? "#38bdf8" : "#64748b" }}>
+                          {spanActive ? "Active now" : `${timelineItems.length} items`}
+                        </span>
+                      </div>
+
+                      <div style={{ display: "grid", gap: 10 }}>
+                        <div style={{ color: "#94a3b8", fontSize: 13 }}>Timeline</div>
+                        <div style={{ height: 6, background: "#1e293b", borderRadius: 999, overflow: "hidden" }}>
+                          <div
+                            style={{
+                              width: `${spanActive ? Math.min(100, ((currentTime - span.start_seconds) / Math.max(0.1, span.end_seconds - span.start_seconds)) * 100) : 0}%`,
+                              height: "100%",
+                              background: "#38bdf8",
+                            }}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (videoRef.current) {
+                              videoRef.current.currentTime = Math.max(0, span.start_seconds);
+                              videoRef.current.play().catch(() => {
+                                /* ignore */
+                              });
+                            }
+                          }}
+                          style={{ padding: "6px 10px", width: "fit-content" }}
+                        >
+                          Jump to start
+                        </button>
+                      </div>
+
+                      <div style={{ display: "grid", gap: 10 }}>
+                        <strong>Events</strong>
+                        {timelineItems.length === 0 ? (
+                          <div style={{ color: "#94a3b8" }}>No events in this window.</div>
+                        ) : (
+                          <div style={{ display: "grid", gap: 8 }}>
+                            {timelineItems.map((item) => {
+                              const relativeStart = Math.max(0, item.timeline_seconds - span.start_seconds);
+                              const relativeEnd =
+                                item.end_seconds != null
+                                  ? Math.max(relativeStart, item.end_seconds - span.start_seconds)
+                                  : null;
+                              const isTranscript = item.kind === "transcript";
+                              const isActive = isTranscript
+                                ? currentTime >= (item.segment?.start ?? item.timeline_seconds) &&
+                                  currentTime <= (item.segment?.end ?? item.timeline_seconds)
+                                : Math.abs(currentTime - item.timeline_seconds) < 0.4;
+                              const borderColor = isActive
+                                ? isTranscript
+                                  ? "#22c55e"
+                                  : "#38bdf8"
+                                : "#1e293b";
+                              const background = isActive
+                                ? isTranscript
+                                  ? "rgba(34, 197, 94, 0.15)"
+                                  : "rgba(56, 189, 248, 0.15)"
+                                : "rgba(15, 23, 42, 0.7)";
+                              return (
+                                <button
+                                  key={item.id}
+                                  type="button"
+                                  onClick={() => {
+                                    if (videoRef.current) {
+                                      videoRef.current.currentTime = Math.max(0, item.timeline_seconds);
+                                      videoRef.current.play().catch(() => {
+                                        /* ignore */
+                                      });
+                                    }
+                                  }}
+                                  style={{
+                                    display: "grid",
+                                    gridTemplateColumns: isTranscript ? "120px 1fr" : "80px 1fr",
+                                    gap: 12,
+                                    padding: "10px 12px",
+                                    borderRadius: 8,
+                                    border: "1px solid",
+                                    borderColor,
+                                    background,
+                                    color: "#e2e8f0",
+                                    textAlign: "left",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  <span style={{ fontVariantNumeric: "tabular-nums", color: "#cbd5f5" }}>
+                                    {isTranscript && relativeEnd != null
+                                      ? `${formatTime(relativeStart)} - ${formatTime(relativeEnd)}`
+                                      : formatTime(relativeStart)}
+                                  </span>
+                                  <span>
+                                    {isTranscript ? `Transcript: ${clipText(item.label, 140)}` : clipText(item.label, 140)}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
+    </main>
   );                                                                                                             
 }              
