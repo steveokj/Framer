@@ -534,11 +534,19 @@ function ClipCard({
   const [videoError, setVideoError] = useState<string | null>(null);
   const safeClipEnd = useMemo(() => {
     if (videoDuration != null && Number.isFinite(videoDuration)) {
-      return Math.max(clip.start_seconds, Math.min(clip.end_seconds, videoDuration));
+      return Math.min(clip.end_seconds, videoDuration);
     }
-    return Math.max(clip.start_seconds, clip.end_seconds);
-  }, [clip.end_seconds, clip.start_seconds, videoDuration]);
-  const clipDuration = Math.max(0.05, safeClipEnd - clip.start_seconds);
+    return clip.end_seconds;
+  }, [clip.end_seconds, videoDuration]);
+  const safeClipStart = useMemo(
+    () => Math.min(clip.start_seconds, safeClipEnd),
+    [clip.start_seconds, safeClipEnd],
+  );
+  const displayClipEnd = useMemo(
+    () => Math.max(clip.start_seconds, safeClipEnd),
+    [clip.start_seconds, safeClipEnd],
+  );
+  const clipDuration = Math.max(0.05, safeClipEnd - safeClipStart);
   const timelineSeconds = clip.start_seconds + clipTime;
   const formattedCurrentTime = useMemo(() => formatTime(clipTime), [clipTime]);
   const formattedTotalTime = useMemo(() => formatTime(clipDuration), [clipDuration]);
@@ -593,13 +601,10 @@ function ClipCard({
         return;
       }
       const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : videoDuration;
-      let nextTime = Math.max(0, targetTimeline);
-      if (duration != null && Number.isFinite(duration)) {
-        const safeEnd = Math.max(clip.start_seconds, Math.min(clip.end_seconds, duration));
-        nextTime = Math.min(nextTime, safeEnd);
-      }
-      video.currentTime = nextTime;
-      const relative = Math.max(0, targetTimeline - clip.start_seconds);
+      const cappedEnd = duration != null && Number.isFinite(duration) ? Math.min(safeClipEnd, duration) : safeClipEnd;
+      const clamped = Math.min(cappedEnd, Math.max(safeClipStart, targetTimeline));
+      video.currentTime = Math.max(0, clamped);
+      const relative = Math.max(0, clamped - safeClipStart);
       setClipTime(Math.min(relative, clipDuration));
       if (shouldPlay) {
         video.play().catch(() => {
@@ -607,7 +612,7 @@ function ClipCard({
         });
       }
     },
-    [clip.start_seconds, clipDuration, videoDuration],
+    [clipDuration, safeClipEnd, safeClipStart, videoDuration],
   );
 
   const handleTogglePlayback = useCallback(() => {
@@ -625,15 +630,15 @@ function ClipCard({
   }, []);
 
   const handleRestart = useCallback(() => {
-    seekTimeline(clip.start_seconds, true);
-  }, [clip.start_seconds, seekTimeline]);
+    seekTimeline(safeClipStart, true);
+  }, [safeClipStart, seekTimeline]);
 
   const handleSliderChange = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
       const next = Number(event.target.value || "0");
-      seekTimeline(clip.start_seconds + next, false);
+      seekTimeline(safeClipStart + next, false);
     },
-    [clip.start_seconds, seekTimeline],
+    [safeClipStart, seekTimeline],
   );
 
   const handlePlayerPointerMove = useCallback(() => {
@@ -665,20 +670,17 @@ function ClipCard({
     }
     const duration = Number.isFinite(video.duration) ? video.duration : videoDuration;
     const currentTimeline = video.currentTime;
-    const safeEnd =
-      duration != null && Number.isFinite(duration)
-        ? Math.max(clip.start_seconds, Math.min(clip.end_seconds, duration))
-        : Math.max(clip.start_seconds, clip.end_seconds);
-    if (currentTimeline >= safeEnd - 0.01) {
-      video.currentTime = Math.max(0, safeEnd);
+    const cappedEnd = duration != null && Number.isFinite(duration) ? Math.min(safeClipEnd, duration) : safeClipEnd;
+    if (currentTimeline >= cappedEnd - 0.01) {
+      video.currentTime = Math.max(0, cappedEnd);
       video.pause();
       setIsPlaying(false);
       setClipTime(clipDuration);
       return;
     }
-    const relative = Math.max(0, currentTimeline - clip.start_seconds);
+    const relative = Math.max(0, currentTimeline - safeClipStart);
     setClipTime(Math.min(relative, clipDuration));
-  }, [clip.end_seconds, clip.start_seconds, clipDuration, videoDuration]);
+  }, [clipDuration, safeClipEnd, safeClipStart, videoDuration]);
 
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
@@ -688,8 +690,8 @@ function ClipCard({
     if (Number.isFinite(video.duration)) {
       setVideoDuration(video.duration);
     }
-    seekTimeline(clip.start_seconds, false);
-  }, [clip.start_seconds, seekTimeline]);
+    seekTimeline(safeClipStart, false);
+  }, [safeClipStart, seekTimeline]);
 
   const handleSeekToEvent = useCallback(
     (event: EventView) => {
@@ -729,7 +731,7 @@ function ClipCard({
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", gridColumn: "1 / -1" }}>
         <strong style={{ fontSize: 18 }}>{clip.window_name}</strong>
         <span style={{ color: "#94a3b8" }}>
-          {formatTime(clip.start_seconds)} - {formatTime(safeClipEnd)}
+          {formatTime(clip.start_seconds)} - {formatTime(displayClipEnd)}
         </span>
         <span style={{ color: "#64748b" }}>{displayEvents.length} events</span>
       </div>
