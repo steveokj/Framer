@@ -881,22 +881,34 @@ timelineDuration]);
     }
   }, [currentTime, isPlaying]);
                                                                                                                  
-  const videoMaxWidth = metadata?.video.width ? `${metadata.video.width}px` : "100%";
-  const videoMaxHeight = metadata?.video.height ? `min(90vh, ${metadata.video.height}px)` : "90vh";
+  const videoMaxWidth = metadata?.video.width ? `min(100%, ${metadata.video.width}px)` : "100%";
+  const videoMaxHeight = metadata?.video.height ? `min(100%, ${metadata.video.height}px)` : "100%";
   const sliderMax = videoDuration ?? 0;
   const subtitleIconColor = captionsEnabled ? "#0f172a" : "#f8fafc";
                                                                                                                  
   return (                                                                                                       
-    <main                                                                                                        
-      style={{                                                                                                   
-        minHeight: "100vh",                                                                                      
-        background: "linear-gradient(180deg, #070b16 0%, #0a1224 40%, #0b1120 100%)",                            
-        color: "#e2e8f0",                                                                                        
-        padding: "32px 24px 80px",                                                                               
-        fontFamily: '"Space Grotesk", "Segoe UI", system-ui',                                                    
-      }}                                                                                                         
-    >                                                                                                            
-      <div style={{ width: "100%", maxWidth: "100%", margin: "0 auto", display: "grid", gap: 24 }}>              
+    <main
+      style={{
+        height: "100vh",
+        overflow: "hidden",
+        background: "linear-gradient(180deg, #070b16 0%, #0a1224 40%, #0b1120 100%)",
+        color: "#e2e8f0",
+        padding: "32px 24px 24px",
+        fontFamily: '"Space Grotesk", "Segoe UI", system-ui',
+      }}
+    >
+      <div
+        style={{
+          width: "100%",
+          maxWidth: "100%",
+          margin: "0 auto",
+          display: "grid",
+          gap: 24,
+          height: "100%",
+          gridTemplateRows: "auto auto 1fr",
+          minHeight: 0,
+        }}
+      >
         <header style={{ display: "grid", gap: 8 }}>                                                             
           <h1 style={{ fontSize: 32, margin: 0 }}>Single Timeline Playback</h1>                                  
           <p style={{ margin: 0, color: "#94a3b8" }}>                                                            
@@ -1003,9 +1015,10 @@ timelineDuration]);
             gap: 24,
             gridTemplateColumns: `minmax(0, 1fr) minmax(280px, ${detailsMaxWidth}px)`,
             alignItems: "start",
+            minHeight: 0,
           }}
         >
-          <div style={{ display: "grid", gap: 16, position: "sticky", top: 24, alignSelf: "start" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 16, minHeight: 0 }}>
             <div
               style={{
                 width: "100%",
@@ -1014,9 +1027,11 @@ timelineDuration]);
                 position: "relative",
                 background: "#111",
                 minHeight: 240,
-                height: videoMaxHeight,
+                height: "100%",
+                maxHeight: videoMaxHeight,
                 borderRadius: 12,
                 overflow: "hidden",
+                flex: "1 1 auto",
               }}
               onMouseMove={handlePlayerPointerMove}
               onMouseLeave={handlePlayerPointerLeave}
@@ -1202,7 +1217,8 @@ timelineDuration]);
               display: "grid",
               gap: 16,
               alignContent: "start",
-              maxHeight: "calc(100vh - 220px)",
+              height: "100%",
+              minHeight: 0,
               overflowY: "auto",
               paddingRight: 8,
             }}
