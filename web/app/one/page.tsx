@@ -131,6 +131,7 @@ function SubtitleIcon({ size = 20, color = "#f8fafc" }: IconProps) {
 
 const DEFAULT_VIDEO = "";
 const LAST_VIDEO_STORAGE_KEY = "timestone:lastVideoPath:one";
+const LAST_SESSION_STORAGE_KEY = "timestone:lastSessionId:one";
 const API_BASE = (                                                                                               
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0                         
     ? process.env.NEXT_PUBLIC_API_BASE                                                                           
@@ -453,9 +454,10 @@ function buildWindowSpans(events: EventView[], timelineEnd: number | null): Wind
   });                                                                                                            
 }                                                                                                                
                                                                                                                  
-export default function OnePage() {                                                                              
-  const videoRef = useRef<HTMLVideoElement>(null);                                                               
-  const hideControlsTimeoutRef = useRef<number | null>(null);                                                    
+export default function OnePage() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const hideControlsTimeoutRef = useRef<number | null>(null);
+  const activeItemRef = useRef<HTMLButtonElement | null>(null);
                                                                                                                  
   const [videoInput, setVideoInput] = useState(DEFAULT_VIDEO);                                                   
   const [videoPath, setVideoPath] = useState(DEFAULT_VIDEO);                                                     
@@ -494,12 +496,27 @@ export default function OnePage() {
   }, []);
 
   useEffect(() => {
+    const saved = localStorage.getItem(LAST_SESSION_STORAGE_KEY);
+    if (saved) {
+      setSelectedSessionId(saved);
+    }
+  }, []);
+
+  useEffect(() => {
     if (!videoPath.trim()) {
       localStorage.removeItem(LAST_VIDEO_STORAGE_KEY);
       return;
     }
     localStorage.setItem(LAST_VIDEO_STORAGE_KEY, videoPath);
   }, [videoPath]);
+
+  useEffect(() => {
+    if (!selectedSessionId.trim()) {
+      localStorage.removeItem(LAST_SESSION_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(LAST_SESSION_STORAGE_KEY, selectedSessionId);
+  }, [selectedSessionId]);
 
   useEffect(() => {
     setVideoWarning(fileWarning);
@@ -847,13 +864,22 @@ timelineDuration]);
     setControlsVisible(false);                                                                                   
   }, []);                                                                                                        
                                                                                                                  
-  useEffect(() => {                                                                                              
-    return () => {                                                                                               
-      if (hideControlsTimeoutRef.current) {                                                                      
-        window.clearTimeout(hideControlsTimeoutRef.current);                                                     
-      }                                                                                                          
-    };                                                                                                           
-  }, []);                                                                                                        
+  useEffect(() => {
+    return () => {
+      if (hideControlsTimeoutRef.current) {
+        window.clearTimeout(hideControlsTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      return;
+    }
+    if (activeItemRef.current) {
+      activeItemRef.current.scrollIntoView({ block: "nearest" });
+    }
+  }, [currentTime, isPlaying]);
                                                                                                                  
   const videoMaxWidth = metadata?.video.width ? `${metadata.video.width}px` : "100%";
   const videoMaxHeight = metadata?.video.height ? `min(90vh, ${metadata.video.height}px)` : "90vh";
@@ -979,7 +1005,7 @@ timelineDuration]);
             alignItems: "start",
           }}
         >
-          <div style={{ display: "grid", gap: 16 }}>
+          <div style={{ display: "grid", gap: 16, position: "sticky", top: 24, alignSelf: "start" }}>
             <div
               style={{
                 width: "100%",
@@ -1171,7 +1197,16 @@ timelineDuration]);
             </section>
           </div>
 
-          <div style={{ display: "grid", gap: 16, alignContent: "start" }}>
+          <div
+            style={{
+              display: "grid",
+              gap: 16,
+              alignContent: "start",
+              maxHeight: "calc(100vh - 220px)",
+              overflowY: "auto",
+              paddingRight: 8,
+            }}
+          >
             <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
               <h2 style={{ margin: 0 }}>Window sections</h2>
               <span style={{ color: "#94a3b8" }}>{windowSpans.length} windows</span>
@@ -1301,13 +1336,14 @@ timelineDuration]);
                                   ? "rgba(34, 197, 94, 0.15)"
                                   : "rgba(56, 189, 248, 0.15)"
                                 : "rgba(15, 23, 42, 0.7)";
-                              return (
-                                <button
-                                  key={item.id}
-                                  type="button"
-                                  onClick={() => {
-                                    if (videoRef.current) {
-                                      videoRef.current.currentTime = Math.max(0, item.timeline_seconds);
+                              return (                                                                            
+                                <button                                                                          
+                                  key={item.id}                                                                   
+                                  type="button"                                                                  
+                                  ref={isActive ? activeItemRef : null}                                          
+                                  onClick={() => {                                                               
+                                    if (videoRef.current) {                                                      
+                                      videoRef.current.currentTime = Math.max(0, item.timeline_seconds);         
                                       videoRef.current.play().catch(() => {
                                         /* ignore */
                                       });
