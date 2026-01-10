@@ -1487,6 +1487,9 @@ timelineDuration]);
                   const spanOutOfRange = durationLimit != null && spanStart >= durationLimit;
                   const spanActive = currentTime >= spanStart && currentTime <= spanEnd;
                   const spanPlaying = spanActive && isPlaying;
+                  const sectionOpacity = spanOutOfRange ? 0.72 : 1;
+                  const timeColor = spanOutOfRange ? "#64748b" : "#94a3b8";
+                  const progressColor = spanOutOfRange ? "#334155" : "#38bdf8";
                   return (
                     <div
                       key={span.id}
@@ -1496,19 +1499,19 @@ timelineDuration]);
                         padding: 16,
                         background: spanActive ? "rgba(15, 23, 42, 0.96)" : "rgba(11, 17, 32, 0.9)",
                         boxShadow: spanPlaying ? "0 0 0 1px rgba(56, 189, 248, 0.25)" : "none",
+                        opacity: sectionOpacity,
                         display: "grid",
                         gap: 12,
                       }}
                     >
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
                         <strong style={{ fontSize: 18 }}>{span.window_name}</strong>
-                        <span style={{ color: "#94a3b8" }}>
+                        <span style={{ color: timeColor }}>
                           {formatTime(span.start_seconds)} - {formatTime(span.end_seconds)}
                         </span>
                         <span style={{ color: spanActive ? "#38bdf8" : "#64748b" }}>
                           {spanActive ? "Active now" : `${filteredItems.length} items`}
                         </span>
-                        {spanOutOfRange && <span style={{ color: "#fca5a5" }}>No video</span>}
                       </div>
 
                       <div style={{ display: "grid", gap: 10 }}>
@@ -1518,7 +1521,7 @@ timelineDuration]);
                             style={{
                             width: `${spanActive ? Math.min(100, ((currentTime - spanStart) / Math.max(0.1, spanEnd - spanStart)) * 100) : 0}%`,
                             height: "100%",
-                            background: "#38bdf8",
+                            background: progressColor,
                           }}
                         />
                       </div>
@@ -1537,8 +1540,20 @@ timelineDuration]);
                             /* ignore */
                           });
                         }}
-                        aria-label={spanPlaying ? "Pause window section" : "Play window section"}
-                        title={spanPlaying ? "Pause window section" : "Play window section"}
+                        aria-label={
+                          spanOutOfRange
+                            ? "Outside recording"
+                            : spanPlaying
+                              ? "Pause window section"
+                              : "Play window section"
+                        }
+                        title={
+                          spanOutOfRange
+                            ? "Outside recording"
+                            : spanPlaying
+                              ? "Pause window section"
+                              : "Play window section"
+                        }
                         style={{
                           width: 36,
                           height: 36,
