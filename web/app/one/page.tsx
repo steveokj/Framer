@@ -1469,15 +1469,19 @@ timelineDuration]);
                   if (normalizedQuery && filteredItems.length === 0) {
                     return null;
                   }
-                  const spanActive = currentTime >= span.start_seconds && currentTime <= span.end_seconds;
+                  const spanStart = Number.isFinite(span.start_seconds) ? span.start_seconds : 0;
+                  const spanEnd = Number.isFinite(span.end_seconds) ? Math.max(span.end_seconds, spanStart) : spanStart;
+                  const spanActive = currentTime >= spanStart && currentTime <= spanEnd;
+                  const spanPlaying = spanActive && isPlaying;
                   return (
                     <div
                       key={span.id}
                       style={{
-                        border: "1px solid #1e293b",
+                        border: spanPlaying ? "1px solid rgba(56, 189, 248, 0.7)" : "1px solid #1e293b",
                         borderRadius: 12,
                         padding: 16,
-                        background: spanActive ? "rgba(15, 23, 42, 0.9)" : "rgba(11, 17, 32, 0.9)",
+                        background: spanActive ? "rgba(15, 23, 42, 0.96)" : "rgba(11, 17, 32, 0.9)",
+                        boxShadow: spanPlaying ? "0 0 0 1px rgba(56, 189, 248, 0.25)" : "none",
                         display: "grid",
                         gap: 12,
                       }}
@@ -1497,30 +1501,34 @@ timelineDuration]);
                         <div style={{ height: 6, background: "#1e293b", borderRadius: 999, overflow: "hidden" }}>
                           <div
                             style={{
-                              width: `${spanActive ? Math.min(100, ((currentTime - span.start_seconds) / Math.max(0.1, span.end_seconds - span.start_seconds)) * 100) : 0}%`,
-                              height: "100%",
-                              background: "#38bdf8",
-                            }}
-                          />
-                        </div>
+                            width: `${spanActive ? Math.min(100, ((currentTime - spanStart) / Math.max(0.1, spanEnd - spanStart)) * 100) : 0}%`,
+                            height: "100%",
+                            background: "#38bdf8",
+                          }}
+                        />
+                      </div>
                       <button
                         type="button"
                         onClick={() => {
                           if (videoRef.current) {
-                            videoRef.current.currentTime = Math.max(0, span.start_seconds);
+                            if (spanPlaying) {
+                              videoRef.current.pause();
+                              return;
+                            }
+                            videoRef.current.currentTime = Math.max(0, spanStart);
                             videoRef.current.play().catch(() => {
                               /* ignore */
                             });
                           }
                         }}
-                        aria-label="Play window section"
-                        title="Play window section"
+                        aria-label={spanPlaying ? "Pause window section" : "Play window section"}
+                        title={spanPlaying ? "Pause window section" : "Play window section"}
                         style={{
                           width: 36,
                           height: 36,
                           borderRadius: "50%",
                           border: "1px solid #1e293b",
-                          background: "rgba(15, 23, 42, 0.7)",
+                          background: spanPlaying ? "rgba(56, 189, 248, 0.18)" : "rgba(15, 23, 42, 0.7)",
                           color: "#e2e8f0",
                           display: "flex",
                           alignItems: "center",
@@ -1528,7 +1536,7 @@ timelineDuration]);
                           cursor: "pointer",
                         }}
                       >
-                        <PlayIcon size={18} />
+                        {spanPlaying ? <PauseIcon size={18} /> : <PlayIcon size={18} />}
                       </button>
                       </div>
 
