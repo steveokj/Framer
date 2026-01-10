@@ -1483,6 +1483,8 @@ timelineDuration]);
                   }
                   const spanStart = Number.isFinite(span.start_seconds) ? span.start_seconds : 0;
                   const spanEnd = Number.isFinite(span.end_seconds) ? Math.max(span.end_seconds, spanStart) : spanStart;
+                  const durationLimit = videoDuration ?? null;
+                  const spanOutOfRange = durationLimit != null && spanStart >= durationLimit;
                   const spanActive = currentTime >= spanStart && currentTime <= spanEnd;
                   const spanPlaying = spanActive && isPlaying;
                   return (
@@ -1506,6 +1508,7 @@ timelineDuration]);
                         <span style={{ color: spanActive ? "#38bdf8" : "#64748b" }}>
                           {spanActive ? "Active now" : `${filteredItems.length} items`}
                         </span>
+                        {spanOutOfRange && <span style={{ color: "#fca5a5" }}>No video</span>}
                       </div>
 
                       <div style={{ display: "grid", gap: 10 }}>
@@ -1522,16 +1525,17 @@ timelineDuration]);
                       <button
                         type="button"
                         onClick={() => {
-                          if (videoRef.current) {
-                            if (spanPlaying) {
-                              videoRef.current.pause();
-                              return;
-                            }
-                            videoRef.current.currentTime = clampSeekTime(spanStart);
-                            videoRef.current.play().catch(() => {
-                              /* ignore */
-                            });
+                          if (!videoRef.current || spanOutOfRange) {
+                            return;
                           }
+                          if (spanPlaying) {
+                            videoRef.current.pause();
+                            return;
+                          }
+                          videoRef.current.currentTime = clampSeekTime(spanStart);
+                          videoRef.current.play().catch(() => {
+                            /* ignore */
+                          });
                         }}
                         aria-label={spanPlaying ? "Pause window section" : "Play window section"}
                         title={spanPlaying ? "Pause window section" : "Play window section"}
@@ -1540,12 +1544,16 @@ timelineDuration]);
                           height: 36,
                           borderRadius: "50%",
                           border: "1px solid #1e293b",
-                          background: spanPlaying ? "rgba(56, 189, 248, 0.18)" : "rgba(15, 23, 42, 0.7)",
-                          color: "#e2e8f0",
+                          background: spanPlaying
+                            ? "rgba(56, 189, 248, 0.18)"
+                            : spanOutOfRange
+                              ? "rgba(15, 23, 42, 0.4)"
+                              : "rgba(15, 23, 42, 0.7)",
+                          color: spanOutOfRange ? "#64748b" : "#e2e8f0",
                           display: "flex",
                           alignItems: "center",
                           justifyContent: "center",
-                          cursor: "pointer",
+                          cursor: spanOutOfRange ? "not-allowed" : "pointer",
                         }}
                       >
                         {spanPlaying ? <PauseIcon size={18} /> : <PlayIcon size={18} />}
