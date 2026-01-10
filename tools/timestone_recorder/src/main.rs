@@ -1448,11 +1448,12 @@ fn spawn_window_rect_flush_loop(state: Arc<RecorderState>, shutdown: Arc<AtomicB
         while !shutdown.load(Ordering::SeqCst) {
             let pending = {
                 let mut tracker = state.window_tracker.lock().unwrap();
+                let last_hwnd = tracker.last_hwnd;
                 if let Some(pending) = tracker.pending_rect.as_mut() {
                     let now_ms = now_mono_ms(state.as_ref());
                     if now_ms - pending.last_change_ms < state.window_rect_debounce_ms {
                         None
-                    } else if tracker.last_hwnd.0 != pending.hwnd.0 {
+                    } else if last_hwnd.0 != pending.hwnd.0 {
                         tracker.pending_rect = None;
                         None
                     } else {
