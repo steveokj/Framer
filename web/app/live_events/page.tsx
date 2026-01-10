@@ -37,6 +37,7 @@ const API_BASE = (
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
 const MAX_EVENTS = 300;
 const POLL_MS = 750;
+const TEXT_MERGE_WINDOW_MS = 1500;
 
 function safeJsonParse(input: string | null): any {
   if (!input) {
@@ -104,6 +105,52 @@ function formatShortcut(payload: any): string | null {
   }
   const combo = [...modifiers, String(key)];
   return combo.join("+");
+}
+
+function mergeTextInputEvents(events: EventView[]): EventView[] {
+  const sorted = [...events].sort((a, b) => a.ts_wall_ms - b.ts_wall_ms);
+  const merged: EventView[] = [];
+  for (const event of sorted) {
+    if (event.event_type !== "text_input") {
+      merged.push(event);
+      continue;
+    }
+    const last = merged[merged.length - 1];
+    const payload = event.payloadData || {};
+    const lastPayload = last?.payloadData || {};
+    const currentFinal = payload?.final_text;
+    const lastFinal = lastPayload?.final_text;
+    const currentText = typeof payload?.text === "string" ? payload.text : "";
+    const lastText = typeof lastPayload?.text === "string" ? lastPayload.text : "";
+    const sameWindow =
+      last &&
+      last.event_type === "text_input" &&
+      last.window_title === event.window_title &&
+      last.window_class === event.window_class &&
+      last.process_name === event.process_name;
+    const withinWindow =
+      last && event.ts_wall_ms - last.ts_wall_ms <= TEXT_MERGE_WINDOW_MS;
+    const shouldMerge =
+      sameWindow &&
+      withinWindow &&
+      !currentFinal &&
+      !lastFinal &&
+      currentText.length > 0;
+
+    if (shouldMerge && last) {
+      const nextText = `${lastText}${currentText}`;
+      const updated: EventView = {
+        ...last,
+        ts_wall_ms: event.ts_wall_ms,
+        ts_mono_ms: event.ts_mono_ms,
+        payloadData: { ...lastPayload, text: nextText },
+      };
+      merged[merged.length - 1] = updated;
+    } else {
+      merged.push(event);
+    }
+  }
+  return merged.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
 }
 
 export default function LiveEventsPage() {
@@ -228,6 +275,7 @@ export default function LiveEventsPage() {
   }, [pollEvents, sessionId]);
 
   const eventCount = events.length;
+  const displayEvents = useMemo(() => mergeTextInputEvents(events), [events]);
 
   return (
     <div className="container">
@@ -309,7 +357,7 @@ export default function LiveEventsPage() {
             {eventCount === 0 ? (
               <div style={{ color: "#94a3b8" }}>No events yet.</div>
             ) : (
-              events.map((event) => {
+              displayEvents.map((event) => {
                 const payload = event.payloadData || {};
                 const mouse = event.mouseData || {};
                 const wallTime = formatWallTime(event.ts_wall_ms);
@@ -318,7 +366,11 @@ export default function LiveEventsPage() {
                 const shortcut = event.event_type === "key_shortcut" ? formatShortcut(payload) : null;
                 const clipboardPath = payload?.path ? String(payload.path) : null;
                 const clipboardUrl = clipboardPath ? buildFileUrl(clipboardPath) : null;
-                const clipTextValue = payload?.text ? String(payload.text) : null;
+                const clipTextValue = payload?.final_text
+                  ? String(payload.final_text)
+                  : payload?.text
+                    ? String(payload.text)
+                    : null;
                 const clipFiles = Array.isArray(payload?.files) ? payload.files : [];
 
                 return (

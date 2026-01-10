@@ -6,11 +6,12 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::env;
 use std::ffi::c_void;
 use std::fs;
 use std::io::Write;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,8 +35,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK, UIA_CONTROLTYPE_ID,
-    UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    CUIAutomation, IUIAutomation, IUIAutomationValuePattern, SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK,
+    UIA_CONTROLTYPE_ID, UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextW,
@@ -74,7 +75,10 @@ struct RecorderConfig {
     emit_mouse_scroll: bool,
     capture_clipboard: bool,
     clipboard_poll_ms: u64,
+    clipboard_debounce_ms: u64,
+    clipboard_dedupe_window_ms: u64,
     window_poll_hz: u64,
+    window_rect_debounce_ms: u64,
     capture_raw_keys: bool,
     raw_keys_mode: String,
     suppress_raw_keys_on_shortcut: bool,
@@ -85,6 +89,7 @@ struct RecorderConfig {
     blocklist_processes: Vec<String>,
     text_flush_ms: u64,
     max_text_len: usize,
+    text_snapshot_on_idle: bool,
 }
 
 impl Default for RecorderConfig {
@@ -97,7 +102,10 @@ impl Default for RecorderConfig {
             emit_mouse_scroll: false,
             capture_clipboard: true,
             clipboard_poll_ms: 250,
+            clipboard_debounce_ms: 200,
+            clipboard_dedupe_window_ms: 2000,
             window_poll_hz: 0,
+            window_rect_debounce_ms: 300,
             capture_raw_keys: true,
             raw_keys_mode: "down".to_string(),
             suppress_raw_keys_on_shortcut: true,
@@ -112,6 +120,7 @@ impl Default for RecorderConfig {
             ],
             text_flush_ms: 1500,
             max_text_len: 2000,
+            text_snapshot_on_idle: false,
         }
     }
 }
@@ -158,6 +167,10 @@ struct RecorderState {
     text_flush_ms: i64,
     max_text_len: usize,
     text_buffer: Mutex<TextBuffer>,
+    text_snapshot_on_idle: bool,
+    clipboard_dedupe_window_ms: i64,
+    last_clipboard_hash: Mutex<Option<ClipboardHash>>,
+    window_rect_debounce_ms: i64,
     window_tracker: Mutex<WindowTracker>,
 }
 
@@ -190,6 +203,11 @@ struct ClipboardImage {
     path: String,
     width: i32,
     height: i32,
+}
+
+struct ClipboardHash {
+    hash: u64,
+    ts_ms: i64,
 }
 
 #[derive(Clone)]
@@ -332,9 +350,14 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
             text: String::new(),
             last_ts_ms: 0,
         }),
+        text_snapshot_on_idle: config.text_snapshot_on_idle,
+        clipboard_dedupe_window_ms: config.clipboard_dedupe_window_ms as i64,
+        last_clipboard_hash: Mutex::new(None),
+        window_rect_debounce_ms: config.window_rect_debounce_ms as i64,
         window_tracker: Mutex::new(WindowTracker {
             last_hwnd: HWND(0),
             last_rect: None,
+            pending_rect: None,
         }),
     });
     let _ = STATE.set(state.clone());
@@ -381,8 +404,14 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
             state.clone(),
             shutdown.clone(),
             config.clipboard_poll_ms,
+            config.clipboard_debounce_ms,
             base_dir.clone(),
         ))
+    } else {
+        None
+    };
+    let rect_flush_handle = if config.window_rect_debounce_ms > 0 {
+        Some(spawn_window_rect_flush_loop(state.clone(), shutdown.clone()))
     } else {
         None
     };
@@ -416,6 +445,9 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         handle.join().ok();
     }
     if let Some(handle) = window_poll_handle {
+        handle.join().ok();
+    }
+    if let Some(handle) = rect_flush_handle {
         handle.join().ok();
     }
     if let Some(handle) = clipboard_handle {
@@ -631,7 +663,10 @@ fn normalize_config(mut config: RecorderConfig) -> RecorderConfig {
     config.mouse_hz = config.mouse_hz.max(1);
     config.snapshot_hz = config.snapshot_hz.max(1);
     config.clipboard_poll_ms = config.clipboard_poll_ms.max(50);
+    config.clipboard_debounce_ms = config.clipboard_debounce_ms.max(50);
+    config.clipboard_dedupe_window_ms = config.clipboard_dedupe_window_ms.max(0);
     config.window_poll_hz = config.window_poll_hz.max(0);
+    config.window_rect_debounce_ms = config.window_rect_debounce_ms.max(0);
     config.text_flush_ms = config.text_flush_ms.max(250);
     if config.max_text_len < 16 {
         config.max_text_len = 16;
@@ -805,17 +840,26 @@ fn spawn_clipboard_loop(
     state: Arc<RecorderState>,
     shutdown: Arc<AtomicBool>,
     poll_ms: u64,
+    debounce_ms: u64,
     base_dir: PathBuf,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let interval = Duration::from_millis(poll_ms.max(50));
+        let debounce = Duration::from_millis(debounce_ms.max(50));
         let mut last_seq = unsafe { GetClipboardSequenceNumber() };
+        let mut pending_since: Option<Instant> = None;
         while !shutdown.load(Ordering::SeqCst) {
             let seq = unsafe { GetClipboardSequenceNumber() };
             if seq != last_seq {
                 last_seq = seq;
-                if let Some(event) = read_clipboard_event(&state, &base_dir) {
-                    state.sender.try_send(event).ok();
+                pending_since = Some(Instant::now());
+            }
+            if let Some(since) = pending_since {
+                if since.elapsed() >= debounce {
+                    if let Some(event) = read_clipboard_event(&state, &base_dir) {
+                        state.sender.try_send(event).ok();
+                    }
+                    pending_since = None;
                 }
             }
             thread::sleep(interval);
@@ -935,6 +979,13 @@ struct WindowInfo {
 struct WindowTracker {
     last_hwnd: HWND,
     last_rect: Option<RectInfo>,
+    pending_rect: Option<PendingRect>,
+}
+
+struct PendingRect {
+    hwnd: HWND,
+    window_info: WindowInfo,
+    last_change_ms: i64,
 }
 
 fn cursor_position() -> Option<(i32, i32)> {
@@ -1013,7 +1064,10 @@ fn read_clipboard_event_locked(
     } else {
         None
     };
-    if let Some(image) = image {
+    if let Some((image, hash)) = image {
+        if should_skip_clipboard_hash(state, hash) {
+            return None;
+        }
         return Some(build_clipboard_event(
             state,
             window_info,
@@ -1146,7 +1200,28 @@ fn read_clipboard_files() -> Option<Vec<String>> {
     }
 }
 
-fn read_clipboard_image(base_dir: &Path, format: u32) -> Option<ClipboardImage> {
+fn should_skip_clipboard_hash(state: &RecorderState, hash: u64) -> bool {
+    let now_ms = now_mono_ms(state);
+    let mut last = state.last_clipboard_hash.lock().unwrap();
+    if let Some(last_hash) = last.as_ref() {
+        if last_hash.hash == hash && now_ms - last_hash.ts_ms <= state.clipboard_dedupe_window_ms {
+            return true;
+        }
+    }
+    *last = Some(ClipboardHash {
+        hash,
+        ts_ms: now_ms,
+    });
+    false
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn read_clipboard_image(base_dir: &Path, format: u32) -> Option<(ClipboardImage, u64)> {
     let handle = unsafe { GetClipboardData(format) }.ok()?;
     let hglobal = HGLOBAL(handle.0 as *mut c_void);
     let size = unsafe { GlobalSize(hglobal) };
@@ -1162,11 +1237,15 @@ fn read_clipboard_image(base_dir: &Path, format: u32) -> Option<ClipboardImage> 
 
     let info = parse_dib_info(&bytes)?;
     let path = write_clipboard_image(base_dir, &bytes, info.image_size)?;
-    Some(ClipboardImage {
-        path,
-        width: info.width,
-        height: info.height,
-    })
+    let hash = hash_bytes(&bytes);
+    Some((
+        ClipboardImage {
+            path,
+            width: info.width,
+            height: info.height,
+        },
+        hash,
+    ))
 }
 
 struct DibInfo {
@@ -1331,12 +1410,16 @@ fn poll_active_window(state: &RecorderState) {
 }
 
 fn update_window_events(state: &RecorderState, hwnd: HWND, window_info: WindowInfo) {
+    let now_ms = now_mono_ms(state);
     let (is_new, rect_changed) = {
         let mut tracker = state.window_tracker.lock().unwrap();
         let is_new = hwnd != tracker.last_hwnd;
         let rect_changed = is_new || window_info.rect != tracker.last_rect;
         tracker.last_hwnd = hwnd;
         tracker.last_rect = window_info.rect.clone();
+        if is_new {
+            tracker.pending_rect = None;
+        }
         (is_new, rect_changed)
     };
 
@@ -1345,8 +1428,48 @@ fn update_window_events(state: &RecorderState, hwnd: HWND, window_info: WindowIn
         send_active_window_changed(state, &window_info);
     }
     if rect_changed && !is_new {
-        send_window_rect_changed(state, &window_info);
+        if state.window_rect_debounce_ms <= 0 {
+            send_window_rect_changed(state, &window_info);
+            return;
+        }
+        let mut tracker = state.window_tracker.lock().unwrap();
+        tracker.pending_rect = Some(PendingRect {
+            hwnd,
+            window_info,
+            last_change_ms: now_ms,
+        });
+        return;
     }
+}
+
+fn spawn_window_rect_flush_loop(state: Arc<RecorderState>, shutdown: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let interval = Duration::from_millis(100);
+        while !shutdown.load(Ordering::SeqCst) {
+            let pending = {
+                let mut tracker = state.window_tracker.lock().unwrap();
+                if let Some(pending) = tracker.pending_rect.as_mut() {
+                    let now_ms = now_mono_ms(state.as_ref());
+                    if now_ms - pending.last_change_ms < state.window_rect_debounce_ms {
+                        None
+                    } else if tracker.last_hwnd != pending.hwnd {
+                        tracker.pending_rect = None;
+                        None
+                    } else {
+                        let info = pending.window_info.clone();
+                        tracker.pending_rect = None;
+                        Some(info)
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(info) = pending {
+                send_window_rect_changed(&state, &info);
+            }
+            thread::sleep(interval);
+        }
+    })
 }
 
 fn send_active_window_changed(state: &RecorderState, window_info: &WindowInfo) {
@@ -1707,6 +1830,43 @@ fn should_capture_text(state: &RecorderState, window_info: Option<&WindowInfo>) 
     true
 }
 
+fn snapshot_text_from_uia(state: &RecorderState) -> Option<String> {
+    let Some(uia) = get_uia() else {
+        return None;
+    };
+    let element = match unsafe { uia.GetFocusedElement() } {
+        Ok(element) => element,
+        Err(_) => return None,
+    };
+    let has_focus = unsafe { element.CurrentHasKeyboardFocus() }
+        .ok()
+        .map(|value| value.as_bool())
+        .unwrap_or(false);
+    if !has_focus {
+        return None;
+    }
+    let is_password = unsafe { element.CurrentIsPassword() }
+        .ok()
+        .map(|value| value.as_bool())
+        .unwrap_or(false);
+    if is_password {
+        return None;
+    }
+    let control_type = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
+    if control_type != UIA_EditControlTypeId && control_type != UIA_DocumentControlTypeId {
+        return None;
+    }
+    let pattern: IUIAutomationValuePattern =
+        unsafe { element.GetCurrentPatternAs(UIA_ValuePatternId) }.ok()?;
+    let value = unsafe { pattern.CurrentValue() }.ok()?;
+    let text = String::from_utf16_lossy(value.as_wide());
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 fn process_is_allowed(state: &RecorderState, process_name: Option<&str>) -> bool {
     if state.allowlist_processes.is_empty() {
         return true;
@@ -1831,10 +1991,24 @@ fn flush_text_buffer_with_window(state: &RecorderState, window_info: Option<Wind
         buffer.last_ts_ms = now_ms;
         std::mem::take(&mut buffer.text)
     };
-    send_text_event(state, window_info, text, reason);
+    let final_text = if state.text_snapshot_on_idle
+        && matches!(reason, "idle_timeout" | "timeout")
+        && should_capture_text(state, window_info.as_ref())
+    {
+        snapshot_text_from_uia(state)
+    } else {
+        None
+    };
+    send_text_event(state, window_info, text, reason, final_text);
 }
 
-fn send_text_event(state: &RecorderState, window_info: Option<WindowInfo>, text: String, reason: &str) {
+fn send_text_event(
+    state: &RecorderState,
+    window_info: Option<WindowInfo>,
+    text: String,
+    reason: &str,
+    final_text: Option<String>,
+) {
     let (process_name, window_title, window_class, window_rect) = match window_info {
         Some(info) => (
             info.process_name.clone(),
@@ -1844,6 +2018,7 @@ fn send_text_event(state: &RecorderState, window_info: Option<WindowInfo>, text:
         ),
         None => (None, None, None, None),
     };
+    let final_text = final_text.map(|text| truncate_text(text, state.max_text_len));
     let event = EventRecord {
         session_id: state.session_id.clone(),
         ts_wall_ms: now_wall_ms(),
@@ -1857,6 +2032,10 @@ fn send_text_event(state: &RecorderState, window_info: Option<WindowInfo>, text:
         payload: json!({
             "text": text,
             "reason": reason,
+            "final_text": final_text.as_ref().map(|value| value.text.clone()),
+            "final_text_length": final_text.as_ref().map(|value| value.length),
+            "final_text_truncated": final_text.as_ref().map(|value| value.truncated),
+            "source": if final_text.is_some() { "uia" } else { "buffer" },
         }),
     };
     state.sender.try_send(event).ok();
