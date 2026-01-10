@@ -542,6 +542,7 @@ export default function OnePage() {
     mouse: false,
     marker: false,
   });
+  const [showConfigPanel, setShowConfigPanel] = useState(true);
   const [videoWarning, setVideoWarning] = useState<string | null>(null);
   const [videoError, setVideoError] = useState<string | null>(null);                                             
   const [controlsVisible, setControlsVisible] = useState(true);                                                  
@@ -558,6 +559,7 @@ export default function OnePage() {
     if (saved) {
       setVideoInput(saved);
       setVideoPath(saved);
+      setShowConfigPanel(false);
     }
   }, []);
 
@@ -1011,97 +1013,116 @@ timelineDuration]);
           </p>                                                                                                   
         </header>                                                                                                
                                                                                                                  
-        <section                                                                                                 
-          style={{                                                                                               
-            background: "rgba(15, 23, 42, 0.7)",                                                                 
-            borderRadius: 14,                                                                                    
-            padding: 20,                                                                                         
-            display: "grid",                                                                                     
-            gap: 16,                                                                                             
-          }}                                                                                                     
-        >                                                                                                        
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>                     
-            <label style={{ display: "grid", gap: 6, minWidth: 240, flex: "1 1 240px" }}>                        
-              <span style={{ color: "#cbd5f5" }}>Timestone session</span>                                        
-              <select                                                                                            
-                value={selectedSessionId}                                                                        
-                onChange={(e) => setSelectedSessionId(e.target.value)}                                           
-                style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120"
-, color: "#e2e8f0" }}                                                                                            
-              >                                                                                                  
-                <option value="">Select a session...</option>                                                    
-                {sessions.map((session) => (                                                                     
-                  <option key={session.session_id} value={session.session_id}>                                   
-                    {session.start_wall_iso} ({session.session_id.slice(0, 8)})                                  
-                  </option>                                                                                      
-                ))}                                                                                              
-              </select>                                                                                          
-            </label>                                                                                             
-            <button                                                                                              
-              type="button"                                                                                      
-              onClick={() => {                                                                                   
-                setLoadingSessions(true);                                                                        
-                setSessionError(null);                                                                           
-                fetch("/api/timestone_sessions", { method: "POST" })                                             
-                  .then((res) => res.json())                                                                     
-                  .then((data) => setSessions(Array.isArray(data?.sessions) ? data.sessions : []))               
-                  .catch((err) => setSessionError(err instanceof Error ? err.message : "Failed to load sessions")
-)                                                                                                                
-                  .finally(() => setLoadingSessions(false));                                                     
-              }}                                                                                                 
-              style={{ padding: "8px 12px" }}                                                                    
-            >                                                                                                    
-              Refresh sessions                                                                                   
-            </button>                                                                                            
-            <button                                                                                              
-              type="button"                                                                                      
-              onClick={handleUseSessionVideo}                                                                    
-              disabled={!selectedSession?.obs_video_path}                                                        
-              style={{                                                                                           
-                padding: "8px 12px",                                                                             
-                borderRadius: 8,                                                                                 
-                border: "1px solid",                                                                             
-                borderColor: selectedSession?.obs_video_path ? "#38bdf8" : "#1e293b",                            
-                background: selectedSession?.obs_video_path ? "rgba(56, 189, 248, 0.18)" : "rgba(15, 23, 42, 0.6)",                                                                                                               
-                color: selectedSession?.obs_video_path ? "#e0f2fe" : "#64748b",                                  
-                cursor: selectedSession?.obs_video_path ? "pointer" : "not-allowed",                             
-              }}                                                                                                 
-            >                                                                                                    
-              Use session video path                                                                             
-            </button>                                                                                            
-            {loadingSessions && <span style={{ color: "#94a3b8" }}>Loading sessions...</span>}                   
-            {sessionError && <span style={{ color: "#fca5a5" }}>{sessionError}</span>}                           
-          </div>                                                                                                 
-          {selectedSession && (                                                                                  
-            <div style={{ color: "#94a3b8" }}>                                                                   
-              Session started {selectedSession.start_wall_iso}                                                   
-              {selectedSession.obs_video_path ? ` | OBS: ${selectedSession.obs_video_path}` : ""}                
-            </div>                                                                                               
-          )}                                                                                                     
-                                                                                                                 
-          <div style={{ display: "grid", gap: 12 }}>                                                             
-            <label style={{ display: "grid", gap: 6 }}>                                                          
-              <span style={{ color: "#cbd5f5" }}>Video path (absolute or project-relative)</span>                
-              <input                                                                                             
-                value={videoInput}                                                                               
-                onChange={(e) => setVideoInput(e.target.value)}                                                  
-                placeholder="C:\\path\\to\\video.mkv"                                                            
-                style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120"
-, color: "#e2e8f0" }}                                                                                            
-              />                                                                                                 
-            </label>                                                                                             
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>                   
-              <button                                                                                            
-                type="button"                                                                                    
-                onClick={() => setVideoPath(videoInput.trim())}                                                  
-                style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #1e293b", background: "#0f172a"
-, color: "#e2e8f0" }}                                                                                            
-              >                                                                                                  
-                Load video                                                                                       
-              </button>                                                                                          
-              {videoWarning && <span style={{ color: "#fca5a5" }}>{videoWarning}</span>}                         
-            </div>                                                                                               
-          </div>                                                                                                 
+        <section
+          style={{
+            background: "rgba(15, 23, 42, 0.7)",
+            borderRadius: 14,
+            padding: 20,
+            display: "grid",
+            gap: 16,
+          }}
+        >
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ display: "grid", gap: 4 }}>
+              <strong>Session and video</strong>
+              {selectedSession && (
+                <span style={{ color: "#94a3b8", fontSize: 12 }}>
+                  Session started {selectedSession.start_wall_iso}
+                  {selectedSession.obs_video_path ? ` | OBS: ${selectedSession.obs_video_path}` : ""}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowConfigPanel((prev) => !prev)}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 8,
+                border: "1px solid #1e293b",
+                background: "rgba(15, 23, 42, 0.6)",
+                color: "#e2e8f0",
+                cursor: "pointer",
+              }}
+            >
+              {showConfigPanel ? "Hide settings" : "Show settings"}
+            </button>
+          </div>
+          {showConfigPanel && (
+            <>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                <label style={{ display: "grid", gap: 6, minWidth: 240, flex: "1 1 240px" }}>
+                  <span style={{ color: "#cbd5f5" }}>Timestone session</span>
+                  <select
+                    value={selectedSessionId}
+                    onChange={(e) => setSelectedSessionId(e.target.value)}
+                    style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120", color: "#e2e8f0" }}
+                  >
+                    <option value="">Select a session...</option>
+                    {sessions.map((session) => (
+                      <option key={session.session_id} value={session.session_id}>
+                        {session.start_wall_iso} ({session.session_id.slice(0, 8)})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoadingSessions(true);
+                    setSessionError(null);
+                    fetch("/api/timestone_sessions", { method: "POST" })
+                      .then((res) => res.json())
+                      .then((data) => setSessions(Array.isArray(data?.sessions) ? data.sessions : []))
+                      .catch((err) => setSessionError(err instanceof Error ? err.message : "Failed to load sessions"))
+                      .finally(() => setLoadingSessions(false));
+                  }}
+                  style={{ padding: "8px 12px" }}
+                >
+                  Refresh sessions
+                </button>
+                <button
+                  type="button"
+                  onClick={handleUseSessionVideo}
+                  disabled={!selectedSession?.obs_video_path}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    border: "1px solid",
+                    borderColor: selectedSession?.obs_video_path ? "#38bdf8" : "#1e293b",
+                    background: selectedSession?.obs_video_path ? "rgba(56, 189, 248, 0.18)" : "rgba(15, 23, 42, 0.6)",
+                    color: selectedSession?.obs_video_path ? "#e0f2fe" : "#64748b",
+                    cursor: selectedSession?.obs_video_path ? "pointer" : "not-allowed",
+                  }}
+                >
+                  Use session video path
+                </button>
+                {loadingSessions && <span style={{ color: "#94a3b8" }}>Loading sessions...</span>}
+                {sessionError && <span style={{ color: "#fca5a5" }}>{sessionError}</span>}
+              </div>
+
+              <div style={{ display: "grid", gap: 12 }}>
+                <label style={{ display: "grid", gap: 6 }}>
+                  <span style={{ color: "#cbd5f5" }}>Video path (absolute or project-relative)</span>
+                  <input
+                    value={videoInput}
+                    onChange={(e) => setVideoInput(e.target.value)}
+                    placeholder="C:\path\to\video.mkv"
+                    style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1e293b", background: "#0b1120", color: "#e2e8f0" }}
+                  />
+                </label>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                  <button
+                    type="button"
+                    onClick={() => setVideoPath(videoInput.trim())}
+                    style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #1e293b", background: "#0f172a", color: "#e2e8f0" }}
+                  >
+                    Load video
+                  </button>
+                  {videoWarning && <span style={{ color: "#fca5a5" }}>{videoWarning}</span>}
+                </div>
+              </div>
+            </>
+          )}
         </section>
 
         <section
@@ -1309,13 +1330,13 @@ timelineDuration]);
 
           <div
             style={{
-              display: "grid",
+              display: "flex",
+              flexDirection: "column",
               gap: 16,
               alignContent: "start",
               height: "100%",
               minHeight: 0,
-              overflowY: "auto",
-              paddingRight: 8,
+              overflow: "hidden",
             }}
           >
             <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
@@ -1414,11 +1435,12 @@ timelineDuration]);
               <span style={{ minWidth: 48 }}>{detailsMaxWidth}px</span>
             </label>
 
-            {windowSpans.length === 0 ? (
-              <div style={{ color: "#94a3b8" }}>No window sections found yet.</div>
-            ) : (
-              <div style={{ display: "grid", gap: 16 }}>
-                {windowSpans.map((span) => {
+            <div style={{ flex: "1 1 auto", overflowY: "auto", paddingRight: 8, minHeight: 0 }}>
+              {windowSpans.length === 0 ? (
+                <div style={{ color: "#94a3b8" }}>No window sections found yet.</div>
+              ) : (
+                <div style={{ display: "grid", gap: 16 }}>
+                  {windowSpans.map((span) => {
                   const eventsForSpan = windowEventsMap.get(span.id) ?? [];
                   const displayEvents = buildDisplayEvents(eventsForSpan);
                   const transcriptForSpan = windowTranscriptMap.get(span.id) ?? [];
@@ -1567,9 +1589,10 @@ timelineDuration]);
                       </div>
                     </div>
                   );
-                })}
-              </div>
-            )}
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </section>
         {settingsOpen && (
