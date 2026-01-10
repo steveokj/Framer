@@ -901,14 +901,26 @@ timelineDuration]);
     }                                                                                                            
   }, []);                                                                                                        
                                                                                                                  
-  const handleSliderChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {                       
-    const video = videoRef.current;                                                                              
-    if (!video) {                                                                                                
-      return;                                                                                                    
-    }                                                                                                            
-    const next = Number(event.target.value || "0");                                                              
-    video.currentTime = Math.max(0, next);                                                                       
-  }, []);                                                                                                        
+  const handleSliderChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    const next = Number(event.target.value || "0");
+    video.currentTime = Math.max(0, next);
+  }, []);
+
+  const clampSeekTime = useCallback(
+    (target: number) => {
+      let next = Math.max(0, target);
+      const duration = videoDuration ?? videoRef.current?.duration;
+      if (Number.isFinite(duration) && (duration ?? 0) > 0) {
+        next = Math.min(next, Math.max(0, (duration ?? 0) - 0.05));
+      }
+      return next;
+    },
+    [videoDuration],
+  );
                                                                                                                  
   const handlePlayerPointerMove = useCallback(() => {                                                            
     setControlsVisible(true);                                                                                    
@@ -1515,7 +1527,7 @@ timelineDuration]);
                               videoRef.current.pause();
                               return;
                             }
-                            videoRef.current.currentTime = Math.max(0, spanStart);
+                            videoRef.current.currentTime = clampSeekTime(spanStart);
                             videoRef.current.play().catch(() => {
                               /* ignore */
                             });
@@ -1574,7 +1586,7 @@ timelineDuration]);
                                   ref={isActive ? activeItemRef : null}                                          
                                   onClick={() => {                                                               
                                     if (videoRef.current) {                                                      
-                                      videoRef.current.currentTime = Math.max(0, item.timeline_seconds);         
+                                      videoRef.current.currentTime = clampSeekTime(item.timeline_seconds);
                                       videoRef.current.play().catch(() => {
                                         /* ignore */
                                       });
