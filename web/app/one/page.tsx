@@ -1503,20 +1503,33 @@ timelineDuration]);
                             }}
                           />
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (videoRef.current) {
-                              videoRef.current.currentTime = Math.max(0, span.start_seconds);
-                              videoRef.current.play().catch(() => {
-                                /* ignore */
-                              });
-                            }
-                          }}
-                          style={{ padding: "6px 10px", width: "fit-content" }}
-                        >
-                          Jump to start
-                        </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (videoRef.current) {
+                            videoRef.current.currentTime = Math.max(0, span.start_seconds);
+                            videoRef.current.play().catch(() => {
+                              /* ignore */
+                            });
+                          }
+                        }}
+                        aria-label="Play window section"
+                        title="Play window section"
+                        style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: "50%",
+                          border: "1px solid #1e293b",
+                          background: "rgba(15, 23, 42, 0.7)",
+                          color: "#e2e8f0",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <PlayIcon size={18} />
+                      </button>
                       </div>
 
                       <div style={{ display: "grid", gap: 10 }}>
