@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,9 +17,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, STILL_ACTIVE, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HGLOBAL, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, STILL_ACTIVE, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Threading::{
     GetCurrentThreadId, GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
     PROCESS_QUERY_LIMITED_INFORMATION,
@@ -39,12 +44,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP,
 };
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 const APP_DIR: &str = "data\\timestone";
 const DB_NAME: &str = "timestone_events.sqlite3";
 const LOCK_FILE: &str = "recorder.lock";
 const STOP_FILE: &str = "stop.signal";
 const CONFIG_FILE: &str = "config.json";
+const CLIPBOARD_DIR: &str = "clipboard";
+
+const CLIPBOARD_CF_DIB: u32 = 8;
+const CLIPBOARD_CF_DIBV5: u32 = 17;
+const CLIPBOARD_CF_HDROP: u32 = 15;
+const CLIPBOARD_CF_UNICODETEXT: u32 = 13;
 
 static STATE: OnceCell<Arc<RecorderState>> = OnceCell::new();
 thread_local! {
@@ -59,6 +71,8 @@ struct RecorderConfig {
     emit_snapshots: bool,
     emit_mouse_move: bool,
     emit_mouse_scroll: bool,
+    capture_clipboard: bool,
+    clipboard_poll_ms: u64,
     window_poll_hz: u64,
     capture_raw_keys: bool,
     raw_keys_mode: String,
@@ -80,6 +94,8 @@ impl Default for RecorderConfig {
             emit_snapshots: false,
             emit_mouse_move: false,
             emit_mouse_scroll: false,
+            capture_clipboard: true,
+            clipboard_poll_ms: 250,
             window_poll_hz: 0,
             capture_raw_keys: true,
             raw_keys_mode: "down".to_string(),
@@ -167,6 +183,12 @@ struct MouseInfo {
     y: i32,
     button: Option<String>,
     delta: Option<i32>,
+}
+
+struct ClipboardImage {
+    path: String,
+    width: i32,
+    height: i32,
 }
 
 #[derive(Clone)]
@@ -353,6 +375,16 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     } else {
         None
     };
+    let clipboard_handle = if config.capture_clipboard {
+        Some(spawn_clipboard_loop(
+            state.clone(),
+            shutdown.clone(),
+            config.clipboard_poll_ms,
+            base_dir.clone(),
+        ))
+    } else {
+        None
+    };
 
     let (mouse_hook, keyboard_hook) = install_hooks()?;
     let (foreground_hook, location_hook) = install_window_event_hooks()?;
@@ -383,6 +415,9 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         handle.join().ok();
     }
     if let Some(handle) = window_poll_handle {
+        handle.join().ok();
+    }
+    if let Some(handle) = clipboard_handle {
         handle.join().ok();
     }
     writer_handle.join().ok();
@@ -594,6 +629,7 @@ fn apply_overrides(config: &mut RecorderConfig, overrides: &CliOverrides) {
 fn normalize_config(mut config: RecorderConfig) -> RecorderConfig {
     config.mouse_hz = config.mouse_hz.max(1);
     config.snapshot_hz = config.snapshot_hz.max(1);
+    config.clipboard_poll_ms = config.clipboard_poll_ms.max(50);
     config.window_poll_hz = config.window_poll_hz.max(0);
     config.text_flush_ms = config.text_flush_ms.max(250);
     if config.max_text_len < 16 {
@@ -764,6 +800,28 @@ fn spawn_window_poll_loop(
     })
 }
 
+fn spawn_clipboard_loop(
+    state: Arc<RecorderState>,
+    shutdown: Arc<AtomicBool>,
+    poll_ms: u64,
+    base_dir: PathBuf,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let interval = Duration::from_millis(poll_ms.max(50));
+        let mut last_seq = unsafe { GetClipboardSequenceNumber() };
+        while !shutdown.load(Ordering::SeqCst) {
+            let seq = unsafe { GetClipboardSequenceNumber() };
+            if seq != last_seq {
+                last_seq = seq;
+                if let Some(event) = read_clipboard_event(&state, &base_dir) {
+                    state.sender.try_send(event).ok();
+                }
+            }
+            thread::sleep(interval);
+        }
+    })
+}
+
 fn install_hooks() -> Result<(HHOOK, HHOOK)> {
     unsafe {
         let module = GetModuleHandleW(None).unwrap_or(HMODULE::default());
@@ -910,6 +968,288 @@ fn window_info_for_hwnd(hwnd: HWND) -> Option<WindowInfo> {
         rect,
         process_name,
     })
+}
+
+fn should_capture_clipboard(state: &RecorderState, window_info: Option<&WindowInfo>) -> bool {
+    let process_name = window_info.and_then(|info| info.process_name.as_deref());
+    if process_is_blocked(state, process_name) {
+        return false;
+    }
+    if !process_is_allowed(state, process_name) {
+        return false;
+    }
+    true
+}
+
+fn read_clipboard_event(state: &RecorderState, base_dir: &Path) -> Option<EventRecord> {
+    let window_info = active_window_info().map(|(_, info)| info);
+    if !should_capture_clipboard(state, window_info.as_ref()) {
+        return None;
+    }
+    unsafe {
+        if OpenClipboard(HWND(0)).is_err() {
+            return None;
+        }
+    }
+
+    let event = read_clipboard_event_locked(state, base_dir, window_info);
+
+    unsafe {
+        let _ = CloseClipboard();
+    }
+    event
+}
+
+fn read_clipboard_event_locked(
+    state: &RecorderState,
+    base_dir: &Path,
+    window_info: Option<WindowInfo>,
+) -> Option<EventRecord> {
+    let image = if IsClipboardFormatAvailable(CLIPBOARD_CF_DIBV5).is_ok() {
+        read_clipboard_image(base_dir, CLIPBOARD_CF_DIBV5)
+    } else if IsClipboardFormatAvailable(CLIPBOARD_CF_DIB).is_ok() {
+        read_clipboard_image(base_dir, CLIPBOARD_CF_DIB)
+    } else {
+        None
+    };
+    if let Some(image) = image {
+        return Some(build_clipboard_event(
+            state,
+            window_info,
+            "clipboard_image",
+            json!({
+                "path": image.path,
+                "width": image.width,
+                "height": image.height,
+            }),
+        ));
+    }
+
+    if IsClipboardFormatAvailable(CLIPBOARD_CF_HDROP).is_ok() {
+        if let Some(files) = read_clipboard_files() {
+            return Some(build_clipboard_event(
+                state,
+                window_info,
+                "clipboard_files",
+                json!({
+                    "files": files,
+                }),
+            ));
+        }
+    }
+
+    if IsClipboardFormatAvailable(CLIPBOARD_CF_UNICODETEXT).is_ok() {
+        if let Some(text) = read_clipboard_text() {
+            let trimmed = truncate_text(text, state.max_text_len);
+            return Some(build_clipboard_event(
+                state,
+                window_info,
+                "clipboard_text",
+                json!({
+                    "text": trimmed.text,
+                    "length": trimmed.length,
+                    "truncated": trimmed.truncated,
+                }),
+            ));
+        }
+    }
+
+    None
+}
+
+fn build_clipboard_event(
+    state: &RecorderState,
+    window_info: Option<WindowInfo>,
+    event_type: &str,
+    payload: Value,
+) -> EventRecord {
+    let (process_name, window_title, window_class, window_rect) = match window_info {
+        Some(info) => (
+            info.process_name.clone(),
+            Some(info.title.clone()),
+            Some(info.class_name.clone()),
+            info.rect.clone(),
+        ),
+        None => (None, None, None, None),
+    };
+    EventRecord {
+        session_id: state.session_id.clone(),
+        ts_wall_ms: now_wall_ms(),
+        ts_mono_ms: now_mono_ms(state),
+        event_type: event_type.to_string(),
+        process_name,
+        window_title,
+        window_class,
+        window_rect,
+        mouse: None,
+        payload,
+    }
+}
+
+fn read_clipboard_text() -> Option<String> {
+    let handle = unsafe { GetClipboardData(CLIPBOARD_CF_UNICODETEXT) }.ok()?;
+    let hglobal = HGLOBAL(handle.0);
+    let size = unsafe { GlobalSize(hglobal) };
+    if size == 0 {
+        return None;
+    }
+    let ptr = unsafe { GlobalLock(hglobal) } as *const u16;
+    if ptr.is_null() {
+        return None;
+    }
+    let max_len = size / 2;
+    let mut len = 0usize;
+    unsafe {
+        while len < max_len {
+            if *ptr.add(len) == 0 {
+                break;
+            }
+            len += 1;
+        }
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let text = String::from_utf16_lossy(slice);
+    let _ = unsafe { GlobalUnlock(hglobal) };
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn read_clipboard_files() -> Option<Vec<String>> {
+    let handle = unsafe { GetClipboardData(CLIPBOARD_CF_HDROP) }.ok()?;
+    let hdrop = HDROP(handle.0);
+    let count = unsafe { DragQueryFileW(hdrop, 0xFFFFFFFF, None) };
+    if count == 0 {
+        return None;
+    }
+    let mut files = Vec::new();
+    for index in 0..count {
+        let length = unsafe { DragQueryFileW(hdrop, index, None) };
+        if length == 0 {
+            continue;
+        }
+        let mut buffer = vec![0u16; length as usize + 1];
+        let written = unsafe { DragQueryFileW(hdrop, index, Some(buffer.as_mut_slice())) };
+        if written == 0 {
+            continue;
+        }
+        let path = String::from_utf16_lossy(&buffer[..written as usize]);
+        files.push(path);
+    }
+    if files.is_empty() {
+        None
+    } else {
+        Some(files)
+    }
+}
+
+fn read_clipboard_image(base_dir: &Path, format: u32) -> Option<ClipboardImage> {
+    let handle = unsafe { GetClipboardData(format) }.ok()?;
+    let hglobal = HGLOBAL(handle.0);
+    let size = unsafe { GlobalSize(hglobal) };
+    if size < 40 {
+        return None;
+    }
+    let ptr = unsafe { GlobalLock(hglobal) } as *const u8;
+    if ptr.is_null() {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+    let _ = unsafe { GlobalUnlock(hglobal) };
+
+    let info = parse_dib_info(&bytes)?;
+    let path = write_clipboard_image(base_dir, &bytes, info.image_size)?;
+    Some(ClipboardImage {
+        path,
+        width: info.width,
+        height: info.height,
+    })
+}
+
+struct DibInfo {
+    width: i32,
+    height: i32,
+    image_size: usize,
+}
+
+fn parse_dib_info(bytes: &[u8]) -> Option<DibInfo> {
+    if bytes.len() < 40 {
+        return None;
+    }
+    let header_size = u32::from_le_bytes(bytes.get(0..4)?.try_into().ok()?);
+    if header_size < 40 || bytes.len() < header_size as usize {
+        return None;
+    }
+    let width = i32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?);
+    let height = i32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?);
+    let bit_count = u16::from_le_bytes(bytes.get(14..16)?.try_into().ok()?);
+    let size_image = u32::from_le_bytes(bytes.get(20..24)?.try_into().ok()?);
+
+    let width_abs = width.abs().max(1) as u32;
+    let height_abs = height.abs().max(1) as u32;
+    let row_bytes = ((bit_count as u32 * width_abs + 31) / 32) * 4;
+    let computed_image = row_bytes.saturating_mul(height_abs) as usize;
+
+    let mut image_size = if size_image > 0 {
+        size_image as usize
+    } else {
+        computed_image
+    };
+    if image_size == 0 || image_size > bytes.len() {
+        image_size = bytes.len().min(computed_image);
+    }
+    Some(DibInfo {
+        width,
+        height: height.abs(),
+        image_size,
+    })
+}
+
+fn write_clipboard_image(base_dir: &Path, dib_bytes: &[u8], image_size: usize) -> Option<String> {
+    let dir = base_dir.join(CLIPBOARD_DIR);
+    if fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+    let file_name = format!("clipboard_{}_{}.bmp", now_wall_ms(), Uuid::new_v4());
+    let path = dir.join(file_name);
+
+    let header_bytes = dib_bytes.len().saturating_sub(image_size);
+    let offset = 14u32.saturating_add(header_bytes as u32);
+    let file_size = 14u32.saturating_add(dib_bytes.len() as u32);
+
+    let mut file = fs::File::create(&path).ok()?;
+    file.write_all(b"BM").ok()?;
+    file.write_all(&file_size.to_le_bytes()).ok()?;
+    file.write_all(&[0u8; 4]).ok()?;
+    file.write_all(&offset.to_le_bytes()).ok()?;
+    file.write_all(dib_bytes).ok()?;
+
+    Some(path.to_string_lossy().to_string())
+}
+
+struct TruncateResult {
+    text: String,
+    length: usize,
+    truncated: bool,
+}
+
+fn truncate_text(text: String, max_len: usize) -> TruncateResult {
+    let length = text.chars().count();
+    if length <= max_len {
+        return TruncateResult {
+            text,
+            length,
+            truncated: false,
+        };
+    }
+    let truncated = text.chars().take(max_len).collect::<String>();
+    TruncateResult {
+        text: truncated,
+        length,
+        truncated: true,
+    }
 }
 
 fn get_window_text(hwnd: HWND) -> String {
