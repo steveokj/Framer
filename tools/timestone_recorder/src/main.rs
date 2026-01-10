@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::env;
+use std::ffi::c_void;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1005,9 +1006,9 @@ fn read_clipboard_event_locked(
     base_dir: &Path,
     window_info: Option<WindowInfo>,
 ) -> Option<EventRecord> {
-    let image = if IsClipboardFormatAvailable(CLIPBOARD_CF_DIBV5).is_ok() {
+    let image = if unsafe { IsClipboardFormatAvailable(CLIPBOARD_CF_DIBV5).is_ok() } {
         read_clipboard_image(base_dir, CLIPBOARD_CF_DIBV5)
-    } else if IsClipboardFormatAvailable(CLIPBOARD_CF_DIB).is_ok() {
+    } else if unsafe { IsClipboardFormatAvailable(CLIPBOARD_CF_DIB).is_ok() } {
         read_clipboard_image(base_dir, CLIPBOARD_CF_DIB)
     } else {
         None
@@ -1025,7 +1026,7 @@ fn read_clipboard_event_locked(
         ));
     }
 
-    if IsClipboardFormatAvailable(CLIPBOARD_CF_HDROP).is_ok() {
+    if unsafe { IsClipboardFormatAvailable(CLIPBOARD_CF_HDROP).is_ok() } {
         if let Some(files) = read_clipboard_files() {
             return Some(build_clipboard_event(
                 state,
@@ -1038,7 +1039,7 @@ fn read_clipboard_event_locked(
         }
     }
 
-    if IsClipboardFormatAvailable(CLIPBOARD_CF_UNICODETEXT).is_ok() {
+    if unsafe { IsClipboardFormatAvailable(CLIPBOARD_CF_UNICODETEXT).is_ok() } {
         if let Some(text) = read_clipboard_text() {
             let trimmed = truncate_text(text, state.max_text_len);
             return Some(build_clipboard_event(
@@ -1088,7 +1089,7 @@ fn build_clipboard_event(
 
 fn read_clipboard_text() -> Option<String> {
     let handle = unsafe { GetClipboardData(CLIPBOARD_CF_UNICODETEXT) }.ok()?;
-    let hglobal = HGLOBAL(handle.0);
+    let hglobal = HGLOBAL(handle.0 as *mut c_void);
     let size = unsafe { GlobalSize(hglobal) };
     if size == 0 {
         return None;
@@ -1147,7 +1148,7 @@ fn read_clipboard_files() -> Option<Vec<String>> {
 
 fn read_clipboard_image(base_dir: &Path, format: u32) -> Option<ClipboardImage> {
     let handle = unsafe { GetClipboardData(format) }.ok()?;
-    let hglobal = HGLOBAL(handle.0);
+    let hglobal = HGLOBAL(handle.0 as *mut c_void);
     let size = unsafe { GlobalSize(hglobal) };
     if size < 40 {
         return None;
