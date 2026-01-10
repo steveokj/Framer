@@ -1452,7 +1452,7 @@ fn spawn_window_rect_flush_loop(state: Arc<RecorderState>, shutdown: Arc<AtomicB
                     let now_ms = now_mono_ms(state.as_ref());
                     if now_ms - pending.last_change_ms < state.window_rect_debounce_ms {
                         None
-                    } else if tracker.last_hwnd != pending.hwnd {
+                    } else if tracker.last_hwnd.0 != pending.hwnd.0 {
                         tracker.pending_rect = None;
                         None
                     } else {
@@ -1830,7 +1830,7 @@ fn should_capture_text(state: &RecorderState, window_info: Option<&WindowInfo>) 
     true
 }
 
-fn snapshot_text_from_uia(state: &RecorderState) -> Option<String> {
+fn snapshot_text_from_uia(_state: &RecorderState) -> Option<String> {
     let Some(uia) = get_uia() else {
         return None;
     };
