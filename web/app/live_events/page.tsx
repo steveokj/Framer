@@ -671,19 +671,19 @@ export default function LiveEventsPage() {
                                 ) : null}
                               </div>
                               {renderEventDetails(row.events[0])}
-                              {expanded ? (
-                                <div style={{ display: "grid", gap: 6, paddingLeft: 10 }}>
-                                  {row.events.map((event) => {
-                                    const eventPayload = event.payloadData || {};
-                                    const eventMouse = event.mouseData || {};
-                                    const eventText = eventPayload?.final_text
-                                      ? String(eventPayload.final_text)
-                                      : eventPayload?.text
-                                        ? String(eventPayload.text)
-                                        : null;
-                                    return (
-                                      <div
-                                        key={event.id}
+                                {expanded ? (
+                                  <div style={{ display: "grid", gap: 6, paddingLeft: 10 }}>
+                                    {row.events.map((event) => {
+                                      const eventPayload = event.payloadData || {};
+                                      const eventMouse = event.mouseData || {};
+                                      const eventText = eventPayload?.final_text
+                                        ? String(eventPayload.final_text)
+                                        : eventPayload?.text
+                                          ? String(eventPayload.text)
+                                          : null;
+                                      return (
+                                        <div
+                                          key={event.id}
                                         style={{
                                           borderRadius: 10,
                                           padding: "8px 10px",
@@ -692,25 +692,33 @@ export default function LiveEventsPage() {
                                           display: "grid",
                                           gap: 4,
                                         }}
-                                      >
-                                        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                                          <span style={{ color: "#cbd5f5", fontSize: 12 }}>
-                                            {formatWallTime(event.ts_wall_ms)}
-                                          </span>
-                                          <span style={{ color: "#94a3b8", fontSize: 12 }}>
-                                            {event.event_type.replace(/_/g, " ")}
-                                          </span>
-                                        </div>
-                                        {event.event_type === "text_input" && eventText ? (
-                                          <div style={{ color: "#cbd5f5" }}>{clipText(eventText, 160)}</div>
-                                        ) : null}
-                                        {event.event_type === "mouse_click" &&
-                                        eventMouse?.x != null &&
-                                        eventMouse?.y != null ? (
-                                          <div style={{ color: "#94a3b8" }}>
-                                            Click @ {eventMouse.x},{eventMouse.y}
+                                        >
+                                          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                            <span style={{ color: "#cbd5f5", fontSize: 12 }}>
+                                              {formatWallTime(event.ts_wall_ms)}
+                                            </span>
+                                            <span style={{ color: "#94a3b8", fontSize: 12 }}>
+                                              {event.event_type.replace(/_/g, " ")}
+                                            </span>
                                           </div>
-                                        ) : null}
+                                          {event.event_type === "key_down" && eventPayload?.key ? (
+                                            <div style={{ color: "#cbd5f5" }}>Key: {eventPayload.key}</div>
+                                          ) : null}
+                                          {event.event_type === "key_shortcut" ? (
+                                            <div style={{ color: "#cbd5f5" }}>
+                                              Shortcut: {formatShortcut(eventPayload) || "Unknown"}
+                                            </div>
+                                          ) : null}
+                                          {event.event_type === "text_input" && eventText ? (
+                                            <div style={{ color: "#cbd5f5" }}>{clipText(eventText, 160)}</div>
+                                          ) : null}
+                                          {event.event_type === "mouse_click" &&
+                                          eventMouse?.x != null &&
+                                          eventMouse?.y != null ? (
+                                            <div style={{ color: "#94a3b8" }}>
+                                              Click @ {eventMouse.x},{eventMouse.y}
+                                            </div>
+                                          ) : null}
                                       </div>
                                     );
                                   })}
