@@ -607,6 +607,9 @@ export default function LiveEventsPage() {
                         const rowId = `${segment.id}-${rowIndex}`;
                         if (row.kind === "group") {
                           const expanded = expandedGroups.has(rowId);
+                          const groupMonoTime = activeSession
+                            ? formatDurationMs(row.events[0].ts_wall_ms - activeSession.start_wall_ms)
+                            : formatDurationMs(row.events[0].ts_mono_ms);
                           const groupIcon = resolveIconSrc(EVENT_ICON_MAP[row.event_type]);
                           return (
                             <div
@@ -653,7 +656,7 @@ export default function LiveEventsPage() {
                                   {formatWallTime(row.events[0].ts_wall_ms)}
                                 </span>
                                 <span style={{ color: "#64748b" }}>
-                                  +{formatDurationMs(row.events[0].ts_mono_ms)}
+                                  +{groupMonoTime}
                                 </span>
                                 {row.events.length > 1 ? (
                                   <span
@@ -730,7 +733,9 @@ export default function LiveEventsPage() {
 
                         const event = row.event;
                         const wallTime = formatWallTime(event.ts_wall_ms);
-                        const monoTime = formatDurationMs(event.ts_mono_ms);
+                        const monoTime = activeSession
+                          ? formatDurationMs(event.ts_wall_ms - activeSession.start_wall_ms)
+                          : formatDurationMs(event.ts_mono_ms);
                         const windowName = windowLabel(event);
                         const eventIcon = resolveIconSrc(EVENT_ICON_MAP[event.event_type]);
                         const appIcon = resolveIconSrc(
