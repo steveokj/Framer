@@ -36,7 +36,8 @@ const API_BASE = (
 
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
 const MAX_EVENTS = 300;
-const POLL_MS = 750;
+const LONG_POLL_WAIT_MS = 20000;
+const LONG_POLL_POLL_MS = 300;
 const TEXT_MERGE_WINDOW_MS = 1500;
 
 function safeJsonParse(input: string | null): any {
@@ -223,9 +224,9 @@ export default function LiveEventsPage() {
     });
   }, []);
 
-  const pollEvents = useCallback(async () => {
+  const pollEvents = useCallback(async (): Promise<boolean> => {
     if (!sessionId) {
-      return;
+      return false;
     }
     setStatus("Live");
     const startMs =
@@ -237,6 +238,8 @@ export default function LiveEventsPage() {
       if (startMs != null) {
         payload.startMs = startMs;
       }
+      payload.waitMs = LONG_POLL_WAIT_MS;
+      payload.pollMs = LONG_POLL_POLL_MS;
       const res = await fetch("/api/timestone_events", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -249,9 +252,11 @@ export default function LiveEventsPage() {
       const data = await res.json();
       ingestEvents(Array.isArray(data.events) ? data.events : []);
       setLastUpdate(new Date().toLocaleTimeString());
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load events");
       setStatus("Error");
+      return false;
     }
   }, [activeSession?.start_wall_ms, ingestEvents, sessionId]);
 
@@ -267,11 +272,19 @@ export default function LiveEventsPage() {
     if (!sessionId) {
       return;
     }
-    pollEvents();
-    const handle = setInterval(() => {
-      pollEvents();
-    }, POLL_MS);
-    return () => clearInterval(handle);
+    let cancelled = false;
+    const run = async () => {
+      while (!cancelled) {
+        const ok = await pollEvents();
+        if (!ok) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
   }, [pollEvents, sessionId]);
 
   const eventCount = events.length;

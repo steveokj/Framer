@@ -41,6 +41,10 @@ function runPython(args: string[]) {
   });
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function POST(req: NextRequest): Promise<Response> {
   let body: any;
   try {
@@ -69,6 +73,8 @@ export async function POST(req: NextRequest): Promise<Response> {
   const eventTypes = Array.isArray(body?.eventTypes) ? body.eventTypes.filter(Boolean) : null;
   const search = (body?.search as string | undefined)?.trim();
   const limit = Number.isFinite(body?.limit) ? Number(body.limit) : null;
+  const waitMs = Number.isFinite(body?.waitMs) ? Number(body.waitMs) : 0;
+  const pollMs = Number.isFinite(body?.pollMs) ? Number(body.pollMs) : 250;
 
   if (startMs != null) {
     args.push("--start-ms", String(startMs));
@@ -86,23 +92,35 @@ export async function POST(req: NextRequest): Promise<Response> {
     args.push("--limit", String(limit));
   }
 
-  const { stdout, stderr, code } = await runPython(args);
-  if (code !== 0) {
-    const message = stderr || stdout || "Failed to load timestone events";
-    return new Response(JSON.stringify({ error: message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  const deadline = waitMs > 0 ? Date.now() + waitMs : null;
+  while (true) {
+    const { stdout, stderr, code } = await runPython(args);
+    if (code !== 0) {
+      const message = stderr || stdout || "Failed to load timestone events";
+      return new Response(JSON.stringify({ error: message }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
-  try {
-    JSON.parse(stdout);
-  } catch {
-    return new Response(JSON.stringify({ error: "timestone events script did not return valid JSON" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+    let payload: any;
+    try {
+      payload = JSON.parse(stdout);
+    } catch {
+      return new Response(JSON.stringify({ error: "timestone events script did not return valid JSON" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
-  return new Response(stdout, { headers: { "Content-Type": "application/json" } });
+    const events = Array.isArray(payload?.events) ? payload.events : [];
+    if (!deadline || events.length > 0 || Date.now() >= deadline) {
+      return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
+    }
+    await sleep(Math.min(pollMs, remaining));
+  }
 }
