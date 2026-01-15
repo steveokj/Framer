@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, LoadIconW, LoadImageW, MessageBoxW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
     TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HICON, HMENU, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE, MB_OK,
     MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_TOPALIGN, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP,
-    WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    WM_NULL, WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 const APP_DIR: &str = "data\\timestone";
@@ -339,6 +339,8 @@ fn get_status(command: &RecorderCommand) -> Result<RecorderStatus> {
 fn get_status_from_files(data_dir: &Path) -> RecorderStatus {
     let lock_path = data_dir.join("recorder.lock");
     if !lock_path.exists() {
+        let pause_path = data_dir.join("pause.signal");
+        let _ = fs::remove_file(pause_path);
         return RecorderStatus::Stopped;
     }
     let pause_path = data_dir.join("pause.signal");
@@ -389,19 +391,16 @@ fn dispatch_command(action: &str, show_dialog: bool) {
     });
 }
 
-fn show_status_dialog(status: RecorderStatus) {
-    if let Some(state) = STATE.get() {
-        let state = state.lock().unwrap();
-        let status = match status {
-            RecorderStatus::Running => "running",
-            RecorderStatus::Paused => "paused",
-            RecorderStatus::Stopped => "stopped",
-        };
-        let message = format!("Recorder status: {status}");
-        let wide = to_wide(&message);
-        unsafe {
-            let _ = MessageBoxW(state.hwnd, PCWSTR(wide.as_ptr()), PCWSTR(to_wide("Timestone").as_ptr()), MB_OK);
-        }
+fn show_status_dialog(hwnd: HWND, status: RecorderStatus) {
+    let status = match status {
+        RecorderStatus::Running => "running",
+        RecorderStatus::Paused => "paused",
+        RecorderStatus::Stopped => "stopped",
+    };
+    let message = format!("Recorder status: {status}");
+    let wide = to_wide(&message);
+    unsafe {
+        let _ = MessageBoxW(hwnd, PCWSTR(wide.as_ptr()), PCWSTR(to_wide("Timestone").as_ptr()), MB_OK);
     }
 }
 
@@ -456,18 +455,18 @@ fn handle_menu_command(cmd: u16) {
         CMD_RESUME => dispatch_command("resume", false),
         CMD_STOP => dispatch_command("stop", false),
         CMD_STATUS => {
-            let status = if let Some(state) = STATE.get() {
-                let state = state.lock().unwrap();
-                get_status_from_files(&state.data_dir)
-            } else {
-                RecorderStatus::Stopped
-            };
-            if let Some(state) = STATE.get() {
+            let (status, hwnd) = if let Some(state) = STATE.get() {
                 let mut state = state.lock().unwrap();
+                let status = get_status_from_files(&state.data_dir);
                 state.status = status;
-            }
+                (status, state.hwnd)
+            } else {
+                (RecorderStatus::Stopped, HWND(0))
+            };
             let _ = update_tray_icon();
-            show_status_dialog(status);
+            if hwnd.0 != 0 {
+                show_status_dialog(hwnd, status);
+            }
         }
         CMD_EXIT => {
             dispatch_command("stop", false);
@@ -502,6 +501,7 @@ fn show_menu(hwnd: HWND) {
         let _ = GetCursorPos(&mut pt);
         SetForegroundWindow(hwnd);
         TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, 0, hwnd, None);
+        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
     }
 }
 
