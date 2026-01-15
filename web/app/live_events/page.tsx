@@ -48,6 +48,37 @@ const MAX_EVENTS = 300;
 const SSE_POLL_MS = 500;
 const SSE_HEARTBEAT_MS = 15000;
 const TEXT_MERGE_WINDOW_MS = 1500;
+const EVENT_ICON_MAP: Record<string, string | undefined> = {
+  mouse_click: process.env.NEXT_PUBLIC_EVENT_ICON_MOUSE_CLICK,
+  key_down: process.env.NEXT_PUBLIC_EVENT_ICON_KEY_DOWN,
+  key_shortcut: process.env.NEXT_PUBLIC_EVENT_ICON_KEY_SHORTCUT,
+  text_input: process.env.NEXT_PUBLIC_EVENT_ICON_TEXT_INPUT,
+  clipboard_text: process.env.NEXT_PUBLIC_EVENT_ICON_CLIPBOARD_TEXT,
+  clipboard_image: process.env.NEXT_PUBLIC_EVENT_ICON_CLIPBOARD_IMAGE,
+  clipboard_files: process.env.NEXT_PUBLIC_EVENT_ICON_CLIPBOARD_FILES,
+};
+const APP_ICON_MAP: Record<string, string> = (() => {
+  const raw = process.env.NEXT_PUBLIC_APP_ICON_MAP;
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+})();
+
+function resolveIconSrc(path: string | null | undefined): string | null {
+  if (!path) {
+    return null;
+  }
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  return buildFileUrl(path);
+}
 
 function safeJsonParse(input: string | null): any {
   if (!input) {
@@ -576,6 +607,7 @@ export default function LiveEventsPage() {
                         const rowId = `${segment.id}-${rowIndex}`;
                         if (row.kind === "group") {
                           const expanded = expandedGroups.has(rowId);
+                          const groupIcon = resolveIconSrc(EVENT_ICON_MAP[row.event_type]);
                           return (
                             <div
                               key={rowId}
@@ -607,6 +639,13 @@ export default function LiveEventsPage() {
                                     {expanded ? "-" : "+"}
                                   </button>
                                 ) : null}
+                                {groupIcon ? (
+                                  <img
+                                    src={groupIcon}
+                                    alt=""
+                                    style={{ width: 20, height: 20, borderRadius: 6, objectFit: "cover" }}
+                                  />
+                                ) : null}
                                 <strong style={{ textTransform: "capitalize" }}>
                                   {row.event_type.replace(/_/g, " ")}
                                 </strong>
@@ -616,6 +655,20 @@ export default function LiveEventsPage() {
                                 <span style={{ color: "#64748b" }}>
                                   +{formatDurationMs(row.events[0].ts_mono_ms)}
                                 </span>
+                                {row.events.length > 1 ? (
+                                  <span
+                                    style={{
+                                      color: "#0f172a",
+                                      background: "rgba(56, 189, 248, 0.9)",
+                                      borderRadius: 999,
+                                      padding: "2px 8px",
+                                      fontSize: 12,
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {row.events.length}x
+                                  </span>
+                                ) : null}
                               </div>
                               {renderEventDetails(row.events[0])}
                               {expanded ? (
@@ -671,6 +724,13 @@ export default function LiveEventsPage() {
                         const wallTime = formatWallTime(event.ts_wall_ms);
                         const monoTime = formatDurationMs(event.ts_mono_ms);
                         const windowName = windowLabel(event);
+                        const eventIcon = resolveIconSrc(EVENT_ICON_MAP[event.event_type]);
+                        const appIcon = resolveIconSrc(
+                          event.event_type === "active_window_changed"
+                            ? APP_ICON_MAP[event.process_name || ""] || null
+                            : null
+                        );
+                        const isActiveWindow = event.event_type === "active_window_changed";
                         return (
                           <div
                             key={event.id}
@@ -683,14 +743,58 @@ export default function LiveEventsPage() {
                               gap: 12,
                             }}
                           >
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-                              <strong style={{ textTransform: "capitalize" }}>
-                                {event.event_type.replace(/_/g, " ")}
-                              </strong>
-                              <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
-                              <span style={{ color: "#64748b" }}>+{monoTime}</span>
-                            </div>
-                            <div style={{ color: "#94a3b8" }}>{windowName}</div>
+                            {isActiveWindow ? (
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                                {appIcon ? (
+                                  <img
+                                    src={appIcon}
+                                    alt=""
+                                    style={{ width: 32, height: 32, borderRadius: 10, objectFit: "cover" }}
+                                  />
+                                ) : (
+                                  <div
+                                    style={{
+                                      width: 32,
+                                      height: 32,
+                                      borderRadius: 10,
+                                      background: "rgba(56, 189, 248, 0.2)",
+                                      color: "#e2e8f0",
+                                      display: "grid",
+                                      placeItems: "center",
+                                      fontSize: 12,
+                                    }}
+                                  >
+                                    {windowName.slice(0, 1).toUpperCase()}
+                                  </div>
+                                )}
+                                <div style={{ display: "grid", gap: 4 }}>
+                                  <strong style={{ textTransform: "capitalize" }}>
+                                    {event.event_type.replace(/_/g, " ")}
+                                  </strong>
+                                  <div style={{ color: "#cbd5f5" }}>{windowName}</div>
+                                </div>
+                                <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
+                                <span style={{ color: "#64748b" }}>+{monoTime}</span>
+                              </div>
+                            ) : (
+                              <>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                                  {eventIcon ? (
+                                    <img
+                                      src={eventIcon}
+                                      alt=""
+                                      style={{ width: 20, height: 20, borderRadius: 6, objectFit: "cover" }}
+                                    />
+                                  ) : null}
+                                  <strong style={{ textTransform: "capitalize" }}>
+                                    {event.event_type.replace(/_/g, " ")}
+                                  </strong>
+                                  <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
+                                  <span style={{ color: "#64748b" }}>+{monoTime}</span>
+                                </div>
+                                <div style={{ color: "#94a3b8" }}>{windowName}</div>
+                              </>
+                            )}
                             {renderEventDetails(event)}
                           </div>
                         );
