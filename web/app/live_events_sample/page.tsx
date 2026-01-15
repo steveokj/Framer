@@ -17,6 +17,10 @@ type WindowSegment = {
   events: SampleEvent[];
 };
 
+type SampleRow =
+  | { kind: "single"; event: SampleEvent }
+  | { kind: "group"; event_type: string; events: SampleEvent[] };
+
 const sampleEvents: SampleEvent[] = [
   {
     id: 1,
@@ -130,6 +134,23 @@ function segmentByActiveWindow(events: SampleEvent[]): WindowSegment[] {
     }));
 }
 
+function groupConsecutiveByType(events: SampleEvent[]): SampleRow[] {
+  const rows: SampleRow[] = [];
+  for (const event of events) {
+    const last = rows[rows.length - 1];
+    if (last && last.kind === "group" && last.event_type === event.event_type) {
+      last.events.push(event);
+      continue;
+    }
+    if (last && last.kind === "single" && last.event.event_type === event.event_type) {
+      rows[rows.length - 1] = { kind: "group", event_type: event.event_type, events: [last.event, event] };
+      continue;
+    }
+    rows.push({ kind: "single", event });
+  }
+  return rows;
+}
+
 export default function LiveEventsSamplePage() {
   const segments = segmentByActiveWindow(sampleEvents);
 
@@ -166,7 +187,38 @@ export default function LiveEventsSamplePage() {
               }}
             >
               <div style={{ display: "grid", gap: 10 }}>
-                {segment.events.map((event) => {
+                {groupConsecutiveByType(segment.events).map((row, index) => {
+                  if (row.kind === "group") {
+                    return (
+                      <div
+                        key={`group-${segment.id}-${index}`}
+                        style={{
+                          borderRadius: 12,
+                          padding: "10px 12px",
+                          border: "1px solid rgba(30, 41, 59, 0.6)",
+                          background: "rgba(9, 14, 26, 0.9)",
+                          display: "grid",
+                          gap: 6,
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                          <span style={{ color: "#cbd5f5", fontSize: 12 }}>
+                            {formatWallTime(row.events[0].ts_wall_ms)}
+                          </span>
+                          <span style={{ color: "#64748b", fontSize: 12 }}>
+                            {row.event_type.replace(/_/g, " ")} x{row.events.length}
+                          </span>
+                        </div>
+                        {row.events[0].mouse ? (
+                          <div style={{ color: "#cbd5f5" }}>
+                            Click @ {row.events[0].mouse?.x},{row.events[0].mouse?.y}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  }
+
+                  const event = row.event;
                   const payloadText =
                     event.payload && typeof event.payload.text === "string" ? event.payload.text : null;
                   const shortcut =
