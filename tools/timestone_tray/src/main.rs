@@ -57,6 +57,7 @@ enum RecorderStatus {
     Stopped,
 }
 
+#[derive(Clone)]
 struct RecorderCommand {
     exe: String,
     args_prefix: Vec<String>,
@@ -165,6 +166,12 @@ fn build_command(config: &TrayConfig) -> RecorderCommand {
         let args_prefix = config.recorder_args.clone().unwrap_or_default();
         return RecorderCommand { exe, args_prefix };
     }
+    if let Some(exe) = find_default_recorder_exe() {
+        return RecorderCommand {
+            exe,
+            args_prefix: Vec::new(),
+        };
+    }
     RecorderCommand {
         exe: "cargo".to_string(),
         args_prefix: vec![
@@ -174,6 +181,21 @@ fn build_command(config: &TrayConfig) -> RecorderCommand {
             "--".to_string(),
         ],
     }
+}
+
+fn find_default_recorder_exe() -> Option<String> {
+    let cwd = env::current_dir().ok()?;
+    let candidates = [
+        "tools\\timestone_recorder\\target\\debug\\timestone_recorder.exe",
+        "tools\\timestone_recorder\\target\\release\\timestone_recorder.exe",
+    ];
+    for candidate in candidates {
+        let path = cwd.join(candidate);
+        if path.exists() {
+            return Some(path.to_string_lossy().to_string());
+        }
+    }
+    None
 }
 
 fn load_icon(base_dir: &Path, icon_input: Option<&str>) -> Result<HICON> {
@@ -322,10 +344,34 @@ fn update_status() {
     }
 }
 
-fn show_status_dialog() {
+fn dispatch_command(action: &str, show_dialog: bool) {
+    let Some(state) = STATE.get() else {
+        return;
+    };
+    let state = state.clone();
+    let action = action.to_string();
+    std::thread::spawn(move || {
+        let command = { state.lock().unwrap().command.clone() };
+        if run_command(&command, &action).is_ok() {
+            let status = get_status(&command).unwrap_or(RecorderStatus::Stopped);
+            {
+                let mut state = state.lock().unwrap();
+                state.status = status;
+            }
+            let _ = update_tray_icon();
+            if show_dialog {
+                show_status_dialog(status);
+            }
+        } else if show_dialog {
+            show_status_dialog(RecorderStatus::Stopped);
+        }
+    });
+}
+
+fn show_status_dialog(status: RecorderStatus) {
     if let Some(state) = STATE.get() {
         let state = state.lock().unwrap();
-        let status = match state.status {
+        let status = match status {
             RecorderStatus::Running => "running",
             RecorderStatus::Paused => "paused",
             RecorderStatus::Stopped => "stopped",
@@ -369,54 +415,33 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
 }
 
 fn handle_left_click() {
-    if let Some(state) = STATE.get() {
-        let mut state = state.lock().unwrap();
-        let action = match state.status {
+    let action = if let Some(state) = STATE.get() {
+        let state = state.lock().unwrap();
+        match state.status {
             RecorderStatus::Stopped => "start",
             RecorderStatus::Running => "pause",
             RecorderStatus::Paused => "resume",
-        };
-        if run_command(&state.command, action).is_ok() {
-            state.status = get_status(&state.command).unwrap_or(state.status);
-            let _ = update_tray_icon();
         }
-    }
+    } else {
+        return;
+    };
+    dispatch_command(action, false);
 }
 
 fn handle_menu_command(cmd: u16) {
-    if let Some(state) = STATE.get() {
-        let mut state = state.lock().unwrap();
-        match cmd {
-            CMD_START => {
-                let _ = run_command(&state.command, "start");
+    match cmd {
+        CMD_START => dispatch_command("start", false),
+        CMD_PAUSE => dispatch_command("pause", false),
+        CMD_RESUME => dispatch_command("resume", false),
+        CMD_STOP => dispatch_command("stop", false),
+        CMD_STATUS => dispatch_command("status", true),
+        CMD_EXIT => {
+            dispatch_command("stop", false);
+            unsafe {
+                PostQuitMessage(0);
             }
-            CMD_PAUSE => {
-                let _ = run_command(&state.command, "pause");
-            }
-            CMD_RESUME => {
-                let _ = run_command(&state.command, "resume");
-            }
-            CMD_STOP => {
-                let _ = run_command(&state.command, "stop");
-            }
-            CMD_STATUS => {
-                state.status = get_status(&state.command).unwrap_or(state.status);
-                drop(state);
-                show_status_dialog();
-                update_status();
-                return;
-            }
-            CMD_EXIT => {
-                let _ = run_command(&state.command, "stop");
-                unsafe {
-                    PostQuitMessage(0);
-                }
-                return;
-            }
-            _ => {}
         }
-        state.status = get_status(&state.command).unwrap_or(state.status);
-        let _ = update_tray_icon();
+        _ => {}
     }
 }
 
