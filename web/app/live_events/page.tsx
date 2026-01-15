@@ -788,7 +788,7 @@ export default function LiveEventsPage() {
                                   </strong>
                                   <div style={{ color: "#cbd5f5" }}>{windowName}</div>
                                 </div>
-                                <div style={{ alignSelf: "start", display: "grid", gap: 2 }}>
+                                <div style={{ alignSelf: "start", display: "flex", gap: 12, alignItems: "center" }} >
                                   <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
                                   <span style={{ color: "#64748b" }}>+{monoTime}</span>
                                 </div>
