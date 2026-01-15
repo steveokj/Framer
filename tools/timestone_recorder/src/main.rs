@@ -2091,7 +2091,7 @@ fn capture_icon_bmp(process_path: &str, icon_path: &Path) -> Result<()> {
 
     let mut icon_info = ICONINFO::default();
     unsafe {
-        if !GetIconInfo(hicon, &mut icon_info).as_bool() {
+        if GetIconInfo(hicon, &mut icon_info).is_err() {
             DestroyIcon(hicon);
             anyhow::bail!("GetIconInfo failed");
         }
@@ -2126,7 +2126,7 @@ fn capture_icon_bmp(process_path: &str, icon_path: &Path) -> Result<()> {
         biHeight: height,
         biPlanes: 1,
         biBitCount: 32,
-        biCompression: BI_RGB,
+        biCompression: BI_RGB.0,
         biSizeImage: (width * height * 4) as u32,
         ..Default::default()
     };
