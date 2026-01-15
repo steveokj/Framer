@@ -265,7 +265,13 @@ fn update_tray_icon() -> Result<()> {
         RecorderStatus::Paused => state.icon_paused,
         RecorderStatus::Stopped => state.icon_stopped,
     };
-    let mut data = tray_data(state.hwnd, icon, &state.tooltip);
+    let status = match state.status {
+        RecorderStatus::Running => "running",
+        RecorderStatus::Paused => "paused",
+        RecorderStatus::Stopped => "stopped",
+    };
+    let tooltip = format!("{} ({})", state.tooltip, status);
+    let mut data = tray_data(state.hwnd, icon, &tooltip);
     let ok = unsafe { Shell_NotifyIconW(NIM_MODIFY, &mut data) };
     if ok.as_bool() {
         Ok(())
