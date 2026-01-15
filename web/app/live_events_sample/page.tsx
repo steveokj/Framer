@@ -50,6 +50,24 @@ const sampleEvents: SampleEvent[] = [
   },
   {
     id: 4,
+    ts_wall_ms: Date.now() - 9200,
+    event_type: "mouse_click",
+    window_title: "Notepad",
+    process_name: "notepad.exe",
+    window_class: "Notepad",
+    mouse: { x: 648, y: 430 },
+  },
+  {
+    id: 5,
+    ts_wall_ms: Date.now() - 9000,
+    event_type: "mouse_click",
+    window_title: "Notepad",
+    process_name: "notepad.exe",
+    window_class: "Notepad",
+    mouse: { x: 652, y: 435 },
+  },
+  {
+    id: 6,
     ts_wall_ms: Date.now() - 8000,
     event_type: "active_window_changed",
     window_title: "Chrome",
@@ -57,7 +75,7 @@ const sampleEvents: SampleEvent[] = [
     window_class: "Chrome_WidgetWin_1",
   },
   {
-    id: 5,
+    id: 7,
     ts_wall_ms: Date.now() - 7000,
     event_type: "key_shortcut",
     window_title: "Chrome",
@@ -66,7 +84,7 @@ const sampleEvents: SampleEvent[] = [
     payload: { key: "L", modifiers: ["Ctrl"] },
   },
   {
-    id: 6,
+    id: 8,
     ts_wall_ms: Date.now() - 6000,
     event_type: "clipboard_text",
     window_title: "Chrome",
@@ -75,7 +93,7 @@ const sampleEvents: SampleEvent[] = [
     payload: { text: "example.com" },
   },
   {
-    id: 7,
+    id: 9,
     ts_wall_ms: Date.now() - 4500,
     event_type: "active_window_changed",
     window_title: "Cursor - Framer",
@@ -83,7 +101,7 @@ const sampleEvents: SampleEvent[] = [
     window_class: "Chrome_WidgetWin_1",
   },
   {
-    id: 8,
+    id: 10,
     ts_wall_ms: Date.now() - 3500,
     event_type: "text_input",
     window_title: "Cursor - Framer",
@@ -92,7 +110,7 @@ const sampleEvents: SampleEvent[] = [
     payload: { text: "git status" },
   },
   {
-    id: 9,
+    id: 11,
     ts_wall_ms: Date.now() - 2000,
     event_type: "mouse_click",
     window_title: "Cursor - Framer",
