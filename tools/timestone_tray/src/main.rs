@@ -67,6 +67,7 @@ struct AppState {
     hwnd: HWND,
     tooltip: String,
     command: RecorderCommand,
+    data_dir: PathBuf,
     icon_running: HICON,
     icon_paused: HICON,
     icon_stopped: HICON,
@@ -79,6 +80,7 @@ fn main() -> Result<()> {
     let base_dir = ensure_app_dir()?;
     let config = load_or_create_config(&base_dir)?;
     let command = build_command(&config);
+    let data_dir = base_dir.clone();
     let tooltip = config
         .tooltip
         .clone()
@@ -117,6 +119,7 @@ fn main() -> Result<()> {
             hwnd,
             tooltip,
             command,
+            data_dir,
             icon_running,
             icon_paused,
             icon_stopped,
@@ -333,10 +336,23 @@ fn get_status(command: &RecorderCommand) -> Result<RecorderStatus> {
     }
 }
 
+fn get_status_from_files(data_dir: &Path) -> RecorderStatus {
+    let lock_path = data_dir.join("recorder.lock");
+    if !lock_path.exists() {
+        return RecorderStatus::Stopped;
+    }
+    let pause_path = data_dir.join("pause.signal");
+    if pause_path.exists() {
+        RecorderStatus::Paused
+    } else {
+        RecorderStatus::Running
+    }
+}
+
 fn update_status() {
     if let Some(state) = STATE.get() {
         let mut state = state.lock().unwrap();
-        let status = get_status(&state.command).unwrap_or(RecorderStatus::Stopped);
+        let status = get_status_from_files(&state.data_dir);
         if status != state.status {
             state.status = status;
             let _ = update_tray_icon();
@@ -353,8 +369,13 @@ fn dispatch_command(action: &str, show_dialog: bool) {
     std::thread::spawn(move || {
         let command = { state.lock().unwrap().command.clone() };
         if run_command(&command, &action).is_ok() {
-            let status = get_status(&command).unwrap_or(RecorderStatus::Stopped);
-            {
+            let status = if let Some(state) = STATE.get() {
+                let state = state.lock().unwrap();
+                get_status_from_files(&state.data_dir)
+            } else {
+                RecorderStatus::Stopped
+            };
+            if let Some(state) = STATE.get() {
                 let mut state = state.lock().unwrap();
                 state.status = status;
             }
@@ -434,7 +455,20 @@ fn handle_menu_command(cmd: u16) {
         CMD_PAUSE => dispatch_command("pause", false),
         CMD_RESUME => dispatch_command("resume", false),
         CMD_STOP => dispatch_command("stop", false),
-        CMD_STATUS => dispatch_command("status", true),
+        CMD_STATUS => {
+            let status = if let Some(state) = STATE.get() {
+                let state = state.lock().unwrap();
+                get_status_from_files(&state.data_dir)
+            } else {
+                RecorderStatus::Stopped
+            };
+            if let Some(state) = STATE.get() {
+                let mut state = state.lock().unwrap();
+                state.status = status;
+            }
+            let _ = update_tray_icon();
+            show_status_dialog(status);
+        }
         CMD_EXIT => {
             dispatch_command("stop", false);
             unsafe {
