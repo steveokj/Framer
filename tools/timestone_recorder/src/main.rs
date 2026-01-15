@@ -2093,7 +2093,7 @@ fn capture_icon_bmp(process_path: &str, icon_path: &Path) -> Result<()> {
     let mut icon_info = ICONINFO::default();
     unsafe {
         if GetIconInfo(hicon, &mut icon_info).is_err() {
-            DestroyIcon(hicon);
+            let _ = DestroyIcon(hicon);
             anyhow::bail!("GetIconInfo failed");
         }
     }
@@ -2115,7 +2115,7 @@ fn capture_icon_bmp(process_path: &str, icon_path: &Path) -> Result<()> {
         unsafe {
             DeleteObject(icon_info.hbmColor);
             DeleteObject(icon_info.hbmMask);
-            DestroyIcon(hicon);
+            let _ = DestroyIcon(hicon);
         }
         anyhow::bail!("Invalid bitmap size");
     }
@@ -2152,7 +2152,7 @@ fn capture_icon_bmp(process_path: &str, icon_path: &Path) -> Result<()> {
         DeleteDC(hdc);
         DeleteObject(icon_info.hbmColor);
         DeleteObject(icon_info.hbmMask);
-        DestroyIcon(hicon);
+        let _ = DestroyIcon(hicon);
     }
     if scanlines == 0 {
         anyhow::bail!("GetDIBits failed");
