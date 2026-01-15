@@ -79,6 +79,7 @@ struct RecorderConfig {
     snapshot_hz: u64,
     emit_snapshots: bool,
     emit_mouse_move: bool,
+    emit_mouse_click: bool,
     emit_mouse_scroll: bool,
     capture_clipboard: bool,
     clipboard_poll_ms: u64,
@@ -106,6 +107,7 @@ impl Default for RecorderConfig {
             snapshot_hz: 1,
             emit_snapshots: false,
             emit_mouse_move: false,
+            emit_mouse_click: true,
             emit_mouse_scroll: false,
             capture_clipboard: true,
             clipboard_poll_ms: 250,
@@ -167,6 +169,7 @@ struct RecorderState {
     raw_keys_mode: RawKeysMode,
     suppress_raw_keys_on_shortcut: bool,
     emit_mouse_move: bool,
+    emit_mouse_click: bool,
     emit_mouse_scroll: bool,
     pressed_keys: Mutex<HashSet<u32>>,
     safe_text_only: bool,
@@ -367,6 +370,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         raw_keys_mode: parse_raw_keys_mode(&config.raw_keys_mode),
         suppress_raw_keys_on_shortcut: config.suppress_raw_keys_on_shortcut,
         emit_mouse_move: config.emit_mouse_move,
+        emit_mouse_click: config.emit_mouse_click,
         emit_mouse_scroll: config.emit_mouse_scroll,
         pressed_keys: Mutex::new(HashSet::new()),
         safe_text_only: config.safe_text_only,
@@ -1719,6 +1723,9 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
 
             if event_type != "unknown" {
                 if event_type == "mouse_move" && !state.emit_mouse_move {
+                    return CallNextHookEx(HHOOK(0), code, wparam, lparam);
+                }
+                if event_type == "mouse_click" && !state.emit_mouse_click {
                     return CallNextHookEx(HHOOK(0), code, wparam, lparam);
                 }
                 if event_type == "mouse_scroll" && !state.emit_mouse_scroll {

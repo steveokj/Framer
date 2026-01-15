@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs;
@@ -22,13 +23,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetMessageW, LoadIconW, LoadImageW, MessageBoxW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
     TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HICON, HMENU, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE, MB_OK,
-    MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_TOPALIGN, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP,
-    WM_NULL, WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_TOPALIGN, WM_COMMAND, WM_DESTROY,
+    WM_LBUTTONUP, WM_RBUTTONUP, WM_NULL, WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 const APP_DIR: &str = "data\\timestone";
 const TRAY_CONFIG_FILE: &str = "tray_config.json";
 const TRAY_ICON_CACHE: &str = "tray_icons";
+const RECORDER_CONFIG_FILE: &str = "config.json";
 
 const TRAY_ICON_ID: u32 = 1;
 const WM_TRAY: u32 = WM_USER + 1;
@@ -41,6 +43,9 @@ const CMD_RESUME: u16 = 1003;
 const CMD_STOP: u16 = 1004;
 const CMD_STATUS: u16 = 1005;
 const CMD_EXIT: u16 = 1006;
+const CMD_SETTINGS_CLICK: u16 = 1101;
+const CMD_SETTINGS_SCROLL: u16 = 1102;
+const CMD_SETTINGS_BOTH: u16 = 1103;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -189,6 +194,57 @@ fn build_command(config: &TrayConfig) -> RecorderCommand {
             "--".to_string(),
         ],
     }
+}
+
+fn recorder_config_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(RECORDER_CONFIG_FILE)
+}
+
+fn load_recorder_config(data_dir: &Path) -> Value {
+    let path = recorder_config_path(data_dir);
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => return Value::Object(Default::default()),
+    };
+    serde_json::from_str(&contents).unwrap_or_else(|_| Value::Object(Default::default()))
+}
+
+fn write_recorder_config(data_dir: &Path, config: &Value) -> Result<()> {
+    let path = recorder_config_path(data_dir);
+    let payload = serde_json::to_string_pretty(config).context("Failed to serialize recorder config")?;
+    fs::write(path, payload).context("Failed to write recorder config")?;
+    Ok(())
+}
+
+fn get_recorder_flag(data_dir: &Path, key: &str, default: bool) -> bool {
+    let config = load_recorder_config(data_dir);
+    config
+        .get(key)
+        .and_then(|value| value.as_bool())
+        .unwrap_or(default)
+}
+
+fn set_recorder_flag(data_dir: &Path, key: &str, value: bool) -> Result<()> {
+    let mut config = load_recorder_config(data_dir);
+    if !config.is_object() {
+        config = Value::Object(Default::default());
+    }
+    if let Some(map) = config.as_object_mut() {
+        map.insert(key.to_string(), Value::Bool(value));
+    }
+    write_recorder_config(data_dir, &config)
+}
+
+fn set_recorder_flags(data_dir: &Path, click: bool, scroll: bool) -> Result<()> {
+    let mut config = load_recorder_config(data_dir);
+    if !config.is_object() {
+        config = Value::Object(Default::default());
+    }
+    if let Some(map) = config.as_object_mut() {
+        map.insert("emit_mouse_click".to_string(), Value::Bool(click));
+        map.insert("emit_mouse_scroll".to_string(), Value::Bool(scroll));
+    }
+    write_recorder_config(data_dir, &config)
 }
 
 fn find_default_recorder_exe() -> Option<String> {
@@ -624,6 +680,26 @@ fn handle_menu_command(cmd: u16) {
                 PostQuitMessage(0);
             }
         }
+        CMD_SETTINGS_CLICK => {
+            if let Some(state) = STATE.get() {
+                let data_dir = state.lock().unwrap().data_dir.clone();
+                let enabled = get_recorder_flag(&data_dir, "emit_mouse_click", true);
+                let _ = set_recorder_flag(&data_dir, "emit_mouse_click", !enabled);
+            }
+        }
+        CMD_SETTINGS_SCROLL => {
+            if let Some(state) = STATE.get() {
+                let data_dir = state.lock().unwrap().data_dir.clone();
+                let enabled = get_recorder_flag(&data_dir, "emit_mouse_scroll", false);
+                let _ = set_recorder_flag(&data_dir, "emit_mouse_scroll", !enabled);
+            }
+        }
+        CMD_SETTINGS_BOTH => {
+            if let Some(state) = STATE.get() {
+                let data_dir = state.lock().unwrap().data_dir.clone();
+                let _ = set_recorder_flags(&data_dir, true, true);
+            }
+        }
         _ => {}
     }
 }
@@ -638,10 +714,30 @@ fn show_menu(hwnd: HWND) {
             return;
         }
         let status = STATE.get().map(|state| state.lock().unwrap().status).unwrap_or(RecorderStatus::Stopped);
+        let data_dir = STATE.get().map(|state| state.lock().unwrap().data_dir.clone());
+        let mouse_click_enabled = data_dir
+            .as_ref()
+            .map(|dir| get_recorder_flag(dir, "emit_mouse_click", true))
+            .unwrap_or(true);
+        let mouse_scroll_enabled = data_dir
+            .as_ref()
+            .map(|dir| get_recorder_flag(dir, "emit_mouse_scroll", false))
+            .unwrap_or(false);
+
         append_item(menu, CMD_START, "Start", status != RecorderStatus::Stopped);
         append_item(menu, CMD_PAUSE, "Pause", status != RecorderStatus::Running);
         append_item(menu, CMD_RESUME, "Resume", status != RecorderStatus::Paused);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let settings_menu = match CreatePopupMenu() {
+            Ok(menu) => menu,
+            Err(_) => return,
+        };
+        append_check_item(settings_menu, CMD_SETTINGS_CLICK, "Capture Mouse Click", mouse_click_enabled);
+        append_check_item(settings_menu, CMD_SETTINGS_SCROLL, "Capture Mouse Scroll", mouse_scroll_enabled);
+        let _ = AppendMenuW(settings_menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_check_item(settings_menu, CMD_SETTINGS_BOTH, "Capture Both", false);
+        let settings_label = to_wide("Settings");
+        let _ = AppendMenuW(menu, MF_POPUP, settings_menu.0 as usize, PCWSTR(settings_label.as_ptr()));
         append_item(menu, CMD_STOP, "Stop", status == RecorderStatus::Stopped);
         append_item(menu, CMD_STATUS, "Status", false);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -658,6 +754,17 @@ fn show_menu(hwnd: HWND) {
 fn append_item(menu: HMENU, id: u16, label: &str, disabled: bool) {
     let wide = to_wide(label);
     let flags = if disabled { MF_STRING | MF_GRAYED } else { MF_STRING };
+    unsafe {
+        let _ = AppendMenuW(menu, flags, id as usize, PCWSTR(wide.as_ptr()));
+    }
+}
+
+fn append_check_item(menu: HMENU, id: u16, label: &str, checked: bool) {
+    let wide = to_wide(label);
+    let mut flags = MF_STRING;
+    if checked {
+        flags |= MF_CHECKED;
+    }
     unsafe {
         let _ = AppendMenuW(menu, flags, id as usize, PCWSTR(wide.as_ptr()));
     }
