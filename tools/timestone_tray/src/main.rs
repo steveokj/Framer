@@ -8,6 +8,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -337,6 +338,16 @@ fn run_command(command: &RecorderCommand, action: &str) -> Result<String> {
     Ok(format!("{stdout}{stderr}"))
 }
 
+fn run_command_async(command: &RecorderCommand, action: &str) -> Result<()> {
+    let mut cmd = Command::new(&command.exe);
+    cmd.args(&command.args_prefix);
+    cmd.arg(action);
+    cmd.creation_flags(CREATE_NO_WINDOW.0);
+    cmd.stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    cmd.spawn().context("Failed to spawn recorder command")?;
+    Ok(())
+}
+
 fn get_status(command: &RecorderCommand) -> Result<RecorderStatus> {
     let output = run_command(command, "status").unwrap_or_default();
     if output.contains("Recorder status: paused") {
@@ -361,6 +372,18 @@ fn get_status_from_files(data_dir: &Path) -> RecorderStatus {
     } else {
         RecorderStatus::Running
     }
+}
+
+fn wait_for_lock(data_dir: &Path, timeout_ms: u64) -> bool {
+    let lock_path = data_dir.join("recorder.lock");
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if lock_path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
 }
 
 fn update_status() {
@@ -390,47 +413,42 @@ fn dispatch_command(action: &str, show_dialog: bool) {
     let action = action.to_string();
     std::thread::spawn(move || {
         let command = { state.lock().unwrap().command.clone() };
-        if run_command(&command, &action).is_ok() {
-            let status = if let Some(state) = STATE.get() {
-                let state = state.lock().unwrap();
-                get_status_from_files(&state.data_dir)
-            } else {
-                RecorderStatus::Stopped
-            };
-            if let Some(state) = STATE.get() {
-                let mut state = state.lock().unwrap();
-                state.status = status;
-                state.busy = false;
-            }
-            let _ = update_tray_icon();
-            if show_dialog {
-                let hwnd = STATE
-                    .get()
-                    .map(|state| state.lock().unwrap().hwnd)
-                    .unwrap_or(HWND(0));
-                if hwnd.0 != 0 {
-                    show_status_dialog(hwnd, status);
+        let data_dir = { state.lock().unwrap().data_dir.clone() };
+        println!("[tray] command requested: {}", action);
+        let result = if action == "start" {
+            run_command_async(&command, &action).map(|_| {
+                println!("[tray] waiting for recorder to start...");
+                wait_for_lock(&data_dir, 15000)
+            })
+        } else {
+            run_command(&command, &action).map(|output| {
+                if !output.trim().is_empty() {
+                    println!("[tray] {}", output.trim());
                 }
-            }
-        } else if show_dialog {
-            if let Some(state) = STATE.get() {
-                let mut state = state.lock().unwrap();
-                state.busy = false;
-            }
-            let _ = update_tray_icon();
+                true
+            })
+        };
+
+        let started = result.unwrap_or(false);
+        let status = if started {
+            get_status_from_files(&data_dir)
+        } else {
+            RecorderStatus::Stopped
+        };
+        if let Some(state) = STATE.get() {
+            let mut state = state.lock().unwrap();
+            state.status = status;
+            state.busy = false;
+        }
+        let _ = update_tray_icon();
+        if show_dialog {
             let hwnd = STATE
                 .get()
                 .map(|state| state.lock().unwrap().hwnd)
                 .unwrap_or(HWND(0));
             if hwnd.0 != 0 {
-                show_status_dialog(hwnd, RecorderStatus::Stopped);
+                show_status_dialog(hwnd, status);
             }
-        } else {
-            if let Some(state) = STATE.get() {
-                let mut state = state.lock().unwrap();
-                state.busy = false;
-            }
-            let _ = update_tray_icon();
         }
     });
 }
