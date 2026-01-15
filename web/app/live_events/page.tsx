@@ -161,6 +161,7 @@ export default function LiveEventsPage() {
   const [status, setStatus] = useState("Idle");
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
+  const [liveEnabled, setLiveEnabled] = useState(true);
 
   const lastWallMsRef = useRef<number | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
@@ -280,12 +281,16 @@ export default function LiveEventsPage() {
         }
       };
     };
-    connect();
+    if (liveEnabled) {
+      connect();
+    } else {
+      setStatus("Paused");
+    }
     return () => {
       cancelled = true;
       source?.close();
     };
-  }, [buildStreamUrl, ingestEvents, sessionId]);
+  }, [buildStreamUrl, ingestEvents, liveEnabled, sessionId]);
 
   const eventCount = events.length;
   const displayEvents = useMemo(() => mergeTextInputEvents(events), [events]);
@@ -355,6 +360,20 @@ export default function LiveEventsPage() {
                 }}
               >
                 Refresh sessions
+              </button>
+              <button
+                type="button"
+                onClick={() => setLiveEnabled((prev) => !prev)}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: 8,
+                  border: "1px solid #1e293b",
+                  background: liveEnabled ? "rgba(56, 189, 248, 0.2)" : "#0f172a",
+                  color: liveEnabled ? "#e0f2fe" : "#e2e8f0",
+                  cursor: "pointer",
+                }}
+              >
+                {liveEnabled ? "Stop live" : "Start live"}
               </button>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", color: "#94a3b8" }}>
