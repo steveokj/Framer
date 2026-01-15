@@ -189,6 +189,7 @@ struct RecorderState {
     icons_dir: PathBuf,
     window_rect_debounce_ms: i64,
     window_tracker: Mutex<WindowTracker>,
+    scroll_buffer: Mutex<Option<ScrollBuffer>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -232,6 +233,14 @@ struct ClipboardImage {
 struct ClipboardHash {
     hash: u64,
     ts_ms: i64,
+}
+
+struct ScrollBuffer {
+    last_ts_ms: i64,
+    x: i32,
+    y: i32,
+    total_delta: i32,
+    ticks: i32,
 }
 
 #[derive(Clone)]
@@ -405,6 +414,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
             last_rect: None,
             pending_rect: None,
         }),
+        scroll_buffer: Mutex::new(None),
     });
     let _ = STATE.set(state.clone());
 
@@ -429,6 +439,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     let stop_handle = spawn_stop_watcher(state.clone(), stop_signal_path, shutdown.clone(), main_thread_id);
     let pause_signal_path = base_dir.join(PAUSE_FILE);
     let pause_handle = spawn_pause_watcher(state.clone(), pause_signal_path, shutdown.clone());
+    let scroll_flush_handle = spawn_scroll_flush(state.clone(), shutdown.clone());
     let reload_signal_path = base_dir.join(RELOAD_CONFIG_FILE);
     let reload_handle = spawn_config_reload_watcher(
         state.clone(),
@@ -497,6 +508,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
 
     stop_handle.join().ok();
     pause_handle.join().ok();
+    scroll_flush_handle.join().ok();
     reload_handle.join().ok();
     if let Some(handle) = snapshot_handle {
         handle.join().ok();
@@ -585,6 +597,26 @@ fn spawn_config_reload_watcher(
                 if let Ok(config) = load_or_create_config(&base_dir.join(CONFIG_FILE)) {
                     let config = normalize_config(config);
                     apply_capture_flags(&state, &config);
+                }
+            }
+            thread::sleep(interval);
+        }
+    })
+}
+
+fn spawn_scroll_flush(
+    state: Arc<RecorderState>,
+    shutdown: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let interval = Duration::from_millis(120);
+        while !shutdown.load(Ordering::SeqCst) {
+            {
+                let mut buffer = state.scroll_buffer.lock().unwrap();
+                if let Some(existing) = buffer.as_ref() {
+                    if now_mono_ms(&state) - existing.last_ts_ms > 200 {
+                        flush_scroll_buffer(&state, &mut buffer);
+                    }
                 }
             }
             thread::sleep(interval);
@@ -1689,6 +1721,54 @@ fn send_window_rect_changed(state: &RecorderState, window_info: &WindowInfo) {
     state.sender.try_send(event).ok();
 }
 
+fn buffer_mouse_scroll(state: &RecorderState, mono_ms: i64, data: &MSLLHOOKSTRUCT, delta: Option<i32>) {
+    let delta_value = delta.unwrap_or(0);
+    let mut buffer = state.scroll_buffer.lock().unwrap();
+    if let Some(existing) = buffer.as_mut() {
+        if mono_ms - existing.last_ts_ms <= 200 {
+            existing.last_ts_ms = mono_ms;
+            existing.total_delta += delta_value;
+            existing.ticks += 1;
+            existing.x = data.pt.x;
+            existing.y = data.pt.y;
+            return;
+        }
+        flush_scroll_buffer(state, &mut buffer);
+    }
+    *buffer = Some(ScrollBuffer {
+        last_ts_ms: mono_ms,
+        x: data.pt.x,
+        y: data.pt.y,
+        total_delta: delta_value,
+        ticks: 1,
+    });
+}
+
+fn flush_scroll_buffer(state: &RecorderState, buffer: &mut Option<ScrollBuffer>) {
+    let Some(existing) = buffer.take() else {
+        return;
+    };
+    let mouse = MouseInfo {
+        x: existing.x,
+        y: existing.y,
+        button: None,
+        delta: Some(existing.total_delta),
+    };
+    let event = EventRecord {
+        session_id: state.session_id.clone(),
+        ts_wall_ms: now_wall_ms(),
+        ts_mono_ms: existing.last_ts_ms,
+        event_type: "mouse_scroll".to_string(),
+        process_name: None,
+        window_title: None,
+        window_class: None,
+        window_rect: None,
+        mouse: Some(json!(mouse).to_string()),
+        payload: json!({ "ticks": existing.ticks, "total_delta": existing.total_delta }),
+    };
+    state.sender.try_send(event).ok();
+}
+
 fn send_marker_event(state: &RecorderState, hotkey: &str) {
     let window_info = active_window_info().map(|(_, info)| info);
     let (process_name, window_title, window_class, window_rect) = match window_info {
@@ -1805,6 +1885,10 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     return CallNextHookEx(HHOOK(0), code, wparam, lparam);
                 }
                 let mono_ms = now_mono_ms(state);
+                if event_type == "mouse_scroll" {
+                    buffer_mouse_scroll(state, mono_ms, &data, delta);
+                    return CallNextHookEx(HHOOK(0), code, wparam, lparam);
+                }
                 if event_type == "mouse_move" {
                     let last = state.last_mouse_move_ms.load(Ordering::SeqCst);
                     if last >= 0 && mono_ms - last < state.mouse_move_interval_ms {
