@@ -683,24 +683,29 @@ export default function LiveEventsPage() {
                         }
 
                         const event = row.event;
+                        const wallTime = formatWallTime(event.ts_wall_ms);
+                        const monoTime = formatDurationMs(event.ts_mono_ms);
+                        const windowName = windowLabel(event);
                         return (
                           <div
                             key={event.id}
                             style={{
-                              borderRadius: 12,
-                              padding: "10px 12px",
-                              border: "1px solid rgba(30, 41, 59, 0.6)",
-                              background: "rgba(9, 14, 26, 0.9)",
+                              borderRadius: 14,
+                              padding: 16,
+                              border: "1px solid rgba(30, 41, 59, 0.7)",
+                              background: "rgba(11, 17, 32, 0.9)",
                               display: "grid",
-                              gap: 8,
+                              gap: 12,
                             }}
                           >
                             <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
                               <strong style={{ textTransform: "capitalize" }}>
                                 {event.event_type.replace(/_/g, " ")}
                               </strong>
-                              <span style={{ color: "#cbd5f5" }}>{formatWallTime(event.ts_wall_ms)}</span>
+                              <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
+                              <span style={{ color: "#64748b" }}>+{monoTime}</span>
                             </div>
+                            <div style={{ color: "#94a3b8" }}>{windowName}</div>
                             {renderEventDetails(event)}
                           </div>
                         );
