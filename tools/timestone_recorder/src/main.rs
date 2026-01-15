@@ -47,6 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::Graphics::Gdi::{
     BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW,
     SelectObject, DIB_RGB_COLORS,
@@ -2074,8 +2075,8 @@ fn capture_icon_bmp(process_path: &str, icon_path: &Path) -> Result<()> {
     let result = unsafe {
         SHGetFileInfoW(
             PCWSTR(wide.as_ptr()),
-            0,
-            &mut info,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut info),
             std::mem::size_of::<SHFILEINFOW>() as u32,
             SHGFI_ICON | SHGFI_LARGEICON,
         )
