@@ -92,7 +92,7 @@ fn main() -> Result<()> {
         let hinstance = GetModuleHandleW(None)?;
         let wc = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
-            hInstance: hinstance,
+            hInstance: hinstance.into(),
             lpszClassName: PCWSTR(class_name.as_ptr()),
             ..Default::default()
         };
@@ -196,7 +196,7 @@ fn load_icon(base_dir: &Path, icon_input: Option<&str>) -> Result<HICON> {
             }
         }
     }
-    let fallback = unsafe { LoadIconW(None, PCWSTR::from_raw(32512 as *const u16)) };
+    let fallback = unsafe { LoadIconW(None, PCWSTR::from_raw(32512 as *const u16)) }?;
     Ok(fallback)
 }
 
