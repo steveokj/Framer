@@ -383,10 +383,22 @@ fn dispatch_command(action: &str, show_dialog: bool) {
             }
             let _ = update_tray_icon();
             if show_dialog {
-                show_status_dialog(status);
+                let hwnd = STATE
+                    .get()
+                    .map(|state| state.lock().unwrap().hwnd)
+                    .unwrap_or(HWND(0));
+                if hwnd.0 != 0 {
+                    show_status_dialog(hwnd, status);
+                }
             }
         } else if show_dialog {
-            show_status_dialog(RecorderStatus::Stopped);
+            let hwnd = STATE
+                .get()
+                .map(|state| state.lock().unwrap().hwnd)
+                .unwrap_or(HWND(0));
+            if hwnd.0 != 0 {
+                show_status_dialog(hwnd, RecorderStatus::Stopped);
+            }
         }
     });
 }
