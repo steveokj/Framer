@@ -52,6 +52,7 @@ const APP_DIR: &str = "data\\timestone";
 const DB_NAME: &str = "timestone_events.sqlite3";
 const LOCK_FILE: &str = "recorder.lock";
 const STOP_FILE: &str = "stop.signal";
+const PAUSE_FILE: &str = "pause.signal";
 const CONFIG_FILE: &str = "config.json";
 const CLIPBOARD_DIR: &str = "clipboard";
 
@@ -155,6 +156,7 @@ struct RecorderState {
     start_instant: Instant,
     mouse_move_interval_ms: i64,
     last_mouse_move_ms: AtomicI64,
+    paused: AtomicBool,
     capture_raw_keys: bool,
     raw_keys_mode: RawKeysMode,
     suppress_raw_keys_on_shortcut: bool,
@@ -231,6 +233,15 @@ fn main() -> Result<()> {
             let overrides = parse_start_args(args);
             run_recorder(overrides)?;
         }
+        Some("pause") => {
+            pause_recorder()?;
+        }
+        Some("resume") => {
+            resume_recorder()?;
+        }
+        Some("toggle") => {
+            toggle_pause()?;
+        }
         Some("stop") => {
             stop_recorder()?;
         }
@@ -249,6 +260,9 @@ fn print_usage() {
     println!("Usage:");
     println!("  timestone_recorder start [--config PATH] [--safe-text|--no-safe-text] [--raw-keys]");
     println!("                           [--mouse-hz N] [--snapshot-hz N] [--obs-video PATH] [--obs-dir PATH]");
+    println!("  timestone_recorder pause");
+    println!("  timestone_recorder resume");
+    println!("  timestone_recorder toggle");
     println!("  timestone_recorder stop");
     println!("  timestone_recorder status");
 }
@@ -335,6 +349,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         start_instant,
         mouse_move_interval_ms: (1000 / config.mouse_hz.max(1)) as i64,
         last_mouse_move_ms: AtomicI64::new(-1),
+        paused: AtomicBool::new(false),
         capture_raw_keys: config.capture_raw_keys,
         raw_keys_mode: parse_raw_keys_mode(&config.raw_keys_mode),
         suppress_raw_keys_on_shortcut: config.suppress_raw_keys_on_shortcut,
@@ -381,6 +396,8 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
 
     let stop_signal_path = base_dir.join(STOP_FILE);
     let stop_handle = spawn_stop_watcher(state.clone(), stop_signal_path, shutdown.clone(), main_thread_id);
+    let pause_signal_path = base_dir.join(PAUSE_FILE);
+    let pause_handle = spawn_pause_watcher(state.clone(), pause_signal_path, shutdown.clone());
     let snapshot_handle = if config.emit_snapshots {
         Some(spawn_snapshot_loop(
             state.clone(),
@@ -441,6 +458,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     }
 
     stop_handle.join().ok();
+    pause_handle.join().ok();
     if let Some(handle) = snapshot_handle {
         handle.join().ok();
     }
@@ -474,6 +492,8 @@ fn stop_recorder() -> Result<()> {
     }
     let stop_path = base_dir.join(STOP_FILE);
     fs::write(stop_path, b"stop")?;
+    let pause_path = base_dir.join(PAUSE_FILE);
+    let _ = fs::remove_file(pause_path);
     println!("Stop signal written.");
     if let Some(info) = read_lock_info(&lock_path) {
         if let Some(pid) = info.pid {
@@ -487,9 +507,66 @@ fn stop_recorder() -> Result<()> {
     Ok(())
 }
 
+fn spawn_pause_watcher(
+    state: Arc<RecorderState>,
+    pause_path: PathBuf,
+    shutdown: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let interval = Duration::from_millis(200);
+        let mut last_paused = false;
+        while !shutdown.load(Ordering::SeqCst) {
+            let paused = pause_path.exists();
+            if paused != last_paused {
+                state.paused.store(paused, Ordering::SeqCst);
+                if paused {
+                    flush_text_buffer(&state, "pause");
+                    send_session_event(&state, "session_pause", json!({ "note": "pause_signal" }));
+                } else {
+                    send_session_event(&state, "session_resume", json!({ "note": "pause_signal" }));
+                }
+                last_paused = paused;
+            }
+            thread::sleep(interval);
+        }
+    })
+}
+
+fn pause_recorder() -> Result<()> {
+    let base_dir = ensure_app_dir()?;
+    let pause_path = base_dir.join(PAUSE_FILE);
+    fs::write(pause_path, b"pause")?;
+    println!("Pause signal written.");
+    Ok(())
+}
+
+fn resume_recorder() -> Result<()> {
+    let base_dir = ensure_app_dir()?;
+    let pause_path = base_dir.join(PAUSE_FILE);
+    if pause_path.exists() {
+        let _ = fs::remove_file(pause_path);
+    }
+    println!("Resume signal written.");
+    Ok(())
+}
+
+fn toggle_pause() -> Result<()> {
+    let base_dir = ensure_app_dir()?;
+    let pause_path = base_dir.join(PAUSE_FILE);
+    if pause_path.exists() {
+        let _ = fs::remove_file(pause_path);
+        println!("Resume signal written.");
+    } else {
+        fs::write(pause_path, b"pause")?;
+        println!("Pause signal written.");
+    }
+    Ok(())
+}
+
 fn print_status() -> Result<()> {
     let base_dir = ensure_app_dir()?;
     let lock_path = base_dir.join(LOCK_FILE);
+    let pause_path = base_dir.join(PAUSE_FILE);
     if !lock_path.exists() {
         println!("Recorder status: stopped");
         return Ok(());
@@ -502,14 +579,22 @@ fn print_status() -> Result<()> {
                 return Ok(());
             }
         }
-        println!("Recorder status: running");
+        if pause_path.exists() {
+            println!("Recorder status: paused");
+        } else {
+            println!("Recorder status: running");
+        }
         if let Some(contents) = info.raw {
             if !contents.trim().is_empty() {
                 println!("{contents}");
             }
         }
     } else {
-        println!("Recorder status: running");
+        if pause_path.exists() {
+            println!("Recorder status: paused");
+        } else {
+            println!("Recorder status: running");
+        }
         let contents = fs::read_to_string(lock_path).unwrap_or_default();
         if !contents.trim().is_empty() {
             println!("{contents}");
@@ -800,7 +885,9 @@ fn spawn_stop_watcher(
                 signal_shutdown(&shutdown, main_thread_id);
                 break;
             }
-            flush_text_buffer_if_stale(&state, "idle_timeout");
+            if !state.paused.load(Ordering::SeqCst) {
+                flush_text_buffer_if_stale(&state, "idle_timeout");
+            }
             thread::sleep(interval);
         }
     })
@@ -814,6 +901,10 @@ fn spawn_snapshot_loop(
     thread::spawn(move || {
         let interval = Duration::from_millis(1000 / snapshot_hz.max(1));
         while !shutdown.load(Ordering::SeqCst) {
+            if state.paused.load(Ordering::SeqCst) {
+                thread::sleep(interval);
+                continue;
+            }
             if let Some(snapshot) = build_snapshot(&state) {
                 state.sender.try_send(snapshot).ok();
             }
@@ -830,6 +921,10 @@ fn spawn_window_poll_loop(
     thread::spawn(move || {
         let interval = Duration::from_millis(1000 / window_poll_hz.max(1));
         while !shutdown.load(Ordering::SeqCst) {
+            if state.paused.load(Ordering::SeqCst) {
+                thread::sleep(interval);
+                continue;
+            }
             poll_active_window(&state);
             thread::sleep(interval);
         }
@@ -849,6 +944,10 @@ fn spawn_clipboard_loop(
         let mut last_seq = unsafe { GetClipboardSequenceNumber() };
         let mut pending_since: Option<Instant> = None;
         while !shutdown.load(Ordering::SeqCst) {
+            if state.paused.load(Ordering::SeqCst) {
+                thread::sleep(interval);
+                continue;
+            }
             let seq = unsafe { GetClipboardSequenceNumber() };
             if seq != last_seq {
                 last_seq = seq;
@@ -1410,6 +1509,9 @@ fn poll_active_window(state: &RecorderState) {
 }
 
 fn update_window_events(state: &RecorderState, hwnd: HWND, window_info: WindowInfo) {
+    if state.paused.load(Ordering::SeqCst) {
+        return;
+    }
     let now_ms = now_mono_ms(state);
     let (is_new, rect_changed) = {
         let mut tracker = state.window_tracker.lock().unwrap();
@@ -1446,6 +1548,10 @@ fn spawn_window_rect_flush_loop(state: Arc<RecorderState>, shutdown: Arc<AtomicB
     thread::spawn(move || {
         let interval = Duration::from_millis(100);
         while !shutdown.load(Ordering::SeqCst) {
+            if state.paused.load(Ordering::SeqCst) {
+                thread::sleep(interval);
+                continue;
+            }
             let pending = {
                 let mut tracker = state.window_tracker.lock().unwrap();
                 let last_hwnd = tracker.last_hwnd;
@@ -1548,6 +1654,9 @@ unsafe extern "system" fn win_event_proc(
     let Some(state) = STATE.get() else {
         return;
     };
+    if state.paused.load(Ordering::SeqCst) {
+        return;
+    }
     match event {
         EVENT_SYSTEM_FOREGROUND => {
             if let Some(window_info) = window_info_for_hwnd(hwnd) {
@@ -1570,6 +1679,9 @@ unsafe extern "system" fn win_event_proc(
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == 0 {
         if let Some(state) = STATE.get() {
+            if state.paused.load(Ordering::SeqCst) {
+                return CallNextHookEx(None, code, wparam, lparam);
+            }
             let data = *(lparam.0 as *const MSLLHOOKSTRUCT);
             let (event_type, button, delta) = match wparam.0 as u32 {
                 WM_MOUSEMOVE => ("mouse_move", None, None),
@@ -1630,6 +1742,9 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == 0 {
         if let Some(state) = STATE.get() {
+            if state.paused.load(Ordering::SeqCst) {
+                return CallNextHookEx(None, code, wparam, lparam);
+            }
             let data = *(lparam.0 as *const KBDLLHOOKSTRUCT);
             let vk = data.vkCode;
             let is_down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
