@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 type SampleEvent = {
   id: number;
   ts_wall_ms: number;
@@ -171,6 +173,19 @@ function groupConsecutiveByType(events: SampleEvent[]): SampleRow[] {
 
 export default function LiveEventsSamplePage() {
   const segments = segmentByActiveWindow(sampleEvents);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
+
+  const toggleGroup = (id: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="container">
@@ -206,10 +221,12 @@ export default function LiveEventsSamplePage() {
             >
               <div style={{ display: "grid", gap: 10 }}>
                 {groupConsecutiveByType(segment.events).map((row, index) => {
+                  const groupId = `${segment.id}-${index}`;
+                  const expanded = expandedGroups.has(groupId);
                   if (row.kind === "group") {
                     return (
                       <div
-                        key={`group-${segment.id}-${index}`}
+                        key={groupId}
                         style={{
                           borderRadius: 12,
                           padding: "10px 12px",
@@ -220,6 +237,22 @@ export default function LiveEventsSamplePage() {
                         }}
                       >
                         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                          <button
+                            type="button"
+                            onClick={() => toggleGroup(groupId)}
+                            style={{
+                              width: 24,
+                              height: 24,
+                              borderRadius: 6,
+                              border: "1px solid rgba(30, 41, 59, 0.8)",
+                              background: "rgba(15, 23, 42, 0.7)",
+                              color: "#e2e8f0",
+                              cursor: "pointer",
+                            }}
+                            aria-label={expanded ? "Collapse group" : "Expand group"}
+                          >
+                            {expanded ? "-" : "+"}
+                          </button>
                           <span style={{ color: "#cbd5f5", fontSize: 12 }}>
                             {formatWallTime(row.events[0].ts_wall_ms)}
                           </span>
@@ -230,6 +263,31 @@ export default function LiveEventsSamplePage() {
                         {row.events[0].mouse ? (
                           <div style={{ color: "#cbd5f5" }}>
                             Click @ {row.events[0].mouse?.x},{row.events[0].mouse?.y}
+                          </div>
+                        ) : null}
+                        {expanded ? (
+                          <div style={{ display: "grid", gap: 6, paddingLeft: 10 }}>
+                            {row.events.map((event) => (
+                              <div
+                                key={event.id}
+                                style={{
+                                  borderRadius: 10,
+                                  padding: "8px 10px",
+                                  border: "1px solid rgba(30, 41, 59, 0.6)",
+                                  background: "rgba(7, 12, 22, 0.85)",
+                                  display: "flex",
+                                  gap: 10,
+                                  alignItems: "center",
+                                }}
+                              >
+                                <span style={{ color: "#cbd5f5", fontSize: 12 }}>
+                                  {formatWallTime(event.ts_wall_ms)}
+                                </span>
+                                <span style={{ color: "#94a3b8", fontSize: 12 }}>
+                                  Click @ {event.mouse?.x},{event.mouse?.y}
+                                </span>
+                              </div>
+                            ))}
                           </div>
                         ) : null}
                       </div>
