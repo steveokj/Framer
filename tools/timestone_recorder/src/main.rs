@@ -81,6 +81,7 @@ struct RecorderConfig {
     emit_snapshots: bool,
     emit_mouse_move: bool,
     emit_mouse_click: bool,
+    mouse_click_mode: String,
     emit_mouse_scroll: bool,
     capture_clipboard: bool,
     clipboard_poll_ms: u64,
@@ -109,6 +110,7 @@ impl Default for RecorderConfig {
             emit_snapshots: false,
             emit_mouse_move: false,
             emit_mouse_click: true,
+            mouse_click_mode: "down".to_string(),
             emit_mouse_scroll: false,
             capture_clipboard: true,
             clipboard_poll_ms: 250,
@@ -172,6 +174,7 @@ struct RecorderState {
     emit_mouse_move: AtomicBool,
     emit_mouse_click: AtomicBool,
     emit_mouse_scroll: AtomicBool,
+    mouse_click_mode: MouseClickMode,
     pressed_keys: Mutex<HashSet<u32>>,
     safe_text_only: bool,
     allowlist_processes: Vec<String>,
@@ -190,6 +193,13 @@ struct RecorderState {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RawKeysMode {
+    Down,
+    Up,
+    Both,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MouseClickMode {
     Down,
     Up,
     Both,
@@ -373,6 +383,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         emit_mouse_move: AtomicBool::new(config.emit_mouse_move),
         emit_mouse_click: AtomicBool::new(config.emit_mouse_click),
         emit_mouse_scroll: AtomicBool::new(config.emit_mouse_scroll),
+        mouse_click_mode: parse_mouse_click_mode(&config.mouse_click_mode),
         pressed_keys: Mutex::new(HashSet::new()),
         safe_text_only: config.safe_text_only,
         allowlist_processes: config.allowlist_processes.clone(),
@@ -883,6 +894,14 @@ fn parse_raw_keys_mode(value: &str) -> RawKeysMode {
         "up" => RawKeysMode::Up,
         "both" => RawKeysMode::Both,
         _ => RawKeysMode::Down,
+    }
+}
+
+fn parse_mouse_click_mode(value: &str) -> MouseClickMode {
+    match value.to_ascii_lowercase().as_str() {
+        "up" => MouseClickMode::Up,
+        "both" => MouseClickMode::Both,
+        _ => MouseClickMode::Down,
     }
 }
 
@@ -1763,6 +1782,24 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 }
                 if event_type == "mouse_click" && !state.emit_mouse_click.load(Ordering::SeqCst) {
                     return CallNextHookEx(HHOOK(0), code, wparam, lparam);
+                }
+                if event_type == "mouse_click" {
+                    let is_down = matches!(
+                        wparam.0 as u32,
+                        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
+                    );
+                    let is_up = matches!(
+                        wparam.0 as u32,
+                        WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP
+                    );
+                    let allow = match state.mouse_click_mode {
+                        MouseClickMode::Down => is_down,
+                        MouseClickMode::Up => is_up,
+                        MouseClickMode::Both => is_down || is_up,
+                    };
+                    if !allow {
+                        return CallNextHookEx(HHOOK(0), code, wparam, lparam);
+                    }
                 }
                 if event_type == "mouse_scroll" && !state.emit_mouse_scroll.load(Ordering::SeqCst) {
                     return CallNextHookEx(HHOOK(0), code, wparam, lparam);
