@@ -692,14 +692,14 @@ export default function LiveEventsPage() {
                               border: "1px solid rgba(30, 41, 59, 0.6)",
                               background: "rgba(9, 14, 26, 0.9)",
                               display: "grid",
-                              gap: 6,
+                              gap: 8,
                             }}
                           >
-                            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                              <span style={{ color: "#cbd5f5", fontSize: 12 }}>{formatWallTime(event.ts_wall_ms)}</span>
-                              <span style={{ color: "#64748b", fontSize: 12 }}>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                              <strong style={{ textTransform: "capitalize" }}>
                                 {event.event_type.replace(/_/g, " ")}
-                              </span>
+                              </strong>
+                              <span style={{ color: "#cbd5f5" }}>{formatWallTime(event.ts_wall_ms)}</span>
                             </div>
                             {renderEventDetails(event)}
                           </div>
