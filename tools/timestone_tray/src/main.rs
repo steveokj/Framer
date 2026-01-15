@@ -132,7 +132,7 @@ fn main() -> Result<()> {
             DispatchMessageW(&msg);
         }
         cleanup_tray_icon();
-        DestroyWindow(hwnd);
+        let _ = DestroyWindow(hwnd);
     }
 
     Ok(())
@@ -433,10 +433,10 @@ fn show_menu(hwnd: HWND) {
         append_item(menu, CMD_START, "Start", status != RecorderStatus::Stopped);
         append_item(menu, CMD_PAUSE, "Pause", status != RecorderStatus::Running);
         append_item(menu, CMD_RESUME, "Resume", status != RecorderStatus::Paused);
-        AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_item(menu, CMD_STOP, "Stop", status == RecorderStatus::Stopped);
         append_item(menu, CMD_STATUS, "Status", false);
-        AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_item(menu, CMD_EXIT, "Exit", false);
 
         let mut pt = POINT::default();
@@ -450,6 +450,6 @@ fn append_item(menu: HMENU, id: u16, label: &str, disabled: bool) {
     let wide = to_wide(label);
     let flags = if disabled { MF_STRING | MF_GRAYED } else { MF_STRING };
     unsafe {
-        AppendMenuW(menu, flags, id as usize, PCWSTR(wide.as_ptr()));
+        let _ = AppendMenuW(menu, flags, id as usize, PCWSTR(wide.as_ptr()));
     }
 }
