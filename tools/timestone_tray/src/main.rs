@@ -72,6 +72,7 @@ struct AppState {
     icon_paused: HICON,
     icon_stopped: HICON,
     status: RecorderStatus,
+    busy: bool,
 }
 
 static STATE: OnceLock<Arc<Mutex<AppState>>> = OnceLock::new();
@@ -124,6 +125,7 @@ fn main() -> Result<()> {
             icon_paused,
             icon_stopped,
             status,
+            busy: false,
         };
         let shared = Arc::new(Mutex::new(state));
         let _ = STATE.set(shared);
@@ -270,7 +272,11 @@ fn update_tray_icon() -> Result<()> {
         RecorderStatus::Paused => "paused",
         RecorderStatus::Stopped => "stopped",
     };
-    let tooltip = format!("{} ({})", state.tooltip, status);
+    let tooltip = if state.busy {
+        format!("{} ({}, busy)", state.tooltip, status)
+    } else {
+        format!("{} ({})", state.tooltip, status)
+    };
     let mut data = tray_data(state.hwnd, icon, &tooltip);
     let ok = unsafe { Shell_NotifyIconW(NIM_MODIFY, &mut data) };
     if ok.as_bool() {
@@ -372,6 +378,14 @@ fn dispatch_command(action: &str, show_dialog: bool) {
     let Some(state) = STATE.get() else {
         return;
     };
+    {
+        let mut state = state.lock().unwrap();
+        if state.busy {
+            return;
+        }
+        state.busy = true;
+    }
+    let _ = update_tray_icon();
     let state = state.clone();
     let action = action.to_string();
     std::thread::spawn(move || {
@@ -386,6 +400,7 @@ fn dispatch_command(action: &str, show_dialog: bool) {
             if let Some(state) = STATE.get() {
                 let mut state = state.lock().unwrap();
                 state.status = status;
+                state.busy = false;
             }
             let _ = update_tray_icon();
             if show_dialog {
@@ -398,6 +413,11 @@ fn dispatch_command(action: &str, show_dialog: bool) {
                 }
             }
         } else if show_dialog {
+            if let Some(state) = STATE.get() {
+                let mut state = state.lock().unwrap();
+                state.busy = false;
+            }
+            let _ = update_tray_icon();
             let hwnd = STATE
                 .get()
                 .map(|state| state.lock().unwrap().hwnd)
@@ -405,6 +425,12 @@ fn dispatch_command(action: &str, show_dialog: bool) {
             if hwnd.0 != 0 {
                 show_status_dialog(hwnd, RecorderStatus::Stopped);
             }
+        } else {
+            if let Some(state) = STATE.get() {
+                let mut state = state.lock().unwrap();
+                state.busy = false;
+            }
+            let _ = update_tray_icon();
         }
     });
 }
@@ -455,6 +481,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
 fn handle_left_click() {
     let action = if let Some(state) = STATE.get() {
         let state = state.lock().unwrap();
+        if state.busy {
+            return;
+        }
         match state.status {
             RecorderStatus::Stopped => "start",
             RecorderStatus::Running => "pause",
@@ -467,6 +496,12 @@ fn handle_left_click() {
 }
 
 fn handle_menu_command(cmd: u16) {
+    if let Some(state) = STATE.get() {
+        let state = state.lock().unwrap();
+        if state.busy && cmd != CMD_STATUS {
+            return;
+        }
+    }
     match cmd {
         CMD_START => dispatch_command("start", false),
         CMD_PAUSE => dispatch_command("pause", false),
