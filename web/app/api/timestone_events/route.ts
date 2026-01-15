@@ -45,6 +45,44 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function buildArgs({
+  sessionId,
+  dbPathInput,
+  startMs,
+  endMs,
+  eventTypes,
+  search,
+  limit,
+}: {
+  sessionId: string;
+  dbPathInput: string;
+  startMs: number | null;
+  endMs: number | null;
+  eventTypes: string[] | null;
+  search: string | undefined;
+  limit: number | null;
+}): Promise<string[]> {
+  const dbPath = await resolvePath(dbPathInput);
+  const args: string[] = [path.join(process.cwd(), "scripts", "timestone_events.py"), "--db", dbPath, "--session-id", sessionId];
+
+  if (startMs != null) {
+    args.push("--start-ms", String(startMs));
+  }
+  if (endMs != null) {
+    args.push("--end-ms", String(endMs));
+  }
+  if (eventTypes && eventTypes.length > 0) {
+    args.push("--event-types", eventTypes.join(","));
+  }
+  if (search) {
+    args.push("--search", search);
+  }
+  if (limit != null && limit > 0) {
+    args.push("--limit", String(limit));
+  }
+  return args;
+}
+
 export async function POST(req: NextRequest): Promise<Response> {
   let body: any;
   try {
@@ -64,10 +102,6 @@ export async function POST(req: NextRequest): Promise<Response> {
     });
   }
 
-  const dbPathInput = (body?.dbPath as string | undefined)?.trim() || "data/timestone/timestone_events.sqlite3";
-  const dbPath = await resolvePath(dbPathInput);
-  const args: string[] = [path.join(process.cwd(), "scripts", "timestone_events.py"), "--db", dbPath, "--session-id", sessionId];
-
   const startMs = Number.isFinite(body?.startMs) ? Number(body.startMs) : null;
   const endMs = Number.isFinite(body?.endMs) ? Number(body.endMs) : null;
   const eventTypes = Array.isArray(body?.eventTypes) ? body.eventTypes.filter(Boolean) : null;
@@ -75,6 +109,16 @@ export async function POST(req: NextRequest): Promise<Response> {
   const limit = Number.isFinite(body?.limit) ? Number(body.limit) : null;
   const waitMs = Number.isFinite(body?.waitMs) ? Number(body.waitMs) : 0;
   const pollMs = Number.isFinite(body?.pollMs) ? Number(body.pollMs) : 250;
+  const dbPathInput = (body?.dbPath as string | undefined)?.trim() || "data/timestone/timestone_events.sqlite3";
+  const args = await buildArgs({
+    sessionId,
+    dbPathInput,
+    startMs,
+    endMs,
+    eventTypes,
+    search,
+    limit,
+  });
 
   if (startMs != null) {
     args.push("--start-ms", String(startMs));
@@ -123,4 +167,85 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
     await sleep(Math.min(pollMs, remaining));
   }
+}
+
+export async function GET(req: NextRequest): Promise<Response> {
+  const { searchParams } = req.nextUrl;
+  const sessionId = (searchParams.get("sessionId") || "").trim();
+  if (!sessionId) {
+    return new Response("sessionId is required", { status: 400 });
+  }
+
+  const startMsParam = searchParams.get("startMs");
+  const startMs = startMsParam ? Number(startMsParam) : null;
+  const endMsParam = searchParams.get("endMs");
+  const endMs = endMsParam ? Number(endMsParam) : null;
+  const eventTypesParam = searchParams.get("eventTypes");
+  const eventTypes =
+    eventTypesParam?.split(",").map((value) => value.trim()).filter(Boolean) || null;
+  const search = searchParams.get("search")?.trim();
+  const limitParam = searchParams.get("limit");
+  const limit = limitParam ? Number(limitParam) : null;
+  const dbPathInput = (searchParams.get("dbPath") || "").trim() || "data/timestone/timestone_events.sqlite3";
+  const pollMsParam = searchParams.get("pollMs");
+  const pollMs = pollMsParam ? Math.max(200, Number(pollMsParam)) : 500;
+  const heartbeatMsParam = searchParams.get("heartbeatMs");
+  const heartbeatMs = heartbeatMsParam ? Math.max(5000, Number(heartbeatMsParam)) : 15000;
+
+  let nextStartMs = Number.isFinite(startMs as number) ? Number(startMs) : null;
+  let lastHeartbeat = Date.now();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const encoder = new TextEncoder();
+      while (!req.signal.aborted) {
+        const args = await buildArgs({
+          sessionId,
+          dbPathInput,
+          startMs: nextStartMs,
+          endMs: Number.isFinite(endMs as number) ? Number(endMs) : null,
+          eventTypes,
+          search,
+          limit,
+        });
+        const { stdout, stderr, code } = await runPython(args);
+        if (code !== 0) {
+          const message = (stderr || stdout || "Failed to load timestone events").replace(/\s+/g, " ").trim();
+          controller.enqueue(encoder.encode(`event: error\ndata: ${message}\n\n`));
+          break;
+        }
+
+        let payload: any;
+        try {
+          payload = JSON.parse(stdout);
+        } catch {
+          controller.enqueue(encoder.encode("event: error\ndata: Invalid JSON\n\n"));
+          break;
+        }
+        const events = Array.isArray(payload?.events) ? payload.events : [];
+        if (events.length > 0) {
+          const lastEvent = events[events.length - 1];
+          if (Number.isFinite(lastEvent?.ts_wall_ms)) {
+            nextStartMs = Number(lastEvent.ts_wall_ms) + 1;
+          }
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+          lastHeartbeat = Date.now();
+        } else if (Date.now() - lastHeartbeat >= heartbeatMs) {
+          controller.enqueue(encoder.encode(": keep-alive\n\n"));
+          lastHeartbeat = Date.now();
+        }
+        await sleep(pollMs);
+      }
+      controller.close();
+    },
+    cancel() {},
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
 }

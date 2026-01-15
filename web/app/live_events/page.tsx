@@ -36,8 +36,8 @@ const API_BASE = (
 
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
 const MAX_EVENTS = 300;
-const LONG_POLL_WAIT_MS = 20000;
-const LONG_POLL_POLL_MS = 300;
+const SSE_POLL_MS = 500;
+const SSE_HEARTBEAT_MS = 15000;
 const TEXT_MERGE_WINDOW_MS = 1500;
 
 function safeJsonParse(input: string | null): any {
@@ -224,41 +224,22 @@ export default function LiveEventsPage() {
     });
   }, []);
 
-  const pollEvents = useCallback(async (): Promise<boolean> => {
+  const buildStreamUrl = useCallback(() => {
     if (!sessionId) {
-      return false;
+      return null;
     }
-    setStatus("Live");
     const startMs =
       lastWallMsRef.current !== null
         ? Math.max(0, lastWallMsRef.current - 1)
         : activeSession?.start_wall_ms;
-    try {
-      const payload: any = { sessionId };
-      if (startMs != null) {
-        payload.startMs = startMs;
-      }
-      payload.waitMs = LONG_POLL_WAIT_MS;
-      payload.pollMs = LONG_POLL_POLL_MS;
-      const res = await fetch("/api/timestone_events", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `Failed to load events (${res.status})`);
-      }
-      const data = await res.json();
-      ingestEvents(Array.isArray(data.events) ? data.events : []);
-      setLastUpdate(new Date().toLocaleTimeString());
-      return true;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load events");
-      setStatus("Error");
-      return false;
+    const params = new URLSearchParams({ sessionId });
+    if (startMs != null && Number.isFinite(startMs)) {
+      params.set("startMs", String(startMs));
     }
-  }, [activeSession?.start_wall_ms, ingestEvents, sessionId]);
+    params.set("pollMs", String(SSE_POLL_MS));
+    params.set("heartbeatMs", String(SSE_HEARTBEAT_MS));
+    return `/api/timestone_events?${params.toString()}`;
+  }, [activeSession?.start_wall_ms, sessionId]);
 
   useEffect(() => {
     refreshSessions();
@@ -273,19 +254,38 @@ export default function LiveEventsPage() {
       return;
     }
     let cancelled = false;
-    const run = async () => {
-      while (!cancelled) {
-        const ok = await pollEvents();
-        if (!ok) {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
+    let source: EventSource | null = null;
+    const connect = () => {
+      const url = buildStreamUrl();
+      if (!url || cancelled) {
+        return;
       }
+      setStatus("Live");
+      source = new EventSource(url);
+      source.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          ingestEvents(Array.isArray(payload.events) ? payload.events : []);
+          setLastUpdate(new Date().toLocaleTimeString());
+        } catch {
+          setError("Failed to parse live event stream.");
+        }
+      };
+      source.onerror = () => {
+        source?.close();
+        source = null;
+        if (!cancelled) {
+          setStatus("Reconnecting...");
+          setTimeout(connect, 1500);
+        }
+      };
     };
-    run();
+    connect();
     return () => {
       cancelled = true;
+      source?.close();
     };
-  }, [pollEvents, sessionId]);
+  }, [buildStreamUrl, ingestEvents, sessionId]);
 
   const eventCount = events.length;
   const displayEvents = useMemo(() => mergeTextInputEvents(events), [events]);
