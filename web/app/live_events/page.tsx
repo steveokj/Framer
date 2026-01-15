@@ -30,7 +30,6 @@ type EventView = TimestoneEvent & {
 
 type EventGroup = {
   id: string;
-  event_type: string;
   window_key: string;
   window_label: string;
   events: EventView[];
@@ -163,9 +162,15 @@ function mergeTextInputEvents(events: EventView[]): EventView[] {
 }
 
 function windowKey(event: EventView): string {
+  if (event.event_type === "session_pause" || event.event_type === "session_resume") {
+    return `session:${event.event_type}`;
+  }
   const process = event.process_name || "";
   const title = event.window_title || "";
   const klass = event.window_class || "";
+  if (!process && !title && !klass) {
+    return "unknown";
+  }
   return `${process}||${title}||${klass}`;
 }
 
@@ -179,12 +184,11 @@ function groupConsecutiveEvents(events: EventView[]): EventGroup[] {
     const key = windowKey(event);
     const label = windowLabel(event);
     const last = groups[groups.length - 1];
-    if (last && last.event_type === event.event_type && last.window_key === key) {
+    if (last && last.window_key === key) {
       last.events.push(event);
     } else {
       groups.push({
         id: `${event.event_type}-${key}-${event.id}`,
-        event_type: event.event_type,
         window_key: key,
         window_label: label,
         events: [event],
@@ -500,9 +504,8 @@ export default function LiveEventsPage() {
                 const clipFiles = Array.isArray(payload?.files) ? payload.files : [];
                 const shortcut = latest.event_type === "key_shortcut" ? formatShortcut(payload) : null;
                 const expanded = expandedGroups.has(group.id);
-                const isSessionEvent =
-                  group.event_type === "session_pause" || group.event_type === "session_resume";
-                const isActiveWindow = group.event_type === "active_window_changed";
+                const isSessionPause = latest.event_type === "session_pause";
+                const isActiveWindow = latest.event_type === "active_window_changed";
                 const timeRange =
                   group.events.length > 1
                     ? `${formatWallTime(group.events[group.events.length - 1].ts_wall_ms)} -> ${formatWallTime(
@@ -516,15 +519,15 @@ export default function LiveEventsPage() {
                     style={{
                       borderRadius: 16,
                       padding: 16,
-                      border: isSessionEvent
+                      border: isSessionPause
                         ? "1px solid rgba(56, 189, 248, 0.6)"
                         : "1px solid rgba(30, 41, 59, 0.7)",
-                      background: isSessionEvent
+                      background: isSessionPause
                         ? "linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(15, 23, 42, 0.9))"
                         : "rgba(11, 17, 32, 0.9)",
                       display: "grid",
                       gap: 12,
-                      boxShadow: isSessionEvent ? "0 0 0 1px rgba(56, 189, 248, 0.2)" : "none",
+                      boxShadow: isSessionPause ? "0 0 0 1px rgba(56, 189, 248, 0.2)" : "none",
                     }}
                   >
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
@@ -545,7 +548,7 @@ export default function LiveEventsPage() {
                       >
                         {expanded ? "-" : "+"}
                       </button>
-                      <strong style={{ textTransform: "capitalize" }}>{group.event_type.replace(/_/g, " ")}</strong>
+                      <strong>{group.window_label}</strong>
                       <span style={{ color: "#cbd5f5" }}>{timeRange}</span>
                       {group.events.length > 1 ? (
                         <span
@@ -561,30 +564,8 @@ export default function LiveEventsPage() {
                           {group.events.length}x
                         </span>
                       ) : null}
-                      {group.events.length > 1 ? (
-                        <span
-                          style={{
-                            color: "#94a3b8",
-                            border: "1px solid rgba(148, 163, 184, 0.4)",
-                            borderRadius: 999,
-                            padding: "2px 8px",
-                            fontSize: 12,
-                          }}
-                        >
-                          Grouped
-                        </span>
-                      ) : null}
                     </div>
-                    <div
-                      style={{
-                        display: "grid",
-                        gap: 12,
-                        paddingLeft: 16,
-                        borderLeft: "2px solid rgba(56, 189, 248, 0.25)",
-                      }}
-                    >
-                      <div style={{ color: "#94a3b8" }}>{group.window_label}</div>
-
+                    <div style={{ display: "grid", gap: 12 }}>
                       {isActiveWindow ? (
                         <div
                           style={{
