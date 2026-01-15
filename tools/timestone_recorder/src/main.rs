@@ -1763,7 +1763,7 @@ fn flush_scroll_buffer(state: &RecorderState, buffer: &mut Option<ScrollBuffer>)
         window_title: None,
         window_class: None,
         window_rect: None,
-        mouse: Some(json!(mouse).to_string()),
+        mouse: Some(mouse),
         payload: json!({ "ticks": existing.ticks, "total_delta": existing.total_delta }),
     };
     state.sender.try_send(event).ok();
