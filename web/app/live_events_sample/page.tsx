@@ -122,7 +122,12 @@ function segmentByActiveWindow(events: SampleEvent[]): WindowSegment[] {
       current.events.push(event);
     }
   }
-  return segments.reverse();
+  return segments
+    .reverse()
+    .map((segment) => ({
+      ...segment,
+      events: [...segment.events].sort((a, b) => b.ts_wall_ms - a.ts_wall_ms),
+    }));
 }
 
 export default function LiveEventsSamplePage() {
@@ -160,14 +165,6 @@ export default function LiveEventsSamplePage() {
                 gap: 12,
               }}
             >
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-                <strong>{segment.window_label}</strong>
-                <span style={{ color: "#94a3b8" }}>
-                  {formatWallTime(segment.events[0].ts_wall_ms)} ->{" "}
-                  {formatWallTime(segment.events[segment.events.length - 1].ts_wall_ms)}
-                </span>
-                <span style={{ color: "#38bdf8" }}>{segment.events.length} events</span>
-              </div>
               <div style={{ display: "grid", gap: 10 }}>
                 {segment.events.map((event) => {
                   const payloadText =
