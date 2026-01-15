@@ -10,9 +10,11 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, STILL_ACTIVE, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, CREATE_NO_WINDOW, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
 };
@@ -366,6 +368,14 @@ fn get_status_from_files(data_dir: &Path) -> RecorderStatus {
         let _ = fs::remove_file(pause_path);
         return RecorderStatus::Stopped;
     }
+    if let Some(pid) = read_lock_pid(&lock_path) {
+        if !is_pid_running(pid) {
+            let _ = fs::remove_file(&lock_path);
+            let pause_path = data_dir.join("pause.signal");
+            let _ = fs::remove_file(pause_path);
+            return RecorderStatus::Stopped;
+        }
+    }
     let pause_path = data_dir.join("pause.signal");
     if pause_path.exists() {
         RecorderStatus::Paused
@@ -384,6 +394,50 @@ fn wait_for_lock(data_dir: &Path, timeout_ms: u64) -> bool {
         std::thread::sleep(Duration::from_millis(200));
     }
     false
+}
+
+fn wait_for_lock_clear(data_dir: &Path, timeout_ms: u64) -> bool {
+    let lock_path = data_dir.join("recorder.lock");
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if !lock_path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+fn read_lock_pid(lock_path: &Path) -> Option<u32> {
+    let contents = fs::read_to_string(lock_path).ok()?;
+    for line in contents.lines() {
+        let mut parts = line.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if key == "pid" {
+            if let Ok(pid) = value.parse::<u32>() {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+fn is_pid_running(pid: u32) -> bool {
+    let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(handle) => handle,
+        Err(_) => return false,
+    };
+    if handle.is_invalid() {
+        return false;
+    }
+    let mut exit_code: u32 = 0;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) }.is_ok();
+    let _ = unsafe { CloseHandle(handle) };
+    if !ok {
+        return false;
+    }
+    exit_code == STILL_ACTIVE.0 as u32
 }
 
 fn update_status() {
@@ -419,6 +473,14 @@ fn dispatch_command(action: &str, show_dialog: bool) {
             run_command_async(&command, &action).map(|_| {
                 println!("[tray] waiting for recorder to start...");
                 wait_for_lock(&data_dir, 15000)
+            })
+        } else if action == "stop" {
+            run_command(&command, &action).map(|output| {
+                if !output.trim().is_empty() {
+                    println!("[tray] {}", output.trim());
+                }
+                println!("[tray] waiting for recorder to stop...");
+                wait_for_lock_clear(&data_dir, 15000)
             })
         } else {
             run_command(&command, &action).map(|output| {
