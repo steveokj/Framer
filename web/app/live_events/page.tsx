@@ -28,6 +28,14 @@ type EventView = TimestoneEvent & {
   mouseData: any;
 };
 
+type EventGroup = {
+  id: string;
+  event_type: string;
+  window_key: string;
+  window_label: string;
+  events: EventView[];
+};
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
@@ -154,6 +162,38 @@ function mergeTextInputEvents(events: EventView[]): EventView[] {
   return merged.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
 }
 
+function windowKey(event: EventView): string {
+  const process = event.process_name || "";
+  const title = event.window_title || "";
+  const klass = event.window_class || "";
+  return `${process}||${title}||${klass}`;
+}
+
+function windowLabel(event: EventView): string {
+  return event.window_title || event.process_name || event.window_class || "Unknown window";
+}
+
+function groupConsecutiveEvents(events: EventView[]): EventGroup[] {
+  const groups: EventGroup[] = [];
+  for (const event of events) {
+    const key = windowKey(event);
+    const label = windowLabel(event);
+    const last = groups[groups.length - 1];
+    if (last && last.event_type === event.event_type && last.window_key === key) {
+      last.events.push(event);
+    } else {
+      groups.push({
+        id: `${event.event_type}-${key}-${event.id}`,
+        event_type: event.event_type,
+        window_key: key,
+        window_label: label,
+        events: [event],
+      });
+    }
+  }
+  return groups;
+}
+
 export default function LiveEventsPage() {
   const [sessions, setSessions] = useState<TimestoneSession[]>([]);
   const [sessionId, setSessionId] = useState("");
@@ -162,6 +202,7 @@ export default function LiveEventsPage() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(true);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
 
   const lastWallMsRef = useRef<number | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
@@ -294,6 +335,30 @@ export default function LiveEventsPage() {
 
   const eventCount = events.length;
   const displayEvents = useMemo(() => mergeTextInputEvents(events), [events]);
+  const groupedEvents = useMemo(() => groupConsecutiveEvents(displayEvents), [displayEvents]);
+  const allExpanded = groupedEvents.length > 0 && groupedEvents.every((group) => expandedGroups.has(group.id));
+  const toggleGroup = useCallback((id: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+  const setAllExpanded = useCallback(
+    (expanded: boolean) => {
+      setExpandedGroups(() => {
+        if (!expanded) {
+          return new Set();
+        }
+        return new Set(groupedEvents.map((group) => group.id));
+      });
+    },
+    [groupedEvents]
+  );
 
   return (
     <div className="container">
@@ -386,16 +451,31 @@ export default function LiveEventsPage() {
           </section>
 
           <section style={{ display: "grid", gap: 16 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+              <strong style={{ color: "#cbd5f5" }}>Grouped view</strong>
+              <button
+                type="button"
+                onClick={() => setAllExpanded(!allExpanded)}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  border: "1px solid #1e293b",
+                  background: "rgba(15, 23, 42, 0.7)",
+                  color: "#e2e8f0",
+                  cursor: "pointer",
+                  fontSize: 12,
+                }}
+              >
+                {allExpanded ? "Collapse all" : "Expand all"}
+              </button>
+            </div>
             {eventCount === 0 ? (
               <div style={{ color: "#94a3b8" }}>No events yet.</div>
             ) : (
-              displayEvents.map((event) => {
-                const payload = event.payloadData || {};
-                const mouse = event.mouseData || {};
-                const wallTime = formatWallTime(event.ts_wall_ms);
-                const monoTime = formatDurationMs(event.ts_mono_ms);
-                const windowLabel = event.window_title || event.process_name || event.window_class || "Unknown window";
-                const shortcut = event.event_type === "key_shortcut" ? formatShortcut(payload) : null;
+              groupedEvents.map((group) => {
+                const latest = group.events[0];
+                const payload = latest.payloadData || {};
+                const mouse = latest.mouseData || {};
                 const clipboardPath = payload?.path ? String(payload.path) : null;
                 const clipboardUrl = clipboardPath ? buildFileUrl(clipboardPath) : null;
                 const clipTextValue = payload?.final_text
@@ -404,27 +484,82 @@ export default function LiveEventsPage() {
                     ? String(payload.text)
                     : null;
                 const clipFiles = Array.isArray(payload?.files) ? payload.files : [];
+                const shortcut = latest.event_type === "key_shortcut" ? formatShortcut(payload) : null;
+                const expanded = expandedGroups.has(group.id);
+                const isSessionEvent =
+                  group.event_type === "session_pause" || group.event_type === "session_resume";
+                const isActiveWindow = group.event_type === "active_window_changed";
+                const timeRange =
+                  group.events.length > 1
+                    ? `${formatWallTime(group.events[group.events.length - 1].ts_wall_ms)} -> ${formatWallTime(
+                        group.events[0].ts_wall_ms
+                      )}`
+                    : formatWallTime(latest.ts_wall_ms);
 
                 return (
                   <div
-                    key={event.id}
+                    key={group.id}
                     style={{
-                      borderRadius: 14,
+                      borderRadius: 16,
                       padding: 16,
-                      border: "1px solid rgba(30, 41, 59, 0.7)",
-                      background: "rgba(11, 17, 32, 0.9)",
+                      border: isSessionEvent
+                        ? "1px solid rgba(56, 189, 248, 0.6)"
+                        : "1px solid rgba(30, 41, 59, 0.7)",
+                      background: isSessionEvent
+                        ? "linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(15, 23, 42, 0.9))"
+                        : "rgba(11, 17, 32, 0.9)",
                       display: "grid",
                       gap: 12,
+                      boxShadow: isSessionEvent ? "0 0 0 1px rgba(56, 189, 248, 0.2)" : "none",
                     }}
                   >
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-                      <strong style={{ textTransform: "capitalize" }}>{event.event_type.replace(/_/g, " ")}</strong>
-                      <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
-                      <span style={{ color: "#64748b" }}>+{monoTime}</span>
+                      <button
+                        type="button"
+                        onClick={() => toggleGroup(group.id)}
+                        style={{
+                          width: 28,
+                          height: 28,
+                          borderRadius: 8,
+                          border: "1px solid #1e293b",
+                          background: "rgba(15, 23, 42, 0.6)",
+                          color: "#e2e8f0",
+                          cursor: "pointer",
+                        }}
+                        aria-label={expanded ? "Collapse" : "Expand"}
+                        title={expanded ? "Collapse" : "Expand"}
+                      >
+                        {expanded ? "-" : "+"}
+                      </button>
+                      <strong style={{ textTransform: "capitalize" }}>{group.event_type.replace(/_/g, " ")}</strong>
+                      <span style={{ color: "#cbd5f5" }}>{timeRange}</span>
+                      <span style={{ color: "#38bdf8" }}>{group.events.length}x</span>
                     </div>
-                    <div style={{ color: "#94a3b8" }}>{windowLabel}</div>
+                    <div style={{ color: "#94a3b8" }}>{group.window_label}</div>
 
-                    {event.event_type === "clipboard_text" && clipTextValue ? (
+                    {isActiveWindow ? (
+                      <div
+                        style={{
+                          borderRadius: 12,
+                          padding: 12,
+                          background: "rgba(15, 23, 42, 0.7)",
+                          border: "1px solid rgba(30, 41, 59, 0.6)",
+                          display: "grid",
+                          gap: 6,
+                        }}
+                      >
+                        <strong>Window focus</strong>
+                        <div style={{ color: "#cbd5f5" }}>{group.window_label}</div>
+                        {latest.process_name ? (
+                          <div style={{ color: "#94a3b8" }}>Process: {latest.process_name}</div>
+                        ) : null}
+                        {latest.window_class ? (
+                          <div style={{ color: "#64748b" }}>Class: {latest.window_class}</div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    {latest.event_type === "clipboard_text" && clipTextValue ? (
                       <div style={{ display: "grid", gap: 8 }}>
                         <strong>Clipboard text</strong>
                         <div
@@ -443,7 +578,7 @@ export default function LiveEventsPage() {
                       </div>
                     ) : null}
 
-                    {event.event_type === "clipboard_image" && clipboardPath ? (
+                    {latest.event_type === "clipboard_image" && clipboardPath ? (
                       <div style={{ display: "grid", gap: 8 }}>
                         <strong>Clipboard image</strong>
                         <span style={{ color: "#94a3b8" }}>
@@ -460,7 +595,7 @@ export default function LiveEventsPage() {
                       </div>
                     ) : null}
 
-                    {event.event_type === "clipboard_files" && clipFiles.length > 0 ? (
+                    {latest.event_type === "clipboard_files" && clipFiles.length > 0 ? (
                       <div style={{ display: "grid", gap: 8 }}>
                         <strong>Clipboard files</strong>
                         <div style={{ display: "grid", gap: 6 }}>
@@ -476,21 +611,64 @@ export default function LiveEventsPage() {
                       </div>
                     ) : null}
 
-                    {event.event_type === "key_shortcut" && shortcut ? (
+                    {latest.event_type === "key_shortcut" && shortcut ? (
                       <div style={{ color: "#cbd5f5" }}>Shortcut: {shortcut}</div>
                     ) : null}
 
-                    {event.event_type === "key_down" && payload?.key ? (
+                    {latest.event_type === "key_down" && payload?.key ? (
                       <div style={{ color: "#cbd5f5" }}>Key: {payload.key}</div>
                     ) : null}
 
-                    {event.event_type === "text_input" && clipTextValue ? (
+                    {latest.event_type === "text_input" && clipTextValue ? (
                       <div style={{ color: "#cbd5f5" }}>Typed: {clipText(clipTextValue, 200)}</div>
                     ) : null}
 
-                    {event.event_type === "mouse_click" && mouse?.x != null && mouse?.y != null ? (
+                    {latest.event_type === "mouse_click" && mouse?.x != null && mouse?.y != null ? (
                       <div style={{ color: "#cbd5f5" }}>
                         Click @ {mouse.x},{mouse.y}
+                      </div>
+                    ) : null}
+
+                    {expanded ? (
+                      <div style={{ display: "grid", gap: 8 }}>
+                        {group.events.slice(1).map((event) => {
+                          const eventPayload = event.payloadData || {};
+                          const eventMouse = event.mouseData || {};
+                          const eventTime = formatWallTime(event.ts_wall_ms);
+                          const eventText = eventPayload?.final_text
+                            ? String(eventPayload.final_text)
+                            : eventPayload?.text
+                              ? String(eventPayload.text)
+                              : null;
+                          return (
+                            <div
+                              key={event.id}
+                              style={{
+                                borderRadius: 10,
+                                padding: "10px 12px",
+                                border: "1px solid rgba(30, 41, 59, 0.6)",
+                                background: "rgba(9, 14, 26, 0.9)",
+                                display: "grid",
+                                gap: 6,
+                              }}
+                            >
+                              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                <span style={{ color: "#cbd5f5", fontSize: 12 }}>{eventTime}</span>
+                                <span style={{ color: "#64748b", fontSize: 12 }}>
+                                  {event.event_type.replace(/_/g, " ")}
+                                </span>
+                              </div>
+                              {event.event_type === "text_input" && eventText ? (
+                                <div style={{ color: "#cbd5f5" }}>{clipText(eventText, 160)}</div>
+                              ) : null}
+                              {event.event_type === "mouse_click" && eventMouse?.x != null && eventMouse?.y != null ? (
+                                <div style={{ color: "#94a3b8" }}>
+                                  Click @ {eventMouse.x},{eventMouse.y}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : null}
                   </div>
@@ -503,3 +681,5 @@ export default function LiveEventsPage() {
     </div>
   );
 }
+
+
