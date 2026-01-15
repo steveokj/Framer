@@ -373,27 +373,9 @@ export default function LiveEventsPage() {
         : null;
     const clipFiles = Array.isArray(payload?.files) ? payload.files : [];
     const shortcut = event.event_type === "key_shortcut" ? formatShortcut(payload) : null;
-    const isActiveWindow = event.event_type === "active_window_changed";
 
     return (
       <>
-        {isActiveWindow ? (
-          <div
-            style={{
-              borderRadius: 12,
-              padding: 12,
-              background: "rgba(15, 23, 42, 0.7)",
-              border: "1px solid rgba(30, 41, 59, 0.6)",
-              display: "grid",
-              gap: 6,
-            }}
-          >
-            <strong>Window focus</strong>
-            <div style={{ color: "#cbd5f5" }}>{windowLabel(event)}</div>
-            {event.process_name ? <div style={{ color: "#94a3b8" }}>Process: {event.process_name}</div> : null}
-            {event.window_class ? <div style={{ color: "#64748b" }}>Class: {event.window_class}</div> : null}
-          </div>
-        ) : null}
 
         {event.event_type === "clipboard_text" && clipTextValue ? (
           <div style={{ display: "grid", gap: 8 }}>
@@ -606,7 +588,7 @@ export default function LiveEventsPage() {
                                 gap: 6,
                               }}
                             >
-                              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
                                 {row.events.length > 1 ? (
                                   <button
                                     type="button"
@@ -625,11 +607,14 @@ export default function LiveEventsPage() {
                                     {expanded ? "-" : "+"}
                                   </button>
                                 ) : null}
-                                <span style={{ color: "#cbd5f5", fontSize: 12 }}>
+                                <strong style={{ textTransform: "capitalize" }}>
+                                  {row.event_type.replace(/_/g, " ")}
+                                </strong>
+                                <span style={{ color: "#cbd5f5" }}>
                                   {formatWallTime(row.events[0].ts_wall_ms)}
                                 </span>
-                                <span style={{ color: "#64748b", fontSize: 12 }}>
-                                  {row.event_type.replace(/_/g, " ")} x{row.events.length}
+                                <span style={{ color: "#64748b" }}>
+                                  +{formatDurationMs(row.events[0].ts_mono_ms)}
                                 </span>
                               </div>
                               {renderEventDetails(row.events[0])}
