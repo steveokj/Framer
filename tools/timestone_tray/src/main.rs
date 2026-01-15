@@ -472,7 +472,13 @@ fn dispatch_command(action: &str, show_dialog: bool) {
         let result = if action == "start" {
             run_command_async(&command, &action).map(|_| {
                 println!("[tray] waiting for recorder to start...");
-                wait_for_lock(&data_dir, 15000)
+                let ok = wait_for_lock(&data_dir, 15000);
+                if ok {
+                    println!("[tray] Recorder started.");
+                } else {
+                    println!("[tray] Recorder did not start in time.");
+                }
+                ok
             })
         } else if action == "stop" {
             run_command(&command, &action).map(|output| {
@@ -480,12 +486,23 @@ fn dispatch_command(action: &str, show_dialog: bool) {
                     println!("[tray] {}", output.trim());
                 }
                 println!("[tray] waiting for recorder to stop...");
-                wait_for_lock_clear(&data_dir, 15000)
+                let ok = wait_for_lock_clear(&data_dir, 15000);
+                if ok {
+                    println!("[tray] Recorder stopped.");
+                } else {
+                    println!("[tray] Recorder did not stop in time.");
+                }
+                ok
             })
         } else {
             run_command(&command, &action).map(|output| {
                 if !output.trim().is_empty() {
                     println!("[tray] {}", output.trim());
+                }
+                if action == "pause" {
+                    println!("[tray] Recorder paused.");
+                } else if action == "resume" {
+                    println!("[tray] Recorder resumed.");
                 }
                 true
             })
