@@ -1,19 +1,15 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
-use std::ffi::c_void;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{BOOL, HICON, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::Win32::UI::Shell::{
@@ -21,8 +17,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetMessageW, LoadIconW, LoadImageW, MessageBoxW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
-    SetTimer, TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HMENU, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE,
+    GetMessageW, LoadIconW, LoadImageW, MessageBoxW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
+    TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HICON, HMENU, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE, MB_OK,
     MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_TOPALIGN, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP,
     WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
@@ -184,7 +180,7 @@ fn load_icon(base_dir: &Path, icon_input: Option<&str>) -> Result<HICON> {
     if let Some(input) = icon_input {
         if let Some(path) = resolve_icon_path(base_dir, input)? {
             let wide = to_wide(path.to_string_lossy().as_ref());
-            let icon = unsafe {
+            if let Ok(icon) = unsafe {
                 LoadImageW(
                     None,
                     PCWSTR(wide.as_ptr()),
@@ -193,9 +189,10 @@ fn load_icon(base_dir: &Path, icon_input: Option<&str>) -> Result<HICON> {
                     0,
                     LR_LOADFROMFILE | LR_DEFAULTSIZE,
                 )
-            };
-            if !icon.is_invalid() {
-                return Ok(HICON(icon.0));
+            } {
+                if !icon.is_invalid() {
+                    return Ok(HICON(icon.0));
+                }
             }
         }
     }
@@ -292,7 +289,7 @@ fn run_command(command: &RecorderCommand, action: &str) -> Result<String> {
     let mut cmd = Command::new(&command.exe);
     cmd.args(&command.args_prefix);
     cmd.arg(action);
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.creation_flags(CREATE_NO_WINDOW.0);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = cmd.output().context("Failed to run recorder command")?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -425,7 +422,10 @@ fn handle_menu_command(cmd: u16) {
 
 fn show_menu(hwnd: HWND) {
     unsafe {
-        let menu = CreatePopupMenu();
+        let menu = match CreatePopupMenu() {
+            Ok(menu) => menu,
+            Err(_) => return,
+        };
         if menu.0 == 0 {
             return;
         }
