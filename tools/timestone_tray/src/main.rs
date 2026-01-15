@@ -247,6 +247,11 @@ fn set_recorder_flags(data_dir: &Path, click: bool, scroll: bool) -> Result<()> 
     write_recorder_config(data_dir, &config)
 }
 
+fn write_reload_signal(data_dir: &Path) {
+    let path = data_dir.join("reload_config.signal");
+    let _ = fs::write(path, b"reload");
+}
+
 fn find_default_recorder_exe() -> Option<String> {
     let cwd = env::current_dir().ok()?;
     let candidates = [
@@ -685,6 +690,7 @@ fn handle_menu_command(cmd: u16) {
                 let data_dir = state.lock().unwrap().data_dir.clone();
                 let enabled = get_recorder_flag(&data_dir, "emit_mouse_click", true);
                 let _ = set_recorder_flag(&data_dir, "emit_mouse_click", !enabled);
+                write_reload_signal(&data_dir);
             }
         }
         CMD_SETTINGS_SCROLL => {
@@ -692,12 +698,14 @@ fn handle_menu_command(cmd: u16) {
                 let data_dir = state.lock().unwrap().data_dir.clone();
                 let enabled = get_recorder_flag(&data_dir, "emit_mouse_scroll", false);
                 let _ = set_recorder_flag(&data_dir, "emit_mouse_scroll", !enabled);
+                write_reload_signal(&data_dir);
             }
         }
         CMD_SETTINGS_BOTH => {
             if let Some(state) = STATE.get() {
                 let data_dir = state.lock().unwrap().data_dir.clone();
                 let _ = set_recorder_flags(&data_dir, true, true);
+                write_reload_signal(&data_dir);
             }
         }
         _ => {}

@@ -58,6 +58,7 @@ const DB_NAME: &str = "timestone_events.sqlite3";
 const LOCK_FILE: &str = "recorder.lock";
 const STOP_FILE: &str = "stop.signal";
 const PAUSE_FILE: &str = "pause.signal";
+const RELOAD_CONFIG_FILE: &str = "reload_config.signal";
 const CONFIG_FILE: &str = "config.json";
 const CLIPBOARD_DIR: &str = "clipboard";
 const ICONS_DIR: &str = "icons";
@@ -78,9 +79,9 @@ struct RecorderConfig {
     mouse_hz: u64,
     snapshot_hz: u64,
     emit_snapshots: bool,
-    emit_mouse_move: bool,
-    emit_mouse_click: bool,
-    emit_mouse_scroll: bool,
+    emit_mouse_move: AtomicBool,
+    emit_mouse_click: AtomicBool,
+    emit_mouse_scroll: AtomicBool,
     capture_clipboard: bool,
     clipboard_poll_ms: u64,
     clipboard_debounce_ms: u64,
@@ -369,9 +370,9 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         capture_raw_keys: config.capture_raw_keys,
         raw_keys_mode: parse_raw_keys_mode(&config.raw_keys_mode),
         suppress_raw_keys_on_shortcut: config.suppress_raw_keys_on_shortcut,
-        emit_mouse_move: config.emit_mouse_move,
-        emit_mouse_click: config.emit_mouse_click,
-        emit_mouse_scroll: config.emit_mouse_scroll,
+        emit_mouse_move: AtomicBool::new(config.emit_mouse_move),
+        emit_mouse_click: AtomicBool::new(config.emit_mouse_click),
+        emit_mouse_scroll: AtomicBool::new(config.emit_mouse_scroll),
         pressed_keys: Mutex::new(HashSet::new()),
         safe_text_only: config.safe_text_only,
         allowlist_processes: config.allowlist_processes.clone(),
@@ -417,6 +418,13 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     let stop_handle = spawn_stop_watcher(state.clone(), stop_signal_path, shutdown.clone(), main_thread_id);
     let pause_signal_path = base_dir.join(PAUSE_FILE);
     let pause_handle = spawn_pause_watcher(state.clone(), pause_signal_path, shutdown.clone());
+    let reload_signal_path = base_dir.join(RELOAD_CONFIG_FILE);
+    let reload_handle = spawn_config_reload_watcher(
+        state.clone(),
+        reload_signal_path,
+        base_dir.clone(),
+        shutdown.clone(),
+    );
     let snapshot_handle = if config.emit_snapshots {
         Some(spawn_snapshot_loop(
             state.clone(),
@@ -478,6 +486,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
 
     stop_handle.join().ok();
     pause_handle.join().ok();
+    reload_handle.join().ok();
     if let Some(handle) = snapshot_handle {
         handle.join().ok();
     }
@@ -545,6 +554,27 @@ fn spawn_pause_watcher(
                     send_session_event(&state, "session_resume", json!({ "note": "pause_signal" }));
                 }
                 last_paused = paused;
+            }
+            thread::sleep(interval);
+        }
+    })
+}
+
+fn spawn_config_reload_watcher(
+    state: Arc<RecorderState>,
+    reload_path: PathBuf,
+    base_dir: PathBuf,
+    shutdown: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let interval = Duration::from_millis(250);
+        while !shutdown.load(Ordering::SeqCst) {
+            if reload_path.exists() {
+                let _ = fs::remove_file(&reload_path);
+                if let Ok(config) = load_or_create_config(&base_dir.join(CONFIG_FILE)) {
+                    let config = normalize_config(config);
+                    apply_capture_flags(&state, &config);
+                }
             }
             thread::sleep(interval);
         }
@@ -788,6 +818,12 @@ fn normalize_config(mut config: RecorderConfig) -> RecorderConfig {
     config.allowlist_processes = normalize_process_list(config.allowlist_processes);
     config.blocklist_processes = normalize_process_list(config.blocklist_processes);
     config
+}
+
+fn apply_capture_flags(state: &RecorderState, config: &RecorderConfig) {
+    state.emit_mouse_move.store(config.emit_mouse_move, Ordering::SeqCst);
+    state.emit_mouse_click.store(config.emit_mouse_click, Ordering::SeqCst);
+    state.emit_mouse_scroll.store(config.emit_mouse_scroll, Ordering::SeqCst);
 }
 
 fn resolve_obs_video_path(config: &RecorderConfig, session: &SessionInfo) -> Option<String> {
@@ -1722,13 +1758,13 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
             };
 
             if event_type != "unknown" {
-                if event_type == "mouse_move" && !state.emit_mouse_move {
+                if event_type == "mouse_move" && !state.emit_mouse_move.load(Ordering::SeqCst) {
                     return CallNextHookEx(HHOOK(0), code, wparam, lparam);
                 }
-                if event_type == "mouse_click" && !state.emit_mouse_click {
+                if event_type == "mouse_click" && !state.emit_mouse_click.load(Ordering::SeqCst) {
                     return CallNextHookEx(HHOOK(0), code, wparam, lparam);
                 }
-                if event_type == "mouse_scroll" && !state.emit_mouse_scroll {
+                if event_type == "mouse_scroll" && !state.emit_mouse_scroll.load(Ordering::SeqCst) {
                     return CallNextHookEx(HHOOK(0), code, wparam, lparam);
                 }
                 let mono_ms = now_mono_ms(state);
