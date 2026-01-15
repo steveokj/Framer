@@ -6,7 +6,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::collections::{HashSet, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::env;
 use std::ffi::c_void;
 use std::fs;
@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use windows::core::PWSTR;
+use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HGLOBAL, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, STILL_ACTIVE, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::DataExchange::{
@@ -39,14 +39,18 @@ use windows::Win32::UI::Accessibility::{
     UIA_CONTROLTYPE_ID, UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, OBJID_WINDOW,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP,
+    CallNextHookEx, DestroyIcon, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetIconInfo, GetMessageW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, ICONINFO, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, HHOOK, KBDLLHOOKSTRUCT, MSG,
+    MSLLHOOKSTRUCT, OBJID_WINDOW, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
-use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+use windows::Win32::Graphics::Gdi::{
+    BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW,
+    SelectObject, DIB_RGB_COLORS,
+};
 
 const APP_DIR: &str = "data\\timestone";
 const DB_NAME: &str = "timestone_events.sqlite3";
@@ -55,6 +59,7 @@ const STOP_FILE: &str = "stop.signal";
 const PAUSE_FILE: &str = "pause.signal";
 const CONFIG_FILE: &str = "config.json";
 const CLIPBOARD_DIR: &str = "clipboard";
+const ICONS_DIR: &str = "icons";
 
 const CLIPBOARD_CF_DIB: u32 = 8;
 const CLIPBOARD_CF_DIBV5: u32 = 17;
@@ -172,6 +177,8 @@ struct RecorderState {
     text_snapshot_on_idle: bool,
     clipboard_dedupe_window_ms: i64,
     last_clipboard_hash: Mutex<Option<ClipboardHash>>,
+    app_icon_cache: Mutex<HashMap<String, String>>,
+    icons_dir: PathBuf,
     window_rect_debounce_ms: i64,
     window_tracker: Mutex<WindowTracker>,
 }
@@ -327,6 +334,11 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     let _com_guard = ComGuard::new(config.safe_text_only);
     let main_thread_id = unsafe { GetCurrentThreadId() };
 
+    let icons_dir = base_dir.join(ICONS_DIR);
+    if !icons_dir.exists() {
+        fs::create_dir_all(&icons_dir).context("Failed to create icons dir")?;
+    }
+
     let session_id = Uuid::new_v4().to_string();
     let start_wall_ms = now_wall_ms();
     let start_wall_iso = DateTime::<Local>::from(SystemTime::now()).to_rfc3339();
@@ -368,6 +380,8 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         text_snapshot_on_idle: config.text_snapshot_on_idle,
         clipboard_dedupe_window_ms: config.clipboard_dedupe_window_ms as i64,
         last_clipboard_hash: Mutex::new(None),
+        app_icon_cache: Mutex::new(HashMap::new()),
+        icons_dir: icons_dir.clone(),
         window_rect_debounce_ms: config.window_rect_debounce_ms as i64,
         window_tracker: Mutex::new(WindowTracker {
             last_hwnd: HWND(0),
@@ -1580,6 +1594,10 @@ fn spawn_window_rect_flush_loop(state: Arc<RecorderState>, shutdown: Arc<AtomicB
 }
 
 fn send_active_window_changed(state: &RecorderState, window_info: &WindowInfo) {
+    let icon_path = window_info
+        .process_name
+        .as_deref()
+        .and_then(|path| ensure_app_icon(state, path));
     let event = EventRecord {
         session_id: state.session_id.clone(),
         ts_wall_ms: now_wall_ms(),
@@ -1590,7 +1608,7 @@ fn send_active_window_changed(state: &RecorderState, window_info: &WindowInfo) {
         window_class: Some(window_info.class_name.clone()),
         window_rect: window_info.rect.clone(),
         mouse: None,
-        payload: json!({}),
+        payload: json!({ "app_icon_path": icon_path }),
     };
     state.sender.try_send(event).ok();
 }
@@ -2011,6 +2029,163 @@ fn normalize_process_name(process_name: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or(process_name)
         .to_ascii_lowercase()
+}
+
+fn hash_process_name(process_name: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    process_name.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn ensure_app_icon(state: &RecorderState, process_path: &str) -> Option<String> {
+    if process_path.is_empty() {
+        return None;
+    }
+    {
+        let cache = state.app_icon_cache.lock().unwrap();
+        if let Some(path) = cache.get(process_path) {
+            return Some(path.clone());
+        }
+    }
+
+    let hash = hash_process_name(process_path);
+    let icon_path = state.icons_dir.join(format!("{hash}.bmp"));
+    if icon_path.exists() {
+        let mut cache = state.app_icon_cache.lock().unwrap();
+        let path_string = icon_path.to_string_lossy().to_string();
+        cache.insert(process_path.to_string(), path_string.clone());
+        return Some(path_string);
+    }
+
+    if capture_icon_bmp(process_path, &icon_path).is_ok() {
+        let mut cache = state.app_icon_cache.lock().unwrap();
+        let path_string = icon_path.to_string_lossy().to_string();
+        cache.insert(process_path.to_string(), path_string.clone());
+        return Some(path_string);
+    }
+
+    None
+}
+
+fn capture_icon_bmp(process_path: &str, icon_path: &Path) -> Result<()> {
+    let mut wide: Vec<u16> = process_path.encode_utf16().collect();
+    wide.push(0);
+    let mut info = SHFILEINFOW::default();
+    let result = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            &mut info,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if result == 0 {
+        anyhow::bail!("SHGetFileInfoW failed");
+    }
+
+    let hicon = info.hIcon;
+    if hicon.0 == 0 {
+        anyhow::bail!("No icon handle");
+    }
+
+    let mut icon_info = ICONINFO::default();
+    unsafe {
+        if !GetIconInfo(hicon, &mut icon_info).as_bool() {
+            DestroyIcon(hicon);
+            anyhow::bail!("GetIconInfo failed");
+        }
+    }
+
+    let color_bitmap = if icon_info.hbmColor.0 != 0 {
+        icon_info.hbmColor
+    } else {
+        icon_info.hbmMask
+    };
+
+    let mut bitmap = BITMAP::default();
+    unsafe {
+        GetObjectW(color_bitmap, std::mem::size_of::<BITMAP>() as i32, Some(&mut bitmap as *mut _ as *mut c_void));
+    }
+
+    let width = bitmap.bmWidth;
+    let height = bitmap.bmHeight;
+    if width <= 0 || height <= 0 {
+        unsafe {
+            DeleteObject(icon_info.hbmColor);
+            DeleteObject(icon_info.hbmMask);
+            DestroyIcon(hicon);
+        }
+        anyhow::bail!("Invalid bitmap size");
+    }
+
+    let mut bmi = BITMAPINFO::default();
+    bmi.bmiHeader = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: width,
+        biHeight: height,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        biSizeImage: (width * height * 4) as u32,
+        ..Default::default()
+    };
+
+    let data_len = (width * height * 4) as usize;
+    let mut buffer = vec![0u8; data_len];
+    let hdc = unsafe { CreateCompatibleDC(None) };
+    let old_obj = unsafe { SelectObject(hdc, color_bitmap) };
+    let scanlines = unsafe {
+        GetDIBits(
+            hdc,
+            color_bitmap,
+            0,
+            height as u32,
+            Some(buffer.as_mut_ptr() as *mut c_void),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        )
+    };
+    unsafe {
+        SelectObject(hdc, old_obj);
+        DeleteDC(hdc);
+        DeleteObject(icon_info.hbmColor);
+        DeleteObject(icon_info.hbmMask);
+        DestroyIcon(hicon);
+    }
+    if scanlines == 0 {
+        anyhow::bail!("GetDIBits failed");
+    }
+
+    let file_header_size = 14u32;
+    let info_header_size = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    let file_size = file_header_size + info_header_size + data_len as u32;
+
+    let mut file = fs::File::create(icon_path).context("Failed to create icon file")?;
+    file.write_all(&[
+        0x42, 0x4d,
+        (file_size & 0xFF) as u8,
+        ((file_size >> 8) & 0xFF) as u8,
+        ((file_size >> 16) & 0xFF) as u8,
+        ((file_size >> 24) & 0xFF) as u8,
+        0, 0, 0, 0,
+        (file_header_size + info_header_size) as u8,
+        0, 0, 0,
+    ])?;
+
+    file.write_all(&bmi.bmiHeader.biSize.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biWidth.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biHeight.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biPlanes.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biBitCount.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biCompression.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biSizeImage.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biXPelsPerMeter.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biYPelsPerMeter.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biClrUsed.to_le_bytes())?;
+    file.write_all(&bmi.bmiHeader.biClrImportant.to_le_bytes())?;
+    file.write_all(&buffer)?;
+    Ok(())
 }
 
 fn handle_text_key(state: &RecorderState, window_info: Option<WindowInfo>, vk: u32, scan_code: u32) {

@@ -727,7 +727,9 @@ export default function LiveEventsPage() {
                         const eventIcon = resolveIconSrc(EVENT_ICON_MAP[event.event_type]);
                         const appIcon = resolveIconSrc(
                           event.event_type === "active_window_changed"
-                            ? APP_ICON_MAP[event.process_name || ""] || null
+                            ? (event.payloadData?.app_icon_path as string | undefined) ||
+                                APP_ICON_MAP[event.process_name || ""] ||
+                                null
                             : null
                         );
                         const isActiveWindow = event.event_type === "active_window_changed";
