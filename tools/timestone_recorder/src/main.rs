@@ -1941,6 +1941,8 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 } else {
                     pressed.remove(&vk);
                 }
+                let is_repeat = is_down && was_pressed;
+                let is_injected = (data.flags & 0x10) != 0;
 
                 let modifiers = current_modifiers(&pressed);
                 let is_modifier = is_modifier_key(vk);
@@ -1970,6 +1972,9 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         payload: json!({
                             "key": vk_to_name(vk),
                             "modifiers": modifiers,
+                            "repeat": is_repeat,
+                            "injected": is_injected,
+                            "scan_code": data.scanCode,
                         }),
                     };
                     state.sender.try_send(event).ok();
@@ -2009,6 +2014,9 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         payload: json!({
                             "key": vk_to_name(vk),
                             "vk": vk,
+                            "repeat": is_repeat,
+                            "injected": is_injected,
+                            "scan_code": data.scanCode,
                         }),
                     };
                     state.sender.try_send(event).ok();
