@@ -12,7 +12,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage, RegisterClassW,
     SetLayeredWindowAttributes, SetTimer, ShowWindow, TranslateMessage, LWA_COLORKEY, MSG, SW_SHOW, WM_DESTROY,
-    WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    WM_LBUTTONDOWN, WM_PAINT, WM_RBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 static CONFIG: OnceLock<OverlayConfig> = OnceLock::new();
@@ -134,7 +135,9 @@ fn main() -> windows::core::Result<()> {
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_COLORKEY);
         ShowWindow(hwnd, SW_SHOW);
         let duration_ms = CONFIG.get().unwrap().duration_ms;
-        SetTimer(hwnd, TIMER_ID, duration_ms, None);
+        if duration_ms > 0 {
+            SetTimer(hwnd, TIMER_ID, duration_ms, None);
+        }
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND(0), 0, 0).into() {
@@ -220,6 +223,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             if wparam.0 as usize == TIMER_ID {
                 PostQuitMessage(0);
             }
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
+            PostQuitMessage(0);
             LRESULT(0)
         }
         WM_DESTROY => {
