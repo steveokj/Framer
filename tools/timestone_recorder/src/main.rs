@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HGLOBAL, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, STILL_ACTIVE, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::DataExchange::{
@@ -46,11 +46,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
-use windows::Win32::UI::Shell::{DragQueryFileW, HDROP, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+use windows::Win32::UI::Shell::{
+    DragQueryFileW, HDROP, IVirtualDesktopManager, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+    VirtualDesktopManager,
+};
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::Graphics::Gdi::{
-    BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW,
-    SelectObject, DIB_RGB_COLORS,
+    BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+    GetMonitorInfoW, GetObjectW, MonitorFromWindow, SelectObject, DIB_RGB_COLORS, MONITORINFO, MONITORINFOEXW,
+    MONITOR_DEFAULTTONEAREST,
 };
 
 const APP_DIR: &str = "data\\timestone";
@@ -225,6 +229,7 @@ struct RecorderState {
     window_rect_debounce_ms: i64,
     window_tracker: Mutex<WindowTracker>,
     scroll_buffer: Mutex<Option<ScrollBuffer>>,
+    last_virtual_desktop_id: Mutex<Option<String>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -249,6 +254,20 @@ struct RectInfo {
     bottom: i32,
     width: i32,
     height: i32,
+}
+
+#[derive(Serialize, Clone)]
+struct MonitorInfo {
+    name: String,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    work_left: i32,
+    work_top: i32,
+    work_right: i32,
+    work_bottom: i32,
+    is_primary: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -456,6 +475,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
             pending_rect: None,
         }),
         scroll_buffer: Mutex::new(None),
+        last_virtual_desktop_id: Mutex::new(None),
     });
     let _ = STATE.set(state.clone());
 
@@ -1232,6 +1252,8 @@ struct WindowInfo {
     class_name: String,
     rect: Option<RectInfo>,
     process_name: Option<String>,
+    monitor: Option<MonitorInfo>,
+    virtual_desktop_id: Option<String>,
 }
 
 struct WindowTracker {
@@ -1272,11 +1294,15 @@ fn window_info_for_hwnd(hwnd: HWND) -> Option<WindowInfo> {
     let class_name = get_window_class(hwnd);
     let rect = get_window_rect(hwnd);
     let process_name = get_process_name(hwnd);
+    let monitor = get_monitor_info(hwnd);
+    let virtual_desktop_id = get_virtual_desktop_id(hwnd);
     Some(WindowInfo {
         title,
         class_name,
         rect,
         process_name,
+        monitor,
+        virtual_desktop_id,
     })
 }
 
@@ -1661,6 +1687,76 @@ fn get_process_name(hwnd: HWND) -> Option<String> {
     }
 }
 
+fn get_monitor_info(hwnd: HWND) -> Option<MonitorInfo> {
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if monitor.0 == 0 {
+            return None;
+        }
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if !GetMonitorInfoW(
+            monitor,
+            &mut info as *mut MONITORINFOEXW as *mut MONITORINFO,
+        )
+        .as_bool()
+        {
+            return None;
+        }
+        let name_len = info
+            .szDevice
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(info.szDevice.len());
+        let name = String::from_utf16_lossy(&info.szDevice[..name_len]);
+        Some(MonitorInfo {
+            name,
+            left: info.monitorInfo.rcMonitor.left,
+            top: info.monitorInfo.rcMonitor.top,
+            right: info.monitorInfo.rcMonitor.right,
+            bottom: info.monitorInfo.rcMonitor.bottom,
+            work_left: info.monitorInfo.rcWork.left,
+            work_top: info.monitorInfo.rcWork.top,
+            work_right: info.monitorInfo.rcWork.right,
+            work_bottom: info.monitorInfo.rcWork.bottom,
+            is_primary: (info.monitorInfo.dwFlags & 1) != 0,
+        })
+    }
+}
+
+fn guid_to_string(guid: GUID) -> String {
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        guid.data4[0],
+        guid.data4[1],
+        guid.data4[2],
+        guid.data4[3],
+        guid.data4[4],
+        guid.data4[5],
+        guid.data4[6],
+        guid.data4[7]
+    )
+}
+
+fn get_virtual_desktop_id(hwnd: HWND) -> Option<String> {
+    unsafe {
+        let mut did_init = false;
+        if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() {
+            did_init = true;
+        }
+        let manager: IVirtualDesktopManager =
+            CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER).ok()?;
+        let guid = manager.GetWindowDesktopId(hwnd).ok()?;
+        if did_init {
+            CoUninitialize();
+        }
+        Some(guid_to_string(guid))
+    }
+}
+
 fn poll_active_window(state: &RecorderState) {
     if let Some((hwnd, window_info)) = active_window_info() {
         update_window_events(state, hwnd, window_info);
@@ -1672,6 +1768,16 @@ fn update_window_events(state: &RecorderState, hwnd: HWND, window_info: WindowIn
         return;
     }
     let now_ms = now_mono_ms(state);
+    if let Some(new_id) = window_info.virtual_desktop_id.as_deref() {
+        let mut last_id = state.last_virtual_desktop_id.lock().unwrap();
+        if last_id.as_deref() != Some(new_id) {
+            let previous = last_id.clone();
+            *last_id = Some(new_id.to_string());
+            if let Some(old_id) = previous {
+                send_virtual_desktop_changed(state, &old_id, new_id);
+            }
+        }
+    }
     let (is_new, rect_changed) = {
         let mut tracker = state.window_tracker.lock().unwrap();
         let is_new = hwnd != tracker.last_hwnd;
@@ -1743,6 +1849,20 @@ fn send_active_window_changed(state: &RecorderState, window_info: &WindowInfo) {
         .process_name
         .as_deref()
         .and_then(|path| ensure_app_icon(state, path));
+    let monitor_payload = window_info.monitor.as_ref().map(|monitor| {
+        json!({
+            "name": monitor.name.clone(),
+            "left": monitor.left,
+            "top": monitor.top,
+            "right": monitor.right,
+            "bottom": monitor.bottom,
+            "work_left": monitor.work_left,
+            "work_top": monitor.work_top,
+            "work_right": monitor.work_right,
+            "work_bottom": monitor.work_bottom,
+            "is_primary": monitor.is_primary,
+        })
+    });
     let event = EventRecord {
         session_id: state.session_id.clone(),
         ts_wall_ms: now_wall_ms(),
@@ -1753,7 +1873,30 @@ fn send_active_window_changed(state: &RecorderState, window_info: &WindowInfo) {
         window_class: Some(window_info.class_name.clone()),
         window_rect: window_info.rect.clone(),
         mouse: None,
-        payload: json!({ "app_icon_path": icon_path }),
+        payload: json!({
+            "app_icon_path": icon_path,
+            "monitor": monitor_payload,
+            "virtual_desktop_id": window_info.virtual_desktop_id.clone(),
+        }),
+    };
+    state.sender.try_send(event).ok();
+}
+
+fn send_virtual_desktop_changed(state: &RecorderState, old_id: &str, new_id: &str) {
+    let event = EventRecord {
+        session_id: state.session_id.clone(),
+        ts_wall_ms: now_wall_ms(),
+        ts_mono_ms: now_mono_ms(state),
+        event_type: "virtual_desktop_changed".to_string(),
+        process_name: None,
+        window_title: None,
+        window_class: None,
+        window_rect: None,
+        mouse: None,
+        payload: json!({
+            "from": old_id,
+            "to": new_id,
+        }),
     };
     state.sender.try_send(event).ok();
 }
