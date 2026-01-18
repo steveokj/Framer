@@ -124,6 +124,7 @@ struct RecorderConfig {
     capture_raw_keys: bool,
     raw_keys_mode: String,
     suppress_raw_keys_on_shortcut: bool,
+    exclude_injected_keys: bool,
     obs_video_path: Option<String>,
     obs_video_dir: Option<String>,
     safe_text_only: bool,
@@ -153,6 +154,7 @@ impl Default for RecorderConfig {
             capture_raw_keys: true,
             raw_keys_mode: "down".to_string(),
             suppress_raw_keys_on_shortcut: true,
+            exclude_injected_keys: true,
             obs_video_path: None,
             obs_video_dir: None,
             safe_text_only: true,
@@ -203,6 +205,7 @@ struct RecorderState {
     capture_raw_keys: bool,
     raw_keys_mode: RawKeysMode,
     suppress_raw_keys_on_shortcut: bool,
+    exclude_injected_keys: bool,
     emit_mouse_move: AtomicBool,
     emit_mouse_click: AtomicBool,
     emit_mouse_scroll: AtomicBool,
@@ -426,6 +429,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         capture_raw_keys: config.capture_raw_keys,
         raw_keys_mode: parse_raw_keys_mode(&config.raw_keys_mode),
         suppress_raw_keys_on_shortcut: config.suppress_raw_keys_on_shortcut,
+        exclude_injected_keys: config.exclude_injected_keys,
         emit_mouse_move: AtomicBool::new(config.emit_mouse_move),
         emit_mouse_click: AtomicBool::new(config.emit_mouse_click),
         emit_mouse_scroll: AtomicBool::new(config.emit_mouse_scroll),
@@ -1983,6 +1987,10 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
             let is_up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
 
             if is_down || is_up {
+                let is_injected = (data.flags.0 & 0x10) != 0;
+                if is_injected && state.exclude_injected_keys {
+                    return CallNextHookEx(None, code, wparam, lparam);
+                }
                 let mut pressed = state.pressed_keys.lock().unwrap();
                 let was_pressed = pressed.contains(&vk);
                 if is_down {
@@ -1991,7 +1999,6 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     pressed.remove(&vk);
                 }
                 let is_repeat = is_down && was_pressed;
-                let is_injected = (data.flags.0 & 0x10) != 0;
 
                 let modifiers = current_modifiers(&pressed);
                 let is_modifier = is_modifier_key(vk);
