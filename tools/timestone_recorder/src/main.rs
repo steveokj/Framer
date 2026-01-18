@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::env;
 use std::ffi::c_void;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -62,6 +62,8 @@ const RELOAD_CONFIG_FILE: &str = "reload_config.signal";
 const CONFIG_FILE: &str = "config.json";
 const CLIPBOARD_DIR: &str = "clipboard";
 const ICONS_DIR: &str = "icons";
+const LOG_DIR: &str = "logs";
+const RECORDER_LOG_FILE: &str = "recorder.log";
 
 const CLIPBOARD_CF_DIB: u32 = 8;
 const CLIPBOARD_CF_DIBV5: u32 = 17;
@@ -71,6 +73,36 @@ const CLIPBOARD_CF_UNICODETEXT: u32 = 13;
 static STATE: OnceCell<Arc<RecorderState>> = OnceCell::new();
 thread_local! {
     static UIA: RefCell<Option<IUIAutomation>> = RefCell::new(None);
+}
+
+fn file_logging_enabled() -> bool {
+    match env::var("TIMESTONE_FILE_LOGS") {
+        Ok(value) => {
+            let value = value.trim().to_lowercase();
+            !(value == "0" || value == "false" || value == "off")
+        }
+        Err(_) => true,
+    }
+}
+
+fn log_line(message: &str) {
+    if !file_logging_enabled() {
+        return;
+    }
+    let base_dir = match ensure_app_dir() {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+    let log_dir = base_dir.join(LOG_DIR);
+    let path = log_dir.join(RECORDER_LOG_FILE);
+    let _ = fs::create_dir_all(&log_dir);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "[{}] {}", ts, message);
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -352,6 +384,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     let lock_path = base_dir.join(LOCK_FILE);
     if lock_path.exists() {
         println!("Recorder already running (lock file present).");
+        log_line("Recorder already running (lock file present).");
         return Ok(());
     }
 
@@ -374,6 +407,10 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
     };
 
     write_lock(&lock_path, &session)?;
+    log_line(&format!(
+        "Recorder started. session_id={} start_wall_ms={}",
+        session_id, start_wall_ms
+    ));
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let (tx, rx) = bounded::<EventRecord>(20_000);
@@ -531,6 +568,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         }
     }
     let _ = fs::remove_file(lock_path);
+    log_line("Recorder stopped.");
     Ok(())
 }
 
@@ -539,6 +577,7 @@ fn stop_recorder() -> Result<()> {
     let lock_path = base_dir.join(LOCK_FILE);
     if !lock_path.exists() {
         println!("No active recorder session found.");
+        log_line("Stop requested but no active session found.");
         return Ok(());
     }
     let stop_path = base_dir.join(STOP_FILE);
@@ -546,12 +585,14 @@ fn stop_recorder() -> Result<()> {
     let pause_path = base_dir.join(PAUSE_FILE);
     let _ = fs::remove_file(pause_path);
     println!("Stop signal written.");
+    log_line("Stop signal written.");
     if let Some(info) = read_lock_info(&lock_path) {
         if let Some(pid) = info.pid {
             if !is_pid_running(pid) {
                 let _ = fs::remove_file(lock_path);
                 let _ = fs::remove_file(base_dir.join(STOP_FILE));
                 println!("Recorder was not running; stale lock cleared.");
+                log_line("Recorder was not running; stale lock cleared.");
             }
         }
     }
@@ -573,8 +614,10 @@ fn spawn_pause_watcher(
                 if paused {
                     flush_text_buffer(&state, "pause");
                     send_session_event(&state, "session_pause", json!({ "note": "pause_signal" }));
+                    log_line("Pause signal observed; session paused.");
                 } else {
                     send_session_event(&state, "session_resume", json!({ "note": "pause_signal" }));
+                    log_line("Pause cleared; session resumed.");
                 }
                 last_paused = paused;
             }
@@ -594,6 +637,7 @@ fn spawn_config_reload_watcher(
         while !shutdown.load(Ordering::SeqCst) {
             if reload_path.exists() {
                 let _ = fs::remove_file(&reload_path);
+                log_line("Config reload signal observed.");
                 if let Ok(config) = load_or_create_config(&base_dir.join(CONFIG_FILE)) {
                     let config = normalize_config(config);
                     apply_capture_flags(&state, &config);
@@ -629,6 +673,7 @@ fn pause_recorder() -> Result<()> {
     let pause_path = base_dir.join(PAUSE_FILE);
     fs::write(pause_path, b"pause")?;
     println!("Pause signal written.");
+    log_line("Pause signal written.");
     Ok(())
 }
 
@@ -639,6 +684,7 @@ fn resume_recorder() -> Result<()> {
         let _ = fs::remove_file(pause_path);
     }
     println!("Resume signal written.");
+    log_line("Resume signal written.");
     Ok(())
 }
 
@@ -648,9 +694,11 @@ fn toggle_pause() -> Result<()> {
     if pause_path.exists() {
         let _ = fs::remove_file(pause_path);
         println!("Resume signal written.");
+        log_line("Resume signal written.");
     } else {
         fs::write(pause_path, b"pause")?;
         println!("Pause signal written.");
+        log_line("Pause signal written.");
     }
     Ok(())
 }
@@ -988,6 +1036,7 @@ fn spawn_stop_watcher(
             if stop_path.exists() {
                 let _ = fs::remove_file(&stop_path);
                 flush_text_buffer(&state, "stop_signal");
+                log_line("Stop signal observed; shutting down.");
                 signal_shutdown(&shutdown, main_thread_id);
                 break;
             }

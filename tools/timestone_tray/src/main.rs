@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, STILL_ACTIVE, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -31,6 +32,8 @@ const APP_DIR: &str = "data\\timestone";
 const TRAY_CONFIG_FILE: &str = "tray_config.json";
 const TRAY_ICON_CACHE: &str = "tray_icons";
 const RECORDER_CONFIG_FILE: &str = "config.json";
+const LOG_DIR: &str = "logs";
+const TRAY_LOG_FILE: &str = "tray.log";
 
 const TRAY_ICON_ID: u32 = 1;
 const WM_TRAY: u32 = WM_USER + 1;
@@ -85,6 +88,32 @@ struct AppState {
 
 static STATE: OnceLock<Arc<Mutex<AppState>>> = OnceLock::new();
 
+fn file_logging_enabled() -> bool {
+    match env::var("TIMESTONE_FILE_LOGS") {
+        Ok(value) => {
+            let value = value.trim().to_lowercase();
+            !(value == "0" || value == "false" || value == "off")
+        }
+        Err(_) => true,
+    }
+}
+
+fn log_line(data_dir: &Path, message: &str) {
+    if !file_logging_enabled() {
+        return;
+    }
+    let log_dir = data_dir.join(LOG_DIR);
+    let path = log_dir.join(TRAY_LOG_FILE);
+    let _ = fs::create_dir_all(&log_dir);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "[{}] {}", ts, message);
+    }
+}
+
 fn main() -> Result<()> {
     let base_dir = ensure_app_dir()?;
     let config = load_or_create_config(&base_dir)?;
@@ -137,6 +166,7 @@ fn main() -> Result<()> {
         };
         let shared = Arc::new(Mutex::new(state));
         let _ = STATE.set(shared);
+        log_line(&base_dir, &format!("Tray started. status={status:?}"));
         update_tray_icon()?;
         let _ = SetTimer(hwnd, TIMER_ID, TIMER_MS, None);
 
@@ -507,6 +537,7 @@ fn update_status() {
         let status = get_status_from_files(&state.data_dir);
         if status != state.status {
             state.status = status;
+            log_line(&state.data_dir, &format!("status poll changed: {status:?}"));
             let _ = update_tray_icon();
         }
     }
@@ -519,6 +550,7 @@ fn dispatch_command(action: &str, show_dialog: bool) {
     {
         let mut state = state.lock().unwrap();
         if state.busy {
+            log_line(&state.data_dir, &format!("Ignored command '{action}': busy"));
             return;
         }
         state.busy = true;
@@ -530,14 +562,18 @@ fn dispatch_command(action: &str, show_dialog: bool) {
         let command = { state.lock().unwrap().command.clone() };
         let data_dir = { state.lock().unwrap().data_dir.clone() };
         println!("[tray] command requested: {}", action);
+        log_line(&data_dir, &format!("command requested: {}", action));
         let result = if action == "start" {
             run_command_async(&command, &action).map(|_| {
                 println!("[tray] waiting for recorder to start...");
+                log_line(&data_dir, "waiting for recorder to start...");
                 let ok = wait_for_lock(&data_dir, 15000);
                 if ok {
                     println!("[tray] Recorder started.");
+                    log_line(&data_dir, "recorder started");
                 } else {
                     println!("[tray] Recorder did not start in time.");
+                    log_line(&data_dir, "recorder start timed out");
                 }
                 ok
             })
@@ -547,11 +583,14 @@ fn dispatch_command(action: &str, show_dialog: bool) {
                     println!("[tray] {}", output.trim());
                 }
                 println!("[tray] waiting for recorder to stop...");
+                log_line(&data_dir, "waiting for recorder to stop...");
                 let ok = wait_for_lock_clear(&data_dir, 15000);
                 if ok {
                     println!("[tray] Recorder stopped.");
+                    log_line(&data_dir, "recorder stopped");
                 } else {
                     println!("[tray] Recorder did not stop in time.");
+                    log_line(&data_dir, "recorder stop timed out");
                 }
                 ok
             })
@@ -562,8 +601,10 @@ fn dispatch_command(action: &str, show_dialog: bool) {
                 }
                 if action == "pause" {
                     println!("[tray] Recorder paused.");
+                    log_line(&data_dir, "recorder paused");
                 } else if action == "resume" {
                     println!("[tray] Recorder resumed.");
+                    log_line(&data_dir, "recorder resumed");
                 }
                 true
             })
@@ -579,6 +620,7 @@ fn dispatch_command(action: &str, show_dialog: bool) {
             let mut state = state.lock().unwrap();
             state.status = status;
             state.busy = false;
+            log_line(&state.data_dir, &format!("status updated: {status:?}"));
         }
         let _ = update_tray_icon();
         if show_dialog {
