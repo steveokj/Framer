@@ -1942,7 +1942,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     pressed.remove(&vk);
                 }
                 let is_repeat = is_down && was_pressed;
-                let is_injected = (data.flags & 0x10) != 0;
+                let is_injected = (data.flags & KBDLLHOOKSTRUCT_FLAGS(0x10)) != KBDLLHOOKSTRUCT_FLAGS(0);
 
                 let modifiers = current_modifiers(&pressed);
                 let is_modifier = is_modifier_key(vk);
