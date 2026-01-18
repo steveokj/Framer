@@ -13,7 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage, RegisterClassW,
     SetLayeredWindowAttributes, SetTimer, ShowWindow, TranslateMessage, LWA_COLORKEY, MSG, SW_SHOW, WM_DESTROY,
     WM_LBUTTONDOWN, WM_PAINT, WM_RBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    WS_POPUP,
 };
 
 static CONFIG: OnceLock<OverlayConfig> = OnceLock::new();
@@ -119,7 +119,7 @@ fn main() -> windows::core::Result<()> {
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             PCWSTR(class_name.as_ptr()),
             PCWSTR(class_name.as_ptr()),
             WS_POPUP,
