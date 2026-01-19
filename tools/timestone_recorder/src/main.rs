@@ -133,6 +133,7 @@ struct RecorderConfig {
     raw_keys_mode: String,
     suppress_raw_keys_on_shortcut: bool,
     exclude_injected_keys: bool,
+    emit_virtual_desktop_changed: bool,
     obs_video_path: Option<String>,
     obs_video_dir: Option<String>,
     safe_text_only: bool,
@@ -163,6 +164,7 @@ impl Default for RecorderConfig {
             raw_keys_mode: "down".to_string(),
             suppress_raw_keys_on_shortcut: true,
             exclude_injected_keys: true,
+            emit_virtual_desktop_changed: true,
             obs_video_path: None,
             obs_video_dir: None,
             safe_text_only: true,
@@ -214,6 +216,7 @@ struct RecorderState {
     raw_keys_mode: RawKeysMode,
     suppress_raw_keys_on_shortcut: bool,
     exclude_injected_keys: bool,
+    emit_virtual_desktop_changed: bool,
     emit_mouse_move: AtomicBool,
     emit_mouse_click: AtomicBool,
     emit_mouse_scroll: AtomicBool,
@@ -456,6 +459,7 @@ fn run_recorder(overrides: CliOverrides) -> Result<()> {
         raw_keys_mode: parse_raw_keys_mode(&config.raw_keys_mode),
         suppress_raw_keys_on_shortcut: config.suppress_raw_keys_on_shortcut,
         exclude_injected_keys: config.exclude_injected_keys,
+        emit_virtual_desktop_changed: config.emit_virtual_desktop_changed,
         emit_mouse_move: AtomicBool::new(config.emit_mouse_move),
         emit_mouse_click: AtomicBool::new(config.emit_mouse_click),
         emit_mouse_scroll: AtomicBool::new(config.emit_mouse_scroll),
@@ -1825,13 +1829,15 @@ fn update_window_events(state: &RecorderState, hwnd: HWND, window_info: WindowIn
         return;
     }
     let now_ms = now_mono_ms(state);
-    if let Some(new_id) = window_info.virtual_desktop_id.as_deref() {
-        let mut last_id = state.last_virtual_desktop_id.lock().unwrap();
-        if last_id.as_deref() != Some(new_id) {
-            let previous = last_id.clone();
-            *last_id = Some(new_id.to_string());
-            if let Some(old_id) = previous {
-                send_virtual_desktop_changed(state, &old_id, new_id);
+    if state.emit_virtual_desktop_changed {
+        if let Some(new_id) = window_info.virtual_desktop_id.as_deref() {
+            let mut last_id = state.last_virtual_desktop_id.lock().unwrap();
+            if last_id.as_deref() != Some(new_id) {
+                let previous = last_id.clone();
+                *last_id = Some(new_id.to_string());
+                if let Some(old_id) = previous {
+                    send_virtual_desktop_changed(state, &old_id, new_id);
+                }
             }
         }
     }
