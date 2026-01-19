@@ -264,6 +264,8 @@ export default function LiveEventsPage() {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
   const [overlayStatus, setOverlayStatus] = useState<string | null>(null);
   const [overlayError, setOverlayError] = useState<string | null>(null);
+  const [windowStatus, setWindowStatus] = useState<string | null>(null);
+  const [windowError, setWindowError] = useState<string | null>(null);
 
   const lastWallMsRef = useRef<number | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
@@ -433,6 +435,30 @@ export default function LiveEventsPage() {
     }
   }, []);
 
+  const spawnTestWindow = useCallback(async (payload: any) => {
+    try {
+      setWindowError(null);
+      setWindowStatus("Launching window...");
+      const res = await fetch("/api/timestone_window", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const message = typeof data?.error === "string" ? data.error : "Window launch failed.";
+        setWindowError(message);
+        setWindowStatus(null);
+        return;
+      }
+      setWindowStatus("Test window opened.");
+      setTimeout(() => setWindowStatus(null), 2000);
+    } catch {
+      setWindowError("Window launch failed.");
+      setWindowStatus(null);
+    }
+  }, []);
+
   const renderOverlayButton = (event: EventView) => {
     const rect = parseRect(event.window_rect);
     const mouse = event.mouseData || {};
@@ -500,6 +526,45 @@ export default function LiveEventsPage() {
       );
     }
     return null;
+  };
+
+  const renderWindowButton = (event: EventView) => {
+    if (event.event_type !== "active_window_changed") {
+      return null;
+    }
+    const rect = parseRect(event.window_rect);
+    if (!rect) {
+      return null;
+    }
+    return (
+      <button
+        type="button"
+        onClick={() =>
+          void spawnTestWindow({
+            rect,
+            title: windowLabel(event),
+            color: "#1f2937",
+          })
+        }
+        title="Open test window at rect"
+        style={{
+          width: 52,
+          height: 28,
+          borderRadius: 8,
+          border: "1px solid rgba(94, 234, 212, 0.6)",
+          background: "rgba(15, 23, 42, 0.7)",
+          color: "#99f6e4",
+          display: "grid",
+          placeItems: "center",
+          cursor: "pointer",
+          fontSize: 11,
+          fontWeight: 600,
+          letterSpacing: "0.02em",
+        }}
+      >
+        WINDOW
+      </button>
+    );
   };
 
   const renderEventDetails = (event: EventView) => {
@@ -691,6 +756,8 @@ export default function LiveEventsPage() {
               </div>
               {overlayStatus ? <div style={{ color: "#93c5fd" }}>{overlayStatus}</div> : null}
               {overlayError ? <div style={{ color: "#fca5a5" }}>{overlayError}</div> : null}
+              {windowStatus ? <div style={{ color: "#99f6e4" }}>{windowStatus}</div> : null}
+              {windowError ? <div style={{ color: "#fca5a5" }}>{windowError}</div> : null}
               {error ? <div style={{ color: "#fca5a5" }}>{error}</div> : null}
             </section>
           </div>
@@ -724,6 +791,7 @@ export default function LiveEventsPage() {
                             : formatDurationMs(row.events[0].ts_mono_ms);
                           const groupIcon = resolveIconSrc(EVENT_ICON_MAP[row.event_type]);
                           const overlayButton = renderOverlayButton(row.events[0]);
+                          const windowButton = renderWindowButton(row.events[0]);
                           return (
                             <div
                               key={rowId}
@@ -772,6 +840,7 @@ export default function LiveEventsPage() {
                                   +{groupMonoTime}
                                 </span>
                                 {overlayButton ? <div>{overlayButton}</div> : null}
+                                {windowButton ? <div>{windowButton}</div> : null}
                                 {row.events.length > 1 ? (
                                   <span
                                     style={{
@@ -861,6 +930,7 @@ export default function LiveEventsPage() {
                         );
                         const isActiveWindow = event.event_type === "active_window_changed";
                         const overlayButton = renderOverlayButton(event);
+                        const windowButton = renderWindowButton(event);
                         return (
                           <div
                             key={event.id}
@@ -908,6 +978,7 @@ export default function LiveEventsPage() {
                                         <span style={{ color: "#64748b" }}>+{monoTime}</span>
                                       </div>
                                       {overlayButton ? <div>{overlayButton}</div> : null}
+                                      {windowButton ? <div>{windowButton}</div> : null}
                                   </div>
                                   <div style={{ color: "#cbd5f5" }}>{windowName}</div>
                                 </div>
@@ -928,6 +999,7 @@ export default function LiveEventsPage() {
                                   <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
                                   <span style={{ color: "#64748b" }}>+{monoTime}</span>
                                   {overlayButton ? <div>{overlayButton}</div> : null}
+                                  {windowButton ? <div>{windowButton}</div> : null}
                                 </div>
                                 <div style={{ color: "#94a3b8" }}>{windowName}</div>
                               </>
