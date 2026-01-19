@@ -1,0 +1,158 @@
+import { NextRequest } from "next/server";
+import { spawn } from "child_process";
+import path from "path";
+import fs from "fs/promises";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type VideoEntry = {
+  path: string;
+  name: string;
+  start_ms: number | null;
+  duration_s: number | null;
+  end_ms: number | null;
+  created_ms: number | null;
+  modified_ms: number | null;
+  start_source: "filename" | "filetime" | "unknown";
+};
+
+const VIDEO_EXTS = new Set([".mkv", ".mp4", ".mov", ".webm"]);
+
+function resolveFfprobe(): string {
+  if (process.env.FFPROBE && process.env.FFPROBE.trim().length > 0) {
+    return process.env.FFPROBE.trim();
+  }
+  const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
+  return ffmpeg.replace(/ffmpeg(\.exe)?$/i, (m) => m.replace(/ffmpeg/i, "ffprobe"));
+}
+
+function parseObsStartMsFromName(name: string): number | null {
+  const match = name.match(/(\d{4}-\d{2}-\d{2})[ _T](\d{2})[-.](\d{2})[-.](\d{2})/);
+  if (!match) {
+    return null;
+  }
+  const iso = `${match[1]}T${match[2]}:${match[3]}:${match[4]}`;
+  const parsed = Date.parse(iso);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+async function ffprobeDuration(filePath: string): Promise<number | null> {
+  const ffprobe = resolveFfprobe();
+  return new Promise((resolve) => {
+    const args = [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      filePath,
+    ];
+    const child = spawn(ffprobe, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d.toString()));
+    child.stderr.on("data", (d) => (stderr += d.toString()));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+      const value = Number.parseFloat(stdout.trim());
+      resolve(Number.isFinite(value) ? value : null);
+    });
+    child.on("error", () => resolve(null));
+  });
+}
+
+function resolveFolderPath(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (path.isAbsolute(trimmed)) {
+    return trimmed;
+  }
+  return path.join(process.cwd(), trimmed);
+}
+
+export async function POST(req: NextRequest) {
+  let body: any = null;
+  try {
+    body = await req.json();
+  } catch {
+    body = null;
+  }
+
+  const folderInput = typeof body?.folderPath === "string" ? body.folderPath : "";
+  const folderPath = resolveFolderPath(folderInput);
+  const maxFilesRaw = Number(body?.maxFiles);
+  const maxFiles = Number.isFinite(maxFilesRaw) ? Math.max(1, Math.floor(maxFilesRaw)) : 200;
+
+  if (!folderPath) {
+    return new Response(JSON.stringify({ error: "folderPath is required" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  let entries: Awaited<ReturnType<typeof fs.readdir>>;
+  try {
+    entries = await fs.readdir(folderPath, { withFileTypes: true });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: "Failed to read folder", detail: String(err) }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const files = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => VIDEO_EXTS.has(path.extname(name).toLowerCase()));
+
+  const limited = files.slice(0, maxFiles);
+  const results: VideoEntry[] = [];
+
+  for (const name of limited) {
+    const fullPath = path.join(folderPath, name);
+    let stat: Awaited<ReturnType<typeof fs.stat>> | null = null;
+    try {
+      stat = await fs.stat(fullPath);
+    } catch {
+      stat = null;
+    }
+    const createdMs = stat ? stat.birthtimeMs || stat.ctimeMs : null;
+    const modifiedMs = stat ? stat.mtimeMs : null;
+    const parsedStart = parseObsStartMsFromName(name);
+    const startMs = parsedStart ?? (createdMs && Number.isFinite(createdMs) ? createdMs : null);
+    const startSource: VideoEntry["start_source"] = parsedStart
+      ? "filename"
+      : startMs
+      ? "filetime"
+      : "unknown";
+    const duration = await ffprobeDuration(fullPath);
+    const endMs = startMs && duration ? startMs + duration * 1000 : null;
+    results.push({
+      path: fullPath,
+      name,
+      start_ms: startMs,
+      duration_s: duration,
+      end_ms: endMs,
+      created_ms: createdMs,
+      modified_ms: modifiedMs,
+      start_source: startSource,
+    });
+  }
+
+  results.sort((a, b) => {
+    const aStart = a.start_ms ?? 0;
+    const bStart = b.start_ms ?? 0;
+    return aStart - bStart;
+  });
+
+  return new Response(JSON.stringify({ videos: results, folder: folderPath }), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
