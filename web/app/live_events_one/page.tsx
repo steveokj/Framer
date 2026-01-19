@@ -321,6 +321,7 @@ export default function LiveEventsOnePage() {
   const [obsSegments, setObsSegments] = useState<ObsVideoSegment[]>([]);
   const [obsLoading, setObsLoading] = useState(false);
   const [obsError, setObsError] = useState<string | null>(null);
+  const [obsPickerWarning, setObsPickerWarning] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [filterMode, setFilterMode] = useState<"all" | "session" | "day" | "range" | "week" | "month">("all");
   const [filterDay, setFilterDay] = useState(() => new Date().toISOString().slice(0, 10));
@@ -343,6 +344,7 @@ export default function LiveEventsOnePage() {
   const lastWallMsRef = useRef<number | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
   const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
+  const obsPickerRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem(LAST_FOLDER_STORAGE_KEY);
@@ -411,6 +413,7 @@ export default function LiveEventsOnePage() {
     if (!obsFolder.trim()) {
       setObsSegments([]);
       setObsError(null);
+      setObsPickerWarning(null);
       return;
     }
     setObsLoading(true);
@@ -432,12 +435,62 @@ export default function LiveEventsOnePage() {
         id: entry.path || entry.name,
       }));
       setObsSegments(normalized);
+      setObsPickerWarning(null);
     } catch (err) {
       setObsError(err instanceof Error ? err.message : "Failed to scan OBS folder");
       setObsSegments([]);
     } finally {
       setObsLoading(false);
     }
+  }, [obsFolder]);
+
+  const handlePickObsFolder = useCallback(async () => {
+    setObsPickerWarning(null);
+    if (typeof window !== "undefined" && "showDirectoryPicker" in window) {
+      try {
+        const picker = (window as any).showDirectoryPicker;
+        const handle = await picker();
+        if (handle?.name) {
+          setObsFolder((prev) => {
+            if (prev && prev.includes(":")) {
+              return prev.replace(/[\\/]?[^\\/]*$/, `\\${handle.name}`);
+            }
+            return handle.name;
+          });
+          setObsPickerWarning(
+            "Browser picker does not expose full path. If videos are not found, paste the full folder path.",
+          );
+        }
+        return;
+      } catch {
+        return;
+      }
+    }
+    obsPickerRef.current?.click();
+  }, []);
+
+  const handleObsPickerChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) {
+      return;
+    }
+    const first: any = files[0];
+    if (first?.path) {
+      const pathValue = String(first.path);
+      const trimmed = pathValue.replace(/[\\/][^\\/]+$/, "");
+      setObsFolder(trimmed);
+      setObsPickerWarning(null);
+    } else if (first?.webkitRelativePath) {
+      const rel = String(first.webkitRelativePath);
+      const folderName = rel.split(/[\\/]/)[0];
+      setObsFolder(folderName || obsFolder);
+      setObsPickerWarning(
+        "Browser picker does not expose full path. If videos are not found, paste the full folder path.",
+      );
+    } else {
+      setObsPickerWarning("Folder selection did not provide a usable path. Paste the folder path manually.");
+    }
+    event.target.value = "";
   }, [obsFolder]);
 
   const ingestEvents = useCallback((incoming: TimestoneEvent[]) => {
@@ -1102,18 +1155,55 @@ export default function LiveEventsOnePage() {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
                 <label style={{ flex: "1 1 320px", display: "grid", gap: 6 }}>
                   <span style={{ color: "#cbd5f5" }}>OBS folder</span>
-                  <input
-                    value={obsFolder}
-                    onChange={(event) => setObsFolder(event.target.value)}
-                    placeholder="C:\\Path\\To\\OBS"
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 8,
-                      border: "1px solid #1e293b",
-                      background: "#0b1120",
-                      color: "#e2e8f0",
-                    }}
-                  />
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input
+                      value={obsFolder}
+                      onChange={(event) => setObsFolder(event.target.value)}
+                      placeholder="C:\\Path\\To\\OBS"
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 8,
+                        border: "1px solid #1e293b",
+                        background: "#0b1120",
+                        color: "#e2e8f0",
+                        flex: 1,
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={handlePickObsFolder}
+                      aria-label="Pick OBS folder"
+                      title="Pick OBS folder"
+                      style={{
+                        width: 40,
+                        height: 40,
+                        borderRadius: 10,
+                        border: "1px solid #1e293b",
+                        background: "rgba(15, 23, 42, 0.8)",
+                        color: "#e2e8f0",
+                        display: "grid",
+                        placeItems: "center",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path
+                          d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v7a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V7Z"
+                          stroke="#93c5fd"
+                          strokeWidth="1.6"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                    <input
+                      ref={obsPickerRef}
+                      type="file"
+                      multiple
+                      style={{ display: "none" }}
+                      onChange={handleObsPickerChange}
+                      {...({ webkitdirectory: "true", directory: "true" } as any)}
+                    />
+                  </div>
                 </label>
                 <button
                   type="button"
@@ -1264,6 +1354,7 @@ export default function LiveEventsOnePage() {
                     : obsError}
                 </div>
               ) : null}
+              {obsPickerWarning ? <div style={{ color: "#fbbf24" }}>{obsPickerWarning}</div> : null}
             </section>
           </div>
 
