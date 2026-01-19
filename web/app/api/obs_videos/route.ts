@@ -89,6 +89,8 @@ export async function POST(req: NextRequest) {
   const folderPath = resolveFolderPath(folderInput);
   const maxFilesRaw = Number(body?.maxFiles);
   const maxFiles = Number.isFinite(maxFilesRaw) ? Math.max(1, Math.floor(maxFilesRaw)) : 200;
+  const rangeStartMs = Number.isFinite(body?.startMs) ? Number(body.startMs) : null;
+  const rangeEndMs = Number.isFinite(body?.endMs) ? Number(body.endMs) : null;
 
   if (!folderPath) {
     return new Response(JSON.stringify({ error: "folderPath is required" }), {
@@ -112,7 +114,9 @@ export async function POST(req: NextRequest) {
     .map((entry) => entry.name)
     .filter((name) => VIDEO_EXTS.has(path.extname(name).toLowerCase()));
 
-  const limited = files.slice(0, maxFiles);
+  const totalCount = files.length;
+  const shouldLimit = rangeStartMs == null && rangeEndMs == null;
+  const limited = shouldLimit ? files.slice(0, maxFiles) : files;
   const results: VideoEntry[] = [];
 
   for (const name of limited) {
@@ -126,20 +130,34 @@ export async function POST(req: NextRequest) {
     const createdMs = stat ? stat.birthtimeMs || stat.ctimeMs : null;
     const modifiedMs = stat ? stat.mtimeMs : null;
     const parsedStart = parseObsStartMsFromName(name);
-    const startMs = parsedStart ?? (createdMs && Number.isFinite(createdMs) ? createdMs : null);
+    const fileStartMs = parsedStart ?? (createdMs && Number.isFinite(createdMs) ? createdMs : null);
     const startSource: VideoEntry["start_source"] = parsedStart
       ? "filename"
-      : startMs
+      : fileStartMs
       ? "filetime"
       : "unknown";
+    if (rangeStartMs != null || rangeEndMs != null) {
+      if (fileStartMs == null) {
+        continue;
+      }
+      if (rangeEndMs != null && fileStartMs > rangeEndMs) {
+        continue;
+      }
+    }
     const duration = await ffprobeDuration(fullPath);
-    const endMs = startMs && duration ? startMs + duration * 1000 : null;
+    const fileEndMs = fileStartMs && duration ? fileStartMs + duration * 1000 : null;
+    if (rangeStartMs != null && fileEndMs != null && fileEndMs < rangeStartMs) {
+      continue;
+    }
+    if (rangeStartMs != null && fileStartMs != null && fileStartMs < rangeStartMs && duration == null) {
+      continue;
+    }
     results.push({
       path: fullPath,
       name,
-      start_ms: startMs,
+      start_ms: fileStartMs,
       duration_s: duration,
-      end_ms: endMs,
+      end_ms: fileEndMs,
       created_ms: createdMs,
       modified_ms: modifiedMs,
       start_source: startSource,
@@ -152,7 +170,10 @@ export async function POST(req: NextRequest) {
     return aStart - bStart;
   });
 
-  return new Response(JSON.stringify({ videos: results, folder: folderPath }), {
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response(
+    JSON.stringify({ videos: results, folder: folderPath, total_count: totalCount, filtered_count: results.length }),
+    {
+      headers: { "Content-Type": "application/json" },
+    },
+  );
 }

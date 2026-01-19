@@ -322,6 +322,8 @@ export default function LiveEventsOnePage() {
   const [obsLoading, setObsLoading] = useState(false);
   const [obsError, setObsError] = useState<string | null>(null);
   const [obsPickerWarning, setObsPickerWarning] = useState<string | null>(null);
+  const [obsTotalCount, setObsTotalCount] = useState(0);
+  const [obsFilteredCount, setObsFilteredCount] = useState(0);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [filterMode, setFilterMode] = useState<"all" | "session" | "day" | "range" | "week" | "month">("all");
   const [filterDay, setFilterDay] = useState(() => new Date().toISOString().slice(0, 10));
@@ -414,7 +416,49 @@ export default function LiveEventsOnePage() {
       setObsSegments([]);
       setObsError(null);
       setObsPickerWarning(null);
+      setObsTotalCount(0);
+      setObsFilteredCount(0);
       return;
+    }
+    let startMs: number | null = null;
+    let endMs: number | null = null;
+    if (filterMode === "session" && sessionId) {
+      const sessionEvents = events.filter((event) => event.session_id === sessionId);
+      if (sessionEvents.length === 0) {
+        setObsSegments([]);
+        setObsTotalCount(0);
+        setObsFilteredCount(0);
+        return;
+      }
+      startMs = sessionEvents.reduce((min, event) => Math.min(min, event.ts_wall_ms), sessionEvents[0].ts_wall_ms);
+      endMs = sessionEvents.reduce((max, event) => Math.max(max, event.ts_wall_ms), sessionEvents[0].ts_wall_ms);
+    } else if (filterMode === "day") {
+      const start = Date.parse(`${filterDay}T00:00:00`);
+      if (Number.isFinite(start)) {
+        startMs = start;
+        endMs = start + 24 * 60 * 60 * 1000;
+      }
+    } else if (filterMode === "range") {
+      const start = Date.parse(`${filterRangeStart}T00:00:00`);
+      const end = Date.parse(`${filterRangeEnd}T00:00:00`);
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        startMs = start;
+        endMs = end + 24 * 60 * 60 * 1000;
+      }
+    } else if (filterMode === "week") {
+      const start = Date.parse(`${filterWeekStart}T00:00:00`);
+      if (Number.isFinite(start)) {
+        startMs = start;
+        endMs = start + 7 * 24 * 60 * 60 * 1000;
+      }
+    } else if (filterMode === "month") {
+      const [yearStr, monthStr] = filterMonth.split("-");
+      const year = Number(yearStr);
+      const month = Number(monthStr);
+      if (Number.isFinite(year) && Number.isFinite(month)) {
+        startMs = new Date(year, Math.max(0, month - 1), 1).getTime();
+        endMs = new Date(year, Math.max(0, month), 1).getTime();
+      }
     }
     setObsLoading(true);
     setObsError(null);
@@ -422,7 +466,7 @@ export default function LiveEventsOnePage() {
       const res = await fetch("/api/obs_videos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folderPath: obsFolder }),
+        body: JSON.stringify({ folderPath: obsFolder, startMs, endMs }),
       });
       if (!res.ok) {
         const payload = await res.json().catch(() => ({}));
@@ -435,14 +479,28 @@ export default function LiveEventsOnePage() {
         id: entry.path || entry.name,
       }));
       setObsSegments(normalized);
+      setObsTotalCount(Number.isFinite(data?.total_count) ? Number(data.total_count) : list.length);
+      setObsFilteredCount(Number.isFinite(data?.filtered_count) ? Number(data.filtered_count) : list.length);
       setObsPickerWarning(null);
     } catch (err) {
       setObsError(err instanceof Error ? err.message : "Failed to scan OBS folder");
       setObsSegments([]);
+      setObsTotalCount(0);
+      setObsFilteredCount(0);
     } finally {
       setObsLoading(false);
     }
-  }, [obsFolder]);
+  }, [
+    obsFolder,
+    filterMode,
+    filterDay,
+    filterRangeStart,
+    filterRangeEnd,
+    filterWeekStart,
+    filterMonth,
+    sessionId,
+    events,
+  ]);
 
   const handlePickObsFolder = useCallback(async () => {
     setObsPickerWarning(null);
@@ -687,6 +745,13 @@ export default function LiveEventsOnePage() {
     }
     return { startMs: min, endMs: max };
   }, [filterMode, filteredEvents]);
+
+  const obsRange = useMemo(() => {
+    if (filterMode === "session") {
+      return sessionRange;
+    }
+    return filterRange;
+  }, [filterMode, filterRange, sessionRange]);
 
   const visibleSegments = useMemo(() => {
     const range = sessionRange ?? filterRange;
@@ -1342,7 +1407,10 @@ export default function LiveEventsOnePage() {
                 <span>Status: {status}</span>
                 {activeSession ? <span>Started {activeSession.start_wall_iso}</span> : null}
                 <span>Events loaded: {eventCount}</span>
-                <span>Videos: {visibleSegments.length}</span>
+                <span>
+                  Videos: {obsFilteredCount}
+                  {obsTotalCount ? ` / ${obsTotalCount}` : ""}
+                </span>
                 {obsLoading ? <span>Indexing videos...</span> : null}
                 {lastUpdate ? <span>Last update: {lastUpdate}</span> : null}
               </div>
@@ -1361,7 +1429,7 @@ export default function LiveEventsOnePage() {
           <section
             style={{
               display: "grid",
-              gridTemplateColumns: "minmax(0, 2fr) minmax(0, 1fr)",
+              gridTemplateColumns: `minmax(0, 1fr) ${detailsMaxWidth}px`,
               gap: 24,
               alignItems: "start",
               height: "100%",
@@ -1557,8 +1625,8 @@ export default function LiveEventsOnePage() {
               style={{
                 display: "grid",
                 gap: 16,
-                maxWidth: detailsMaxWidth,
-                width: "100%",
+                width: detailsMaxWidth,
+                justifySelf: "end",
                 overflowY: "auto",
                 paddingRight: 8,
                 minHeight: 0,
