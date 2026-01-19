@@ -529,7 +529,7 @@ export default function LiveEventsPage() {
   };
 
   const renderWindowButton = (event: EventView) => {
-    if (event.event_type !== "active_window_changed") {
+    if (event.event_type !== "active_window_changed" && event.event_type !== "window_rect_changed") {
       return null;
     }
     const rect = parseRect(event.window_rect);

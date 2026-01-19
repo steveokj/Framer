@@ -115,3 +115,4 @@
 | f37852afc6c0c596f5223a9bd3b13b8977fcf188 | Add test-window spawn button for active window events | Requested button to open a real window at active window rect | Added timestone_window API + move_events button + status feedback | 2026-01-18 19:34:08 |
 | 1c1e57e0e7a6aaafe10825dd0e65e3cb429c6eae | Make test window topmost/foreground | Test window launched but not visible | Set test window topmost and foreground to ensure visibility | 2026-01-18 19:38:28 |
 | 7db8cecf052b3d1a2ef88828d5360d4f1b91df38 | Use DWM extended frame bounds for window rects | Requested window rects to align with visible frame | Switched window rect capture to DWM extended frame bounds with fallback | 2026-01-18 19:53:57 |
+| ba5158696eb3a4d8cd48c149020ed0b98ba2b844 | Enable test window button for window rect change events | Requested window opening for window_rect_changed | Allowed test window button on window_rect_changed rows | 2026-01-18 20:03:47 |
