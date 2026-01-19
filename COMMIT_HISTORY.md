@@ -113,3 +113,4 @@
 | 81a7aec491f83b5877f1269afa6cda17765d8572 | Add DPI awareness + scaling for overlay alignment | Requested multi-monitor correction for window/click overlay | Enabled per-monitor DPI awareness and applied DPI scaling in overlay API payloads | 2026-01-18 19:09:41 |
 | 04e9d9cfa5fc7c9a32a7c2195a67e08d0d090ec6 | Add simple test window tool | Requested a real window GUI for manual alignment testing | Added timestone_window tool to spawn a DPI-aware test window | 2026-01-18 19:19:21 |
 | f37852afc6c0c596f5223a9bd3b13b8977fcf188 | Add test-window spawn button for active window events | Requested button to open a real window at active window rect | Added timestone_window API + move_events button + status feedback | 2026-01-18 19:34:08 |
+| 1c1e57e0e7a6aaafe10825dd0e65e3cb429c6eae | Make test window topmost/foreground | Test window launched but not visible | Set test window topmost and foreground to ensure visibility | 2026-01-18 19:38:28 |

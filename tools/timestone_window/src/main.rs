@@ -10,7 +10,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage, RegisterClassW, ShowWindow,
-    TranslateMessage, CW_USEDEFAULT, MSG, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    SetForegroundWindow, SetWindowPos, TranslateMessage, CW_USEDEFAULT, HWND_TOPMOST, MSG, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 fn to_wide(value: &str) -> Vec<u16> {
@@ -78,6 +79,8 @@ fn main() -> windows::core::Result<()> {
             None,
         );
         ShowWindow(hwnd, SW_SHOW);
+        let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        let _ = SetForegroundWindow(hwnd);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND(0), 0, 0).into() {
