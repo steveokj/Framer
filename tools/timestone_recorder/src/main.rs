@@ -56,6 +56,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, GetObjectW, MonitorFromWindow, SelectObject, DIB_RGB_COLORS, MONITORINFO, MONITORINFOEXW,
     MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, SetProcessDpiAwarenessContext, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 
@@ -1650,18 +1651,29 @@ fn get_window_class(hwnd: HWND) -> String {
 fn get_window_rect(hwnd: HWND) -> Option<RectInfo> {
     unsafe {
         let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).is_ok() {
-            Some(RectInfo {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-                width: rect.right - rect.left,
-                height: rect.bottom - rect.top,
-            })
+        let mut dwm_rect = RECT::default();
+        let dwm_ok = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut dwm_rect as *mut RECT as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .is_ok();
+        let target = if dwm_ok {
+            dwm_rect
+        } else if GetWindowRect(hwnd, &mut rect).is_ok() {
+            rect
         } else {
-            None
-        }
+            return None;
+        };
+        Some(RectInfo {
+            left: target.left,
+            top: target.top,
+            right: target.right,
+            bottom: target.bottom,
+            width: target.right - target.left,
+            height: target.bottom - target.top,
+        })
     }
 }
 

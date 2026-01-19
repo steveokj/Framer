@@ -114,3 +114,4 @@
 | 04e9d9cfa5fc7c9a32a7c2195a67e08d0d090ec6 | Add simple test window tool | Requested a real window GUI for manual alignment testing | Added timestone_window tool to spawn a DPI-aware test window | 2026-01-18 19:19:21 |
 | f37852afc6c0c596f5223a9bd3b13b8977fcf188 | Add test-window spawn button for active window events | Requested button to open a real window at active window rect | Added timestone_window API + move_events button + status feedback | 2026-01-18 19:34:08 |
 | 1c1e57e0e7a6aaafe10825dd0e65e3cb429c6eae | Make test window topmost/foreground | Test window launched but not visible | Set test window topmost and foreground to ensure visibility | 2026-01-18 19:38:28 |
+| 7db8cecf052b3d1a2ef88828d5360d4f1b91df38 | Use DWM extended frame bounds for window rects | Requested window rects to align with visible frame | Switched window rect capture to DWM extended frame bounds with fallback | 2026-01-18 19:53:57 |
