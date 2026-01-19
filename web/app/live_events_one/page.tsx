@@ -381,7 +381,6 @@ export default function LiveEventsOnePage() {
   const [obsPickerWarning, setObsPickerWarning] = useState<string | null>(null);
   const [obsTotalCount, setObsTotalCount] = useState(0);
   const [obsFilteredCount, setObsFilteredCount] = useState(0);
-  const [autoRefresh, setAutoRefresh] = useState(true);
   const [filterMode, setFilterMode] = useState<"all" | "session" | "day" | "range" | "week" | "month">("day");
   const [filterDay, setFilterDay] = useState(() => new Date().toISOString().slice(0, 10));
   const [filterRangeStart, setFilterRangeStart] = useState(() => new Date().toISOString().slice(0, 10));
@@ -770,14 +769,11 @@ export default function LiveEventsOnePage() {
   }, [fetchEventsSnapshot]);
 
   useEffect(() => {
-    if (!autoRefresh) {
+    if (!liveEnabled) {
       return;
     }
-    const interval = window.setInterval(() => {
-      refreshObsVideos();
-    }, 5000);
-    return () => window.clearInterval(interval);
-  }, [autoRefresh, refreshObsVideos]);
+    refreshObsVideos();
+  }, [liveEnabled, refreshObsVideos]);
 
   useEffect(() => {
     setError(null);
@@ -1448,14 +1444,6 @@ export default function LiveEventsOnePage() {
                 >
                   Refresh videos
                 </button>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, color: "#cbd5f5" }}>
-                  <input
-                    type="checkbox"
-                    checked={autoRefresh}
-                    onChange={(event) => setAutoRefresh(event.target.checked)}
-                  />
-                  Auto refresh
-                </label>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
                 <label style={{ display: "grid", gap: 6, minWidth: 200 }}>
