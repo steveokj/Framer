@@ -336,10 +336,12 @@ export default function LiveEventsOnePage() {
   const [sessions, setSessions] = useState<TimestoneSession[]>([]);
   const [sessionId, setSessionId] = useState("");
   const [events, setEvents] = useState<EventView[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsError, setEventsError] = useState<string | null>(null);
   const [status, setStatus] = useState("Idle");
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
-  const [liveEnabled, setLiveEnabled] = useState(true);
+  const [liveEnabled, setLiveEnabled] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
   const [obsFolder, setObsFolder] = useState("");
   const [obsSegments, setObsSegments] = useState<ObsVideoSegment[]>([]);
@@ -425,7 +427,7 @@ export default function LiveEventsOnePage() {
       const data = await res.json();
       const list = Array.isArray(data.sessions) ? data.sessions : [];
       setSessions(list);
-      if (!sessionId && list.length > 0) {
+      if (!sessionId && list.length > 0 && filterMode === "session") {
         setSessionId(list[0].session_id);
       }
       setStatus("Live");
@@ -433,7 +435,7 @@ export default function LiveEventsOnePage() {
       setError(err instanceof Error ? err.message : "Failed to load sessions");
       setStatus("Error");
     }
-  }, [sessionId]);
+  }, [filterMode, sessionId]);
 
   const refreshObsVideos = useCallback(async () => {
     if (!obsFolder.trim()) {
@@ -526,6 +528,113 @@ export default function LiveEventsOnePage() {
     events,
   ]);
 
+  const fetchEventsSnapshot = useCallback(async () => {
+    setEventsLoading(true);
+    setEventsError(null);
+    if (sessions.length === 0) {
+      setEvents([]);
+      setEventsLoading(false);
+      return;
+    }
+    let targetSessions = sessions;
+    let startMs: number | null = null;
+    let endMs: number | null = null;
+
+    if (filterMode === "session") {
+      if (!sessionId) {
+        setEvents([]);
+        setEventsLoading(false);
+        return;
+      }
+      targetSessions = sessions.filter((session) => session.session_id === sessionId);
+    } else if (filterMode === "day") {
+      const start = Date.parse(`${filterDay}T00:00:00`);
+      if (Number.isFinite(start)) {
+        startMs = start;
+        endMs = start + 24 * 60 * 60 * 1000;
+      }
+    } else if (filterMode === "range") {
+      const start = Date.parse(`${filterRangeStart}T00:00:00`);
+      const end = Date.parse(`${filterRangeEnd}T00:00:00`);
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        startMs = start;
+        endMs = end + 24 * 60 * 60 * 1000;
+      }
+    } else if (filterMode === "week") {
+      const start = Date.parse(`${filterWeekStart}T00:00:00`);
+      if (Number.isFinite(start)) {
+        startMs = start;
+        endMs = start + 7 * 24 * 60 * 60 * 1000;
+      }
+    } else if (filterMode === "month") {
+      const [yearStr, monthStr] = filterMonth.split("-");
+      const year = Number(yearStr);
+      const month = Number(monthStr);
+      if (Number.isFinite(year) && Number.isFinite(month)) {
+        startMs = new Date(year, Math.max(0, month - 1), 1).getTime();
+        endMs = new Date(year, Math.max(0, month), 1).getTime();
+      }
+    }
+
+    if (startMs != null && endMs != null) {
+      targetSessions = targetSessions.filter(
+        (session) => session.start_wall_ms >= startMs! && session.start_wall_ms < endMs!,
+      );
+    }
+
+    if (!targetSessions.length) {
+      setEvents([]);
+      setEventsLoading(false);
+      return;
+    }
+
+    try {
+      const responses = await Promise.all(
+        targetSessions.map(async (session) => {
+          const res = await fetch("/api/timestone_events", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: session.session_id,
+              startMs,
+              endMs,
+            }),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(body.error || `Failed to load events (${res.status})`);
+          }
+          const data = await res.json();
+          return Array.isArray(data?.events) ? (data.events as TimestoneEvent[]) : [];
+        }),
+      );
+      const combined = responses.flat();
+      combined.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
+      const normalized: EventView[] = combined.map((event) => ({
+        ...event,
+        payloadData: safeJsonParse(event.payload),
+        mouseData: safeJsonParse(event.mouse),
+      }));
+      setEvents(normalized);
+      lastWallMsRef.current = normalized.length ? normalized[0].ts_wall_ms : null;
+      seenIdsRef.current = new Set(normalized.map((event) => event.id));
+    } catch (err) {
+      setEvents([]);
+      setEventsError(err instanceof Error ? err.message : "Failed to load events");
+    } finally {
+      setEventsLoading(false);
+    }
+  }, [
+    sessions,
+    filterMode,
+    sessionId,
+    filterDay,
+    filterRangeStart,
+    filterRangeEnd,
+    filterWeekStart,
+    filterMonth,
+  ]);
+
   const handlePickObsFolder = useCallback(async () => {
     setObsPickerWarning(null);
     if (typeof window !== "undefined" && "showDirectoryPicker" in window) {
@@ -597,10 +706,7 @@ export default function LiveEventsOnePage() {
       mouseData: safeJsonParse(event.mouse),
     }));
     normalized.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
-    setEvents((prev) => {
-      const merged = [...normalized, ...prev];
-      return merged.slice(0, MAX_EVENTS);
-    });
+    setEvents((prev) => [...normalized, ...prev]);
   }, []);
 
   const buildStreamUrl = useCallback(() => {
@@ -629,6 +735,10 @@ export default function LiveEventsOnePage() {
   }, [refreshObsVideos]);
 
   useEffect(() => {
+    fetchEventsSnapshot();
+  }, [fetchEventsSnapshot]);
+
+  useEffect(() => {
     if (!autoRefresh) {
       return;
     }
@@ -639,11 +749,8 @@ export default function LiveEventsOnePage() {
   }, [autoRefresh, refreshObsVideos]);
 
   useEffect(() => {
-    lastWallMsRef.current = null;
-    seenIdsRef.current = new Set();
-    setEvents([]);
     setError(null);
-    if (!sessionId) {
+    if (!sessionId || filterMode !== "session") {
       return;
     }
     let cancelled = false;
@@ -682,7 +789,7 @@ export default function LiveEventsOnePage() {
       cancelled = true;
       source?.close();
     };
-  }, [buildStreamUrl, ingestEvents, liveEnabled, sessionId]);
+  }, [buildStreamUrl, ingestEvents, liveEnabled, sessionId, filterMode]);
 
   const resolvedSegments = useMemo(() => {
     if (!obsSegments.length) {
@@ -1270,8 +1377,10 @@ export default function LiveEventsOnePage() {
                         border: "1px solid #1e293b",
                         background: "rgba(15, 23, 42, 0.8)",
                         color: "#e2e8f0",
-                        display: "grid",
-                        placeItems: "center",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        lineHeight: 0,
                         cursor: "pointer",
                       }}
                     >
@@ -1430,11 +1539,22 @@ export default function LiveEventsOnePage() {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", color: "#94a3b8" }}>
                 <span>Status: {status}</span>
                 {activeSession ? <span>Started {activeSession.start_wall_iso}</span> : null}
-                <span>Events loaded: {eventCount}</span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  Events loaded: {eventCount}
+                  {eventsLoading ? (
+                    <span style={{ display: "inline-flex", alignItems: "center", lineHeight: 0 }}>
+                      <SyncIcon />
+                    </span>
+                  ) : null}
+                </span>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                   Videos: {obsFilteredCount}
                   {obsTotalCount ? ` / ${obsTotalCount}` : ""}
-                  {obsLoading ? <SyncIcon /> : null}
+                  {obsLoading ? (
+                    <span style={{ display: "inline-flex", alignItems: "center", lineHeight: 0 }}>
+                      <SyncIcon />
+                    </span>
+                  ) : null}
                 </span>
                 {lastUpdate ? <span>Last update: {lastUpdate}</span> : null}
               </div>
@@ -1447,6 +1567,7 @@ export default function LiveEventsOnePage() {
                 </div>
               ) : null}
               {obsPickerWarning ? <div style={{ color: "#fbbf24" }}>{obsPickerWarning}</div> : null}
+              {eventsError ? <div style={{ color: "#fca5a5" }}>{eventsError}</div> : null}
             </section>
           </div>
 
