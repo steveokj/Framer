@@ -101,24 +101,40 @@ function SubtitleIcon({ size = 20, color = "#f8fafc" }: IconProps) {
 
 function SyncIcon({ size = 14, color = "#93c5fd" }: IconProps) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M4 12a8 8 0 0 1 13.66-5.66L20 8"
-        stroke={color}
-        strokeWidth={1.6}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path d="M20 4v4h-4" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
-      <path
-        d="M20 12a8 8 0 0 1-13.66 5.66L4 16"
-        stroke={color}
-        strokeWidth={1.6}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path d="M4 20v-4h4" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
-      <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1.2s" repeatCount="indefinite" />
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      style={{ display: "block" }}
+    >
+      <g>
+        <path
+          d="M4 12a8 8 0 0 1 13.66-5.66L20 8"
+          stroke={color}
+          strokeWidth={1.6}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path d="M20 4v4h-4" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+        <path
+          d="M20 12a8 8 0 0 1-13.66 5.66L4 16"
+          stroke={color}
+          strokeWidth={1.6}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path d="M4 20v-4h4" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+        <animateTransform
+          attributeName="transform"
+          type="rotate"
+          from="0 12 12"
+          to="360 12 12"
+          dur="1.2s"
+          repeatCount="indefinite"
+        />
+      </g>
     </svg>
   );
 }
@@ -202,6 +218,21 @@ function formatWallTime(ts: number): string {
     return "--:--:--";
   }
   return new Date(ts).toLocaleTimeString();
+}
+
+function formatSessionDate(value: string): string {
+  const cleaned = value.replace(/\.\d+/, "");
+  const parsed = Date.parse(cleaned);
+  if (!Number.isFinite(parsed)) {
+    return value;
+  }
+  return new Date(parsed).toLocaleString(undefined, {
+    month: "short",
+    day: "2-digit",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function formatDurationMs(ms: number): string {
@@ -351,7 +382,7 @@ export default function LiveEventsOnePage() {
   const [obsTotalCount, setObsTotalCount] = useState(0);
   const [obsFilteredCount, setObsFilteredCount] = useState(0);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [filterMode, setFilterMode] = useState<"all" | "session" | "day" | "range" | "week" | "month">("all");
+  const [filterMode, setFilterMode] = useState<"all" | "session" | "day" | "range" | "week" | "month">("day");
   const [filterDay, setFilterDay] = useState(() => new Date().toISOString().slice(0, 10));
   const [filterRangeStart, setFilterRangeStart] = useState(() => new Date().toISOString().slice(0, 10));
   const [filterRangeEnd, setFilterRangeEnd] = useState(() => new Date().toISOString().slice(0, 10));
@@ -1384,7 +1415,7 @@ export default function LiveEventsOnePage() {
                         cursor: "pointer",
                       }}
                     >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
                         <path
                           d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v7a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V7Z"
                           stroke="#93c5fd"
@@ -1537,8 +1568,8 @@ export default function LiveEventsOnePage() {
                 ) : null}
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", color: "#94a3b8" }}>
-                <span>Status: {status}</span>
-                {activeSession ? <span>Started {activeSession.start_wall_iso}</span> : null}
+                <span>Status: {liveEnabled && filterMode === "session" ? status : "Paused"}</span>
+                {activeSession ? <span>Started {formatSessionDate(activeSession.start_wall_iso)}</span> : null}
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                   Events loaded: {eventCount}
                   {eventsLoading ? (
