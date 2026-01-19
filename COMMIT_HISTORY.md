@@ -111,3 +111,4 @@
 | 3c7e9ede40ee8ae313348e4fe462d55363dcd544 | Make overlay persistent until click on move_events | Requested persistent overlay until close | Added no-timeout overlays + click-to-dismiss | 2026-01-18 18:39:35 |
 | 4ff51219106fd91f6fc50395e3122097bbbac909 | Make overlay clickable (remove transparent style) | Overlay couldn't be clicked | Removed transparent window style so overlay can receive clicks | 2026-01-18 18:48:41 |
 | 81a7aec491f83b5877f1269afa6cda17765d8572 | Add DPI awareness + scaling for overlay alignment | Requested multi-monitor correction for window/click overlay | Enabled per-monitor DPI awareness and applied DPI scaling in overlay API payloads | 2026-01-18 19:09:41 |
+| 04e9d9cfa5fc7c9a32a7c2195a67e08d0d090ec6 | Add simple test window tool | Requested a real window GUI for manual alignment testing | Added timestone_window tool to spawn a DPI-aware test window | 2026-01-18 19:19:21 |
