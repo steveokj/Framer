@@ -1,1 +1,1 @@
-| 32a5c99d0da72b0afb7599c0e40b02744771dabe | Use physical cursor position for mouse clicks | Asked to fix mouse click alignment | Mouse clicks now use GetPhysicalCursorPos and overlay respects coord_space | 2026-01-18 21:08:59 |
+ | 1e0d02f | Fix mouse click coordinate space | Asked to fix mouse click alignment | Mouse clicks now use GetPhysicalCursorPos and overlay respects coord_space | 2026-01-18 21:08:59 | 
