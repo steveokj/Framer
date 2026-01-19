@@ -473,6 +473,7 @@ export default function LiveEventsPage() {
               color: "red",
               duration_ms: 0,
               dpi: event.payloadData?.monitor_dpi,
+              coord_space: event.payloadData?.coord_space,
             })
           }
           title="Show click overlay"
@@ -506,6 +507,7 @@ export default function LiveEventsPage() {
               color: "blue",
               duration_ms: 0,
               dpi: event.payloadData?.monitor_dpi,
+              coord_space: "physical",
             })
           }
           title="Show window overlay"

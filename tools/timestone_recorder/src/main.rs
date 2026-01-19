@@ -40,11 +40,12 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DestroyIcon, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetIconInfo, GetMessageW,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, ICONINFO, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, HHOOK, KBDLLHOOKSTRUCT, MSG,
-    MSLLHOOKSTRUCT, OBJID_WINDOW, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    GetPhysicalCursorPos, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, PostThreadMessageW,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, ICONINFO, EVENT_OBJECT_LOCATIONCHANGE,
+    EVENT_SYSTEM_FOREGROUND, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, OBJID_WINDOW, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP,
 };
 use windows::Win32::UI::Shell::{
     DragQueryFileW, HDROP, IVirtualDesktopManager, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
@@ -1304,6 +1305,17 @@ fn get_dpi_for_point(x: i32, y: i32) -> Option<(u32, u32)> {
     }
 }
 
+fn get_physical_cursor_pos() -> Option<(i32, i32)> {
+    unsafe {
+        let mut pt = POINT::default();
+        if GetPhysicalCursorPos(&mut pt).is_ok() {
+            Some((pt.x, pt.y))
+        } else {
+            None
+        }
+    }
+}
+
 fn active_window_info() -> Option<(HWND, WindowInfo)> {
     unsafe {
         let hwnd = GetForegroundWindow();
@@ -2142,17 +2154,24 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     state.last_mouse_move_ms.store(mono_ms, Ordering::SeqCst);
                 }
 
+                let use_physical = event_type == "mouse_click";
+                let (mouse_x, mouse_y) = if use_physical {
+                    get_physical_cursor_pos().unwrap_or((data.pt.x, data.pt.y))
+                } else {
+                    (data.pt.x, data.pt.y)
+                };
                 let mouse = MouseInfo {
-                    x: data.pt.x,
-                    y: data.pt.y,
+                    x: mouse_x,
+                    y: mouse_y,
                     button: button.map(|b| b.to_string()),
                     delta,
                 };
                 let dpi = get_dpi_for_point(mouse.x, mouse.y);
+                let coord_space = if use_physical { "physical" } else { "hook" };
                 let payload = if let Some((dpi_x, dpi_y)) = dpi {
-                    json!({ "monitor_dpi": { "x": dpi_x, "y": dpi_y } })
+                    json!({ "monitor_dpi": { "x": dpi_x, "y": dpi_y }, "coord_space": coord_space })
                 } else {
-                    json!({})
+                    json!({ "coord_space": coord_space })
                 };
                 let event = EventRecord {
                     session_id: state.session_id.clone(),

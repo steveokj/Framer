@@ -52,6 +52,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   const durationMs = Number.isFinite(body?.duration_ms) ? Number(body.duration_ms) : undefined;
   const color = (body?.color as string | undefined)?.trim();
   const dpi = body?.dpi as Dpi | undefined;
+  const coordSpace = typeof body?.coord_space === "string" ? String(body.coord_space) : null;
 
   const exe = resolveExePath();
   if (!(await fileExists(exe))) {
@@ -62,7 +63,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   const args: string[] = [];
-  const scale = Number.isFinite(dpi?.x) && dpi?.x ? Number(dpi?.x) / 96 : 1;
+  const scale = coordSpace === "physical" ? 1 : Number.isFinite(dpi?.x) && dpi?.x ? Number(dpi?.x) / 96 : 1;
   if (type === "rect") {
     const rect = body?.rect as Rect | undefined;
     if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top) || !Number.isFinite(rect.right) || !Number.isFinite(rect.bottom)) {
