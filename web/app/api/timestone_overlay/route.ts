@@ -28,6 +28,7 @@ function resolveExePath(): string {
 
 type Rect = { left: number; top: number; right: number; bottom: number };
 type Point = { x: number; y: number; radius?: number };
+type Dpi = { x?: number; y?: number };
 
 export async function POST(req: NextRequest): Promise<Response> {
   let body: any;
@@ -50,6 +51,7 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const durationMs = Number.isFinite(body?.duration_ms) ? Number(body.duration_ms) : undefined;
   const color = (body?.color as string | undefined)?.trim();
+  const dpi = body?.dpi as Dpi | undefined;
 
   const exe = resolveExePath();
   if (!(await fileExists(exe))) {
@@ -60,6 +62,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   const args: string[] = [];
+  const scale = Number.isFinite(dpi?.x) && dpi?.x ? Number(dpi?.x) / 96 : 1;
   if (type === "rect") {
     const rect = body?.rect as Rect | undefined;
     if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top) || !Number.isFinite(rect.right) || !Number.isFinite(rect.bottom)) {
@@ -68,7 +71,11 @@ export async function POST(req: NextRequest): Promise<Response> {
         headers: { "Content-Type": "application/json" },
       });
     }
-    args.push("rect", String(rect.left), String(rect.top), String(rect.right), String(rect.bottom));
+    const left = Math.round(rect.left * scale);
+    const top = Math.round(rect.top * scale);
+    const right = Math.round(rect.right * scale);
+    const bottom = Math.round(rect.bottom * scale);
+    args.push("rect", String(left), String(top), String(right), String(bottom));
   } else {
     const point = body?.point as Point | undefined;
     if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
@@ -77,9 +84,11 @@ export async function POST(req: NextRequest): Promise<Response> {
         headers: { "Content-Type": "application/json" },
       });
     }
-    args.push("point", String(point.x), String(point.y));
+    const x = Math.round(point.x * scale);
+    const y = Math.round(point.y * scale);
+    args.push("point", String(x), String(y));
     if (Number.isFinite(point.radius)) {
-      args.push("--radius", String(point.radius));
+      args.push("--radius", String(Math.round(point.radius * scale)));
     }
   }
 

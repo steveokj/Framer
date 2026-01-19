@@ -9,6 +9,7 @@ use windows::Win32::Graphics::Gdi::{
     SelectObject, SetBkMode, HBRUSH, HGDIOBJ, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage, RegisterClassW,
     SetLayeredWindowAttributes, SetTimer, ShowWindow, TranslateMessage, LWA_COLORKEY, MSG, SW_SHOW, WM_DESTROY,
@@ -48,6 +49,11 @@ fn color_from_name(name: &str, fallback: COLORREF) -> COLORREF {
 }
 
 fn main() -> windows::core::Result<()> {
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
     let mut args = env::args().skip(1);
     let mode = args.next().unwrap_or_default();
     if mode.is_empty() {

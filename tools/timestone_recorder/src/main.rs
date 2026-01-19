@@ -56,6 +56,8 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, GetObjectW, MonitorFromWindow, SelectObject, DIB_RGB_COLORS, MONITORINFO, MONITORINFOEXW,
     MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, SetProcessDpiAwarenessContext, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 
 const APP_DIR: &str = "data\\timestone";
 const DB_NAME: &str = "timestone_events.sqlite3";
@@ -401,6 +403,9 @@ fn parse_start_args(mut args: impl Iterator<Item = String>) -> CliOverrides {
 }
 
 fn run_recorder(overrides: CliOverrides) -> Result<()> {
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
     let base_dir = ensure_app_dir()?;
     let config = load_config(&base_dir, &overrides)?;
     let lock_path = base_dir.join(LOCK_FILE);
@@ -1254,6 +1259,8 @@ struct WindowInfo {
     process_name: Option<String>,
     monitor: Option<MonitorInfo>,
     virtual_desktop_id: Option<String>,
+    dpi_x: Option<u32>,
+    dpi_y: Option<u32>,
 }
 
 struct WindowTracker {
@@ -1294,7 +1301,7 @@ fn window_info_for_hwnd(hwnd: HWND) -> Option<WindowInfo> {
     let class_name = get_window_class(hwnd);
     let rect = get_window_rect(hwnd);
     let process_name = get_process_name(hwnd);
-    let monitor = get_monitor_info(hwnd);
+    let (monitor, dpi_x, dpi_y) = get_monitor_info(hwnd);
     let virtual_desktop_id = get_virtual_desktop_id(hwnd);
     Some(WindowInfo {
         title,
@@ -1303,6 +1310,8 @@ fn window_info_for_hwnd(hwnd: HWND) -> Option<WindowInfo> {
         process_name,
         monitor,
         virtual_desktop_id,
+        dpi_x,
+        dpi_y,
     })
 }
 
@@ -1687,12 +1696,15 @@ fn get_process_name(hwnd: HWND) -> Option<String> {
     }
 }
 
-fn get_monitor_info(hwnd: HWND) -> Option<MonitorInfo> {
+fn get_monitor_info(hwnd: HWND) -> (Option<MonitorInfo>, Option<u32>, Option<u32>) {
     unsafe {
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         if monitor.0 == 0 {
-            return None;
+            return (None, None, None);
         }
+        let mut dpi_x: u32 = 0;
+        let mut dpi_y: u32 = 0;
+        let dpi_ok = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok();
         let mut info = MONITORINFOEXW::default();
         info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
         if !GetMonitorInfoW(
@@ -1701,7 +1713,7 @@ fn get_monitor_info(hwnd: HWND) -> Option<MonitorInfo> {
         )
         .as_bool()
         {
-            return None;
+            return (None, None, None);
         }
         let name_len = info
             .szDevice
@@ -1709,7 +1721,8 @@ fn get_monitor_info(hwnd: HWND) -> Option<MonitorInfo> {
             .position(|c| *c == 0)
             .unwrap_or(info.szDevice.len());
         let name = String::from_utf16_lossy(&info.szDevice[..name_len]);
-        Some(MonitorInfo {
+        (
+            Some(MonitorInfo {
             name,
             left: info.monitorInfo.rcMonitor.left,
             top: info.monitorInfo.rcMonitor.top,
@@ -1720,7 +1733,10 @@ fn get_monitor_info(hwnd: HWND) -> Option<MonitorInfo> {
             work_right: info.monitorInfo.rcWork.right,
             work_bottom: info.monitorInfo.rcWork.bottom,
             is_primary: (info.monitorInfo.dwFlags & 1) != 0,
-        })
+        }),
+            if dpi_ok { Some(dpi_x) } else { None },
+            if dpi_ok { Some(dpi_y) } else { None },
+        )
     }
 }
 
@@ -1877,6 +1893,10 @@ fn send_active_window_changed(state: &RecorderState, window_info: &WindowInfo) {
             "app_icon_path": icon_path,
             "monitor": monitor_payload,
             "virtual_desktop_id": window_info.virtual_desktop_id.clone(),
+            "monitor_dpi": {
+                "x": window_info.dpi_x,
+                "y": window_info.dpi_y,
+            },
         }),
     };
     state.sender.try_send(event).ok();

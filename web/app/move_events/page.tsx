@@ -441,7 +441,13 @@ export default function LiveEventsPage() {
         <button
           type="button"
           onClick={() =>
-            void triggerOverlay({ type: "point", point: { x: mouse.x, y: mouse.y }, color: "red", duration_ms: 0 })
+            void triggerOverlay({
+              type: "point",
+              point: { x: mouse.x, y: mouse.y },
+              color: "red",
+              duration_ms: 0,
+              dpi: event.payloadData?.monitor_dpi,
+            })
           }
           title="Show click overlay"
           style={{
@@ -467,7 +473,15 @@ export default function LiveEventsPage() {
       return (
         <button
           type="button"
-          onClick={() => void triggerOverlay({ type: "rect", rect, color: "blue", duration_ms: 0 })}
+          onClick={() =>
+            void triggerOverlay({
+              type: "rect",
+              rect,
+              color: "blue",
+              duration_ms: 0,
+              dpi: event.payloadData?.monitor_dpi,
+            })
+          }
           title="Show window overlay"
           style={{
             width: 28,
