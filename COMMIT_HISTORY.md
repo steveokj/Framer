@@ -117,3 +117,4 @@
 | 7db8cecf052b3d1a2ef88828d5360d4f1b91df38 | Use DWM extended frame bounds for window rects | Requested window rects to align with visible frame | Switched window rect capture to DWM extended frame bounds with fallback | 2026-01-18 19:53:57 |
 | ba5158696eb3a4d8cd48c149020ed0b98ba2b844 | Enable test window button for window rect change events | Requested window opening for window_rect_changed | Allowed test window button on window_rect_changed rows | 2026-01-18 20:03:47 |
 | 1659f1ff9d0cf038b873f1ce02b90ee592849d2b | Add monitor DPI to mouse events | Asked to fix mouse click alignment | Added monitor_dpi payload to mouse events for proper scaling | 2026-01-18 20:32:59 |
+| 1bb2ff8ccbbad98056879efd07124bf4c59e2d29 | Add overlay buttons per grouped event | Requested overlay per event in group | Added overlay button in grouped child rows | 2026-01-18 20:47:43 |

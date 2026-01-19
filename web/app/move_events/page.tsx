@@ -867,6 +867,7 @@ export default function LiveEventsPage() {
                                         : eventPayload?.text
                                           ? String(eventPayload.text)
                                           : null;
+                                      const childOverlay = renderOverlayButton(event);
                                       return (
                                         <div
                                           key={event.id}
@@ -886,6 +887,7 @@ export default function LiveEventsPage() {
                                             <span style={{ color: "#94a3b8", fontSize: 12 }}>
                                               {event.event_type.replace(/_/g, " ")}
                                             </span>
+                                            {childOverlay ? <div>{childOverlay}</div> : null}
                                           </div>
                                           {event.event_type === "key_down" && eventPayload?.key ? (
                                             <div style={{ color: "#cbd5f5" }}>Key: {eventPayload.key}</div>
