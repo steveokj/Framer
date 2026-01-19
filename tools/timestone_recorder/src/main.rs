@@ -53,8 +53,8 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::Graphics::Gdi::{
     BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
-    GetMonitorInfoW, GetObjectW, MonitorFromWindow, SelectObject, DIB_RGB_COLORS, MONITORINFO, MONITORINFOEXW,
-    MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, GetObjectW, MonitorFromPoint, MonitorFromWindow, SelectObject, DIB_RGB_COLORS, MONITORINFO,
+    MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, SetProcessDpiAwarenessContext, MDT_EFFECTIVE_DPI};
@@ -1287,6 +1287,23 @@ fn cursor_position() -> Option<(i32, i32)> {
     }
 }
 
+fn get_dpi_for_point(x: i32, y: i32) -> Option<(u32, u32)> {
+    unsafe {
+        let pt = POINT { x, y };
+        let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        if monitor.0 == 0 {
+            return None;
+        }
+        let mut dpi_x: u32 = 0;
+        let mut dpi_y: u32 = 0;
+        if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok() {
+            Some((dpi_x, dpi_y))
+        } else {
+            None
+        }
+    }
+}
+
 fn active_window_info() -> Option<(HWND, WindowInfo)> {
     unsafe {
         let hwnd = GetForegroundWindow();
@@ -2131,6 +2148,12 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     button: button.map(|b| b.to_string()),
                     delta,
                 };
+                let dpi = get_dpi_for_point(mouse.x, mouse.y);
+                let payload = if let Some((dpi_x, dpi_y)) = dpi {
+                    json!({ "monitor_dpi": { "x": dpi_x, "y": dpi_y } })
+                } else {
+                    json!({})
+                };
                 let event = EventRecord {
                     session_id: state.session_id.clone(),
                     ts_wall_ms: now_wall_ms(),
@@ -2141,7 +2164,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     window_class: None,
                     window_rect: None,
                     mouse: Some(mouse),
-                    payload: json!({}),
+                    payload,
                 };
                 state.sender.try_send(event).ok();
             }
