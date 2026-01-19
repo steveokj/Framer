@@ -387,7 +387,7 @@ export default function LiveEventsOnePage() {
   const [filterRangeEnd, setFilterRangeEnd] = useState(() => new Date().toISOString().slice(0, 10));
   const [filterWeekStart, setFilterWeekStart] = useState(() => new Date().toISOString().slice(0, 10));
   const [filterMonth, setFilterMonth] = useState(() => new Date().toISOString().slice(0, 7));
-  const [detailsMaxWidth, setDetailsMaxWidth] = useState(420);
+  const [detailsMaxWidth] = useState(640);
 
   const [videoPath, setVideoPath] = useState("");
   const [videoError, setVideoError] = useState<string | null>(null);
@@ -1600,7 +1600,7 @@ export default function LiveEventsOnePage() {
           <section
             style={{
               display: "grid",
-              gridTemplateColumns: `minmax(0, 1fr) minmax(0, min(${detailsMaxWidth}px, 45vw))`,
+              gridTemplateColumns: "minmax(0, 1fr) 640px",
               gap: 24,
               alignItems: "start",
               height: "100%",
@@ -1808,17 +1808,6 @@ export default function LiveEventsOnePage() {
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <strong>Live events</strong>
                 <span style={{ color: "#94a3b8" }}>{eventCount} events</span>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
-                  <span style={{ color: "#94a3b8" }}>Details width</span>
-                  <input
-                    type="range"
-                    min={320}
-                    max={640}
-                    value={detailsMaxWidth}
-                    onChange={(event) => setDetailsMaxWidth(Number(event.target.value))}
-                    style={{ flex: "0 0 140px" }}
-                  />
-                </label>
               </div>
             {eventCount === 0 ? (
               <div style={{ color: "#94a3b8" }}>No events yet.</div>
