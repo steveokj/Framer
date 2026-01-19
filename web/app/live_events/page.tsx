@@ -108,21 +108,6 @@ function buildFileUrl(pathInput: string): string | null {
   return `${API_BASE}/files/${encodeURI(normalised)}`;
 }
 
-function parseRect(input: string | null): { left: number; top: number; right: number; bottom: number } | null {
-  const rect = safeJsonParse(input);
-  if (!rect) {
-    return null;
-  }
-  const left = Number(rect.left);
-  const top = Number(rect.top);
-  const right = Number(rect.right);
-  const bottom = Number(rect.bottom);
-  if (![left, top, right, bottom].every(Number.isFinite)) {
-    return null;
-  }
-  return { left, top, right, bottom };
-}
-
 function formatWallTime(ts: number): string {
   if (!Number.isFinite(ts)) {
     return "--:--:--";
@@ -209,8 +194,8 @@ function mergeTextInputEvents(events: EventView[]): EventView[] {
   return merged.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
 }
 
-function windowLabel(event: EventView): string {
-  return event.window_title || event.process_name || event.window_class || "Unknown window";
+function windowLabel(event: EventView): string | null {
+  return event.window_title || event.process_name || event.window_class || null;
 }
 
 function segmentByActiveWindow(events: EventView[]): EventSegment[] {
@@ -406,69 +391,6 @@ export default function LiveEventsPage() {
       return next;
     });
   }, []);
-
-  const triggerOverlay = useCallback(async (payload: any) => {
-    try {
-      await fetch("/api/timestone_overlay", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-    } catch {}
-  }, []);
-
-  const renderOverlayButton = (event: EventView) => {
-    const rect = parseRect(event.window_rect);
-    const mouse = event.mouseData || {};
-    if (event.event_type === "mouse_click" && mouse?.x != null && mouse?.y != null) {
-      return (
-        <button
-          type="button"
-          onClick={() => void triggerOverlay({ type: "point", point: { x: mouse.x, y: mouse.y }, color: "red" })}
-          title="Show click overlay"
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: 8,
-            border: "1px solid rgba(239, 68, 68, 0.5)",
-            background: "rgba(15, 23, 42, 0.7)",
-            color: "#fecaca",
-            display: "grid",
-            placeItems: "center",
-            cursor: "pointer",
-          }}
-        >
-          ●
-        </button>
-      );
-    }
-    if (
-      (event.event_type === "active_window_changed" || event.event_type === "window_rect_changed") &&
-      rect
-    ) {
-      return (
-        <button
-          type="button"
-          onClick={() => void triggerOverlay({ type: "rect", rect, color: "blue" })}
-          title="Show window overlay"
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: 8,
-            border: "1px solid rgba(59, 130, 246, 0.6)",
-            background: "rgba(15, 23, 42, 0.7)",
-            color: "#bfdbfe",
-            display: "grid",
-            placeItems: "center",
-            cursor: "pointer",
-          }}
-        >
-          ▢
-        </button>
-      );
-    }
-    return null;
-  };
 
   const renderEventDetails = (event: EventView) => {
     const payload = event.payloadData || {};
@@ -689,7 +611,6 @@ export default function LiveEventsPage() {
                             ? formatDurationMs(row.events[0].ts_wall_ms - activeSession.start_wall_ms)
                             : formatDurationMs(row.events[0].ts_mono_ms);
                           const groupIcon = resolveIconSrc(EVENT_ICON_MAP[row.event_type]);
-                          const overlayButton = renderOverlayButton(row.events[0]);
                           return (
                             <div
                               key={rowId}
@@ -737,7 +658,6 @@ export default function LiveEventsPage() {
                                 <span style={{ color: "#64748b" }}>
                                   +{groupMonoTime}
                                 </span>
-                                {overlayButton ? <div>{overlayButton}</div> : null}
                                 {row.events.length > 1 ? (
                                   <span
                                     style={{
@@ -817,6 +737,7 @@ export default function LiveEventsPage() {
                           ? formatDurationMs(event.ts_wall_ms - activeSession.start_wall_ms)
                           : formatDurationMs(event.ts_mono_ms);
                         const windowName = windowLabel(event);
+                        const windowInitial = windowName ? windowName.slice(0, 1).toUpperCase() : "?";
                         const eventIcon = resolveIconSrc(EVENT_ICON_MAP[event.event_type]);
                         const appIcon = resolveIconSrc(
                           event.event_type === "active_window_changed"
@@ -826,7 +747,6 @@ export default function LiveEventsPage() {
                             : null
                         );
                         const isActiveWindow = event.event_type === "active_window_changed";
-                        const overlayButton = renderOverlayButton(event);
                         return (
                           <div
                             key={event.id}
@@ -860,7 +780,7 @@ export default function LiveEventsPage() {
                                       fontSize: 12,
                                     }}
                                   >
-                                    {windowName.slice(0, 1).toUpperCase()}
+                                    {windowInitial}
                                   </div>
                                 )}
                                 <div style={{ display: "grid", gap: 4 }}>
@@ -873,9 +793,8 @@ export default function LiveEventsPage() {
                                         <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
                                         <span style={{ color: "#64748b" }}>+{monoTime}</span>
                                       </div>
-                                      {overlayButton ? <div>{overlayButton}</div> : null}
                                   </div>
-                                  <div style={{ color: "#cbd5f5" }}>{windowName}</div>
+                                  {windowName ? <div style={{ color: "#cbd5f5" }}>{windowName}</div> : null}
                                 </div>
                               </div>
                             ) : (
@@ -893,9 +812,8 @@ export default function LiveEventsPage() {
                                   </strong>
                                   <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
                                   <span style={{ color: "#64748b" }}>+{monoTime}</span>
-                                  {overlayButton ? <div>{overlayButton}</div> : null}
                                 </div>
-                                <div style={{ color: "#94a3b8" }}>{windowName}</div>
+                                {windowName ? <div style={{ color: "#94a3b8" }}>{windowName}</div> : null}
                               </>
                             )}
                             {renderEventDetails(event)}

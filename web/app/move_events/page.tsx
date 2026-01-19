@@ -209,8 +209,8 @@ function mergeTextInputEvents(events: EventView[]): EventView[] {
   return merged.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
 }
 
-function windowLabel(event: EventView): string {
-  return event.window_title || event.process_name || event.window_class || "Unknown window";
+function windowLabel(event: EventView): string | null {
+  return event.window_title || event.process_name || event.window_class || null;
 }
 
 function segmentByActiveWindow(events: EventView[]): EventSegment[] {
@@ -544,7 +544,7 @@ export default function LiveEventsPage() {
         onClick={() =>
           void spawnTestWindow({
             rect,
-            title: windowLabel(event),
+            title: windowLabel(event) || "Timestone Test Window",
             color: "#1f2937",
           })
         }
@@ -924,6 +924,7 @@ export default function LiveEventsPage() {
                           ? formatDurationMs(event.ts_wall_ms - activeSession.start_wall_ms)
                           : formatDurationMs(event.ts_mono_ms);
                         const windowName = windowLabel(event);
+                        const windowInitial = windowName ? windowName.slice(0, 1).toUpperCase() : "?";
                         const eventIcon = resolveIconSrc(EVENT_ICON_MAP[event.event_type]);
                         const appIcon = resolveIconSrc(
                           event.event_type === "active_window_changed"
@@ -968,7 +969,7 @@ export default function LiveEventsPage() {
                                       fontSize: 12,
                                     }}
                                   >
-                                    {windowName.slice(0, 1).toUpperCase()}
+                                    {windowInitial}
                                   </div>
                                 )}
                                 <div style={{ display: "grid", gap: 4 }}>
@@ -984,7 +985,7 @@ export default function LiveEventsPage() {
                                       {overlayButton ? <div>{overlayButton}</div> : null}
                                       {windowButton ? <div>{windowButton}</div> : null}
                                   </div>
-                                  <div style={{ color: "#cbd5f5" }}>{windowName}</div>
+                                  {windowName ? <div style={{ color: "#cbd5f5" }}>{windowName}</div> : null}
                                 </div>
                               </div>
                             ) : (
@@ -1005,7 +1006,7 @@ export default function LiveEventsPage() {
                                   {overlayButton ? <div>{overlayButton}</div> : null}
                                   {windowButton ? <div>{windowButton}</div> : null}
                                 </div>
-                                <div style={{ color: "#94a3b8" }}>{windowName}</div>
+                                {windowName ? <div style={{ color: "#94a3b8" }}>{windowName}</div> : null}
                               </>
                             )}
                             {renderEventDetails(event)}
