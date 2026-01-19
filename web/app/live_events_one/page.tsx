@@ -110,6 +110,7 @@ const MAX_EVENTS = 400;
 const SSE_POLL_MS = 500;
 const SSE_HEARTBEAT_MS = 15000;
 const TEXT_MERGE_WINDOW_MS = 1500;
+const DEFAULT_OBS_FOLDER = "C:\\Users\\steve\\Desktop\\Desktop II\\OBS";
 const LAST_FOLDER_STORAGE_KEY = "timestone:lastObsFolder:live_events_one";
 const LAST_SESSION_STORAGE_KEY = "timestone:lastSessionId:live_events_one";
 const EVENT_ICON_MAP: Record<string, string | undefined> = {
@@ -347,7 +348,9 @@ export default function LiveEventsOnePage() {
     const saved = localStorage.getItem(LAST_FOLDER_STORAGE_KEY);
     if (saved) {
       setObsFolder(saved);
+      return;
     }
+    setObsFolder(DEFAULT_OBS_FOLDER);
   }, []);
 
   useEffect(() => {
@@ -994,14 +997,25 @@ export default function LiveEventsOnePage() {
     <div className="container">
       <main
         style={{
-          minHeight: "100vh",
+          height: "100vh",
+          overflow: "hidden",
           background: "linear-gradient(180deg, #070b16 0%, #0a1224 40%, #0b1120 100%)",
           color: "#e2e8f0",
-          padding: "32px 24px 80px",
+          padding: "32px 24px 24px",
           fontFamily: '"Space Grotesk", "Segoe UI", system-ui',
         }}
       >
-        <div style={{ maxWidth: 1200, margin: "0 auto", display: "grid", gap: 24 }}>
+        <div
+          style={{
+            maxWidth: "100%",
+            margin: "0 auto",
+            display: "grid",
+            gap: 24,
+            height: "100%",
+            gridTemplateRows: "auto 1fr",
+            minHeight: 0,
+          }}
+        >
           <div
             style={{
               position: "sticky",
@@ -1033,27 +1047,6 @@ export default function LiveEventsOnePage() {
               }}
             >
               <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-                <label style={{ display: "grid", gap: 6, minWidth: 260 }}>
-                  <span style={{ color: "#cbd5f5" }}>Timestone session</span>
-                  <select
-                    value={sessionId}
-                    onChange={(event) => setSessionId(event.target.value)}
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 8,
-                      border: "1px solid #1e293b",
-                      background: "#0b1120",
-                      color: "#e2e8f0",
-                    }}
-                  >
-                    <option value="">Select a session...</option>
-                    {sessions.map((session) => (
-                      <option key={session.session_id} value={session.session_id}>
-                        {session.start_wall_iso} ({session.session_id.slice(0, 8)})
-                      </option>
-                    ))}
-                  </select>
-                </label>
                 <button
                   type="button"
                   onClick={refreshSessions}
@@ -1082,6 +1075,29 @@ export default function LiveEventsOnePage() {
                 >
                   {liveEnabled ? "Stop live" : "Start live"}
                 </button>
+                {filterMode === "session" ? (
+                  <label style={{ display: "grid", gap: 6, minWidth: 260 }}>
+                    <span style={{ color: "#cbd5f5" }}>Timestone session</span>
+                    <select
+                      value={sessionId}
+                      onChange={(event) => setSessionId(event.target.value)}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 8,
+                        border: "1px solid #1e293b",
+                        background: "#0b1120",
+                        color: "#e2e8f0",
+                      }}
+                    >
+                      <option value="">Select a session...</option>
+                      {sessions.map((session) => (
+                        <option key={session.session_id} value={session.session_id}>
+                          {session.start_wall_iso} ({session.session_id.slice(0, 8)})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
                 <label style={{ flex: "1 1 320px", display: "grid", gap: 6 }}>
@@ -1241,7 +1257,13 @@ export default function LiveEventsOnePage() {
                 {lastUpdate ? <span>Last update: {lastUpdate}</span> : null}
               </div>
               {error ? <div style={{ color: "#fca5a5" }}>{error}</div> : null}
-              {obsError ? <div style={{ color: "#fca5a5" }}>{obsError}</div> : null}
+              {obsError ? (
+                <div style={{ color: "#fca5a5" }}>
+                  {obsError.includes("Failed to read folder")
+                    ? `Folder not found: ${obsFolder || DEFAULT_OBS_FOLDER}`
+                    : obsError}
+                </div>
+              ) : null}
             </section>
           </div>
 
@@ -1251,9 +1273,11 @@ export default function LiveEventsOnePage() {
               gridTemplateColumns: "minmax(0, 2fr) minmax(0, 1fr)",
               gap: 24,
               alignItems: "start",
+              height: "100%",
+              minHeight: 0,
             }}
           >
-            <div style={{ display: "grid", gap: 16 }}>
+            <div style={{ display: "grid", gap: 16, minHeight: 0 }}>
               <div
                 style={{
                   borderRadius: 16,
@@ -1438,7 +1462,17 @@ export default function LiveEventsOnePage() {
                 </div>
               </div>
             </div>
-            <div style={{ display: "grid", gap: 16, maxWidth: detailsMaxWidth, width: "100%" }}>
+            <div
+              style={{
+                display: "grid",
+                gap: 16,
+                maxWidth: detailsMaxWidth,
+                width: "100%",
+                overflowY: "auto",
+                paddingRight: 8,
+                minHeight: 0,
+              }}
+            >
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <strong>Live events</strong>
                 <span style={{ color: "#94a3b8" }}>{eventCount} events</span>
