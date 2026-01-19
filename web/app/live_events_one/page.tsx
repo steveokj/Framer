@@ -1274,11 +1274,13 @@ export default function LiveEventsOnePage() {
       <main
         style={{
           height: "100vh",
-          overflow: "hidden",
+          overflowX: "hidden",
+          overflowY: "hidden",
           background: "linear-gradient(180deg, #070b16 0%, #0a1224 40%, #0b1120 100%)",
           color: "#e2e8f0",
           padding: "32px 24px 24px",
           fontFamily: '"Space Grotesk", "Segoe UI", system-ui',
+          boxSizing: "border-box",
         }}
       >
         <div
@@ -1290,6 +1292,7 @@ export default function LiveEventsOnePage() {
             height: "100%",
             gridTemplateRows: "auto 1fr",
             minHeight: 0,
+            boxSizing: "border-box",
           }}
         >
           <div
@@ -1379,19 +1382,21 @@ export default function LiveEventsOnePage() {
                 <label style={{ flex: "1 1 320px", display: "grid", gap: 6 }}>
                   <span style={{ color: "#cbd5f5" }}>OBS folder</span>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <input
-                      value={obsFolder}
-                      onChange={(event) => setObsFolder(event.target.value)}
-                      placeholder="C:\\Path\\To\\OBS"
-                      style={{
-                        padding: "8px 10px",
-                        borderRadius: 8,
-                        border: "1px solid #1e293b",
-                        background: "#0b1120",
-                        color: "#e2e8f0",
-                        flex: 1,
-                      }}
-                    />
+                  <input
+                    value={obsFolder}
+                    onChange={(event) => setObsFolder(event.target.value)}
+                    placeholder="C:\\Path\\To\\OBS"
+                    style={{
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      border: "1px solid #1e293b",
+                      background: "#0b1120",
+                      color: "#e2e8f0",
+                      flex: 1,
+                      height: 40,
+                      boxSizing: "border-box",
+                    }}
+                  />
                     <button
                       type="button"
                       onClick={handlePickObsFolder}
@@ -1409,6 +1414,7 @@ export default function LiveEventsOnePage() {
                         justifyContent: "center",
                         lineHeight: 0,
                         cursor: "pointer",
+                        height: 40,
                       }}
                     >
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
@@ -1440,6 +1446,7 @@ export default function LiveEventsOnePage() {
                     background: "#0f172a",
                     color: "#e2e8f0",
                     cursor: "pointer",
+                    height: 40,
                   }}
                 >
                   Refresh videos
@@ -1593,11 +1600,12 @@ export default function LiveEventsOnePage() {
           <section
             style={{
               display: "grid",
-              gridTemplateColumns: `minmax(0, 1fr) ${detailsMaxWidth}px`,
+              gridTemplateColumns: `minmax(0, 1fr) minmax(0, min(${detailsMaxWidth}px, 45vw))`,
               gap: 24,
               alignItems: "start",
               height: "100%",
               minHeight: 0,
+              boxSizing: "border-box",
             }}
           >
             <div style={{ display: "grid", gap: 16, minHeight: 0 }}>
@@ -1789,10 +1797,11 @@ export default function LiveEventsOnePage() {
               style={{
                 display: "grid",
                 gap: 16,
-                width: detailsMaxWidth,
+                width: "100%",
                 justifySelf: "end",
                 overflowY: "auto",
-                paddingRight: 8,
+                paddingRight: 0,
+                height: "100%",
                 minHeight: 0,
               }}
             >
@@ -1807,6 +1816,7 @@ export default function LiveEventsOnePage() {
                     max={640}
                     value={detailsMaxWidth}
                     onChange={(event) => setDetailsMaxWidth(Number(event.target.value))}
+                    style={{ flex: "0 0 140px" }}
                   />
                 </label>
               </div>
