@@ -99,6 +99,30 @@ function SubtitleIcon({ size = 20, color = "#f8fafc" }: IconProps) {
   );
 }
 
+function SyncIcon({ size = 14, color = "#93c5fd" }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M4 12a8 8 0 0 1 13.66-5.66L20 8"
+        stroke={color}
+        strokeWidth={1.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M20 4v4h-4" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M20 12a8 8 0 0 1-13.66 5.66L4 16"
+        stroke={color}
+        strokeWidth={1.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M4 20v-4h4" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+      <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1.2s" repeatCount="indefinite" />
+    </svg>
+  );
+}
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
@@ -1407,11 +1431,11 @@ export default function LiveEventsOnePage() {
                 <span>Status: {status}</span>
                 {activeSession ? <span>Started {activeSession.start_wall_iso}</span> : null}
                 <span>Events loaded: {eventCount}</span>
-                <span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                   Videos: {obsFilteredCount}
                   {obsTotalCount ? ` / ${obsTotalCount}` : ""}
+                  {obsLoading ? <SyncIcon /> : null}
                 </span>
-                {obsLoading ? <span>Indexing videos...</span> : null}
                 {lastUpdate ? <span>Last update: {lastUpdate}</span> : null}
               </div>
               {error ? <div style={{ color: "#fca5a5" }}>{error}</div> : null}

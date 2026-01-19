@@ -88,7 +88,7 @@ export async function POST(req: NextRequest) {
   const folderInput = typeof body?.folderPath === "string" ? body.folderPath : "";
   const folderPath = resolveFolderPath(folderInput);
   const maxFilesRaw = Number(body?.maxFiles);
-  const maxFiles = Number.isFinite(maxFilesRaw) ? Math.max(1, Math.floor(maxFilesRaw)) : 200;
+  const maxFiles = Number.isFinite(maxFilesRaw) ? Math.max(1, Math.floor(maxFilesRaw)) : null;
   const rangeStartMs = Number.isFinite(body?.startMs) ? Number(body.startMs) : null;
   const rangeEndMs = Number.isFinite(body?.endMs) ? Number(body.endMs) : null;
 
@@ -115,8 +115,7 @@ export async function POST(req: NextRequest) {
     .filter((name) => VIDEO_EXTS.has(path.extname(name).toLowerCase()));
 
   const totalCount = files.length;
-  const shouldLimit = rangeStartMs == null && rangeEndMs == null;
-  const limited = shouldLimit ? files.slice(0, maxFiles) : files;
+  const limited = maxFiles ? files.slice(0, maxFiles) : files;
   const results: VideoEntry[] = [];
 
   for (const name of limited) {
