@@ -318,6 +318,25 @@ function windowLabel(event: EventView): string | null {
   return event.window_title || event.process_name || event.window_class || null;
 }
 
+function eventSearchBlob(event: EventView): string {
+  const payload = event.payloadData || {};
+  const mouse = event.mouseData || {};
+  const shortcut = event.event_type === "key_shortcut" ? formatShortcut(payload) : null;
+  return [
+    event.event_type,
+    event.window_title || "",
+    event.process_name || "",
+    event.window_class || "",
+    payload?.text || "",
+    payload?.final_text || "",
+    payload?.note || "",
+    shortcut || "",
+    mouse?.x != null && mouse?.y != null ? `click ${mouse.x},${mouse.y}` : "",
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
 function segmentByActiveWindow(events: EventView[]): EventSegment[] {
   const sorted = [...events].sort((a, b) => a.ts_wall_ms - b.ts_wall_ms);
   const segments: EventSegment[] = [];
@@ -381,11 +400,16 @@ export default function LiveEventsOnePage() {
   const [obsPickerWarning, setObsPickerWarning] = useState<string | null>(null);
   const [obsTotalCount, setObsTotalCount] = useState(0);
   const [obsFilteredCount, setObsFilteredCount] = useState(0);
-  const [filterMode, setFilterMode] = useState<"all" | "session" | "day" | "range" | "week" | "month">("day");
+  const [filterMode, setFilterMode] = useState<"all" | "session" | "day" | "range" | "week" | "month">("week");
   const [filterDay, setFilterDay] = useState(() => new Date().toISOString().slice(0, 10));
   const [filterRangeStart, setFilterRangeStart] = useState(() => new Date().toISOString().slice(0, 10));
   const [filterRangeEnd, setFilterRangeEnd] = useState(() => new Date().toISOString().slice(0, 10));
-  const [filterWeekStart, setFilterWeekStart] = useState(() => new Date().toISOString().slice(0, 10));
+  // const [filterWeekStart, setFilterWeekStart] = useState(() => new Date().toISOString().slice(0, 10));
+  const [filterWeekStart, setFilterWeekStart] = useState(() => { 
+    const d = new Date();                                                          
+    d.setDate(d.getDate() - 7);  
+    return d.toISOString().slice(0, 10);
+  });
   const [filterMonth, setFilterMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [detailsMaxWidth] = useState(640);
 
@@ -398,6 +422,32 @@ export default function LiveEventsOnePage() {
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const [pendingSeekSeconds, setPendingSeekSeconds] = useState<number | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchModalOpen, setSearchModalOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [videoOnly, setVideoOnly] = useState(false);
+  const [eventVisibility, setEventVisibility] = useState<Record<string, boolean>>(() => ({
+    active_window_changed: true,
+    key_shortcut: true,
+    key_down: true,
+    text_input: true,
+    mouse_click: true,
+    clipboard_text: true,
+    clipboard_image: true,
+    clipboard_files: true,
+    marker: true,
+    window_rect_changed: false,
+    mouse_move: false,
+    mouse_scroll: false,
+  }));
+  const [searchScopes, setSearchScopes] = useState<Record<string, boolean>>({
+    transcript: true,
+    typed: true,
+    window: true,
+    process: true,
+    shortcut: true,
+    clipboard: true,
+  });
 
   const lastWallMsRef = useRef<number | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
@@ -927,7 +977,69 @@ export default function LiveEventsOnePage() {
 
   const eventCount = filteredEvents.length;
   const displayEvents = useMemo(() => mergeTextInputEvents(filteredEvents), [filteredEvents]);
-  const segments = useMemo(() => segmentByActiveWindow(displayEvents), [displayEvents]);
+  const visibleEvents = useMemo(() => {
+    return displayEvents.filter((event) => eventVisibility[event.event_type] !== false);
+  }, [displayEvents, eventVisibility]);
+
+  const filteredBySearch = useMemo(() => {
+    if (!searchQuery.trim()) {
+      return visibleEvents;
+    }
+    const needle = searchQuery.trim().toLowerCase();
+    return visibleEvents.filter((event) => {
+      if (searchScopes.window && (event.window_title || "").toLowerCase().includes(needle)) {
+        return true;
+      }
+      if (searchScopes.process && (event.process_name || "").toLowerCase().includes(needle)) {
+        return true;
+      }
+      if (searchScopes.shortcut && event.event_type === "key_shortcut") {
+        const shortcut = formatShortcut(event.payloadData || {});
+        if (shortcut && shortcut.toLowerCase().includes(needle)) {
+          return true;
+        }
+      }
+      if (searchScopes.clipboard && event.event_type.startsWith("clipboard")) {
+        const blob = eventSearchBlob(event);
+        if (blob.includes(needle)) {
+          return true;
+        }
+      }
+      if (searchScopes.typed && event.event_type === "text_input") {
+        const blob = eventSearchBlob(event);
+        if (blob.includes(needle)) {
+          return true;
+        }
+      }
+      if (searchScopes.transcript && event.event_type === "text_input") {
+        const blob = eventSearchBlob(event);
+        if (blob.includes(needle)) {
+          return true;
+        }
+      }
+      return eventSearchBlob(event).includes(needle);
+    });
+  }, [searchQuery, searchScopes, visibleEvents]);
+
+  const videoOnlyEvents = useMemo(() => {
+    if (!videoOnly) {
+      return filteredBySearch;
+    }
+    if (!videoSegmentsByTime.length) {
+      return [];
+    }
+    return filteredBySearch.filter((event) =>
+      videoSegmentsByTime.some(
+        (segment) =>
+          segment.start_ms != null &&
+          segment.end_ms != null &&
+          event.ts_wall_ms >= segment.start_ms &&
+          event.ts_wall_ms <= segment.end_ms,
+      ),
+    );
+  }, [filteredBySearch, videoOnly, videoSegmentsByTime]);
+
+  const segments = useMemo(() => segmentByActiveWindow(videoOnlyEvents), [videoOnlyEvents]);
 
   const activeSegment = useMemo(() => {
     if (activeSegmentId) {
@@ -938,6 +1050,10 @@ export default function LiveEventsOnePage() {
     }
     return null;
   }, [activeSegmentId, visibleSegments]);
+
+  const videoSegmentsByTime = useMemo(() => {
+    return visibleSegments.filter((segment) => segment.start_ms != null && segment.end_ms != null);
+  }, [visibleSegments]);
 
   const activeSegmentIndex = useMemo(() => {
     if (!activeSegment) {
@@ -1805,14 +1921,120 @@ export default function LiveEventsOnePage() {
                 minHeight: 0,
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <strong>Live events</strong>
-                <span style={{ color: "#94a3b8" }}>{eventCount} events</span>
+              <div
+                style={{
+                  position: "sticky",
+                  top: 0,
+                  zIndex: 10,
+                  background: "rgba(7, 11, 22, 0.95)",
+                  paddingBottom: 12,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <strong>Live events</strong>
+                  <span style={{ color: "#94a3b8" }}>
+                    {segments.reduce((sum, seg) => sum + seg.events.length, 0)} events
+                  </span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+                  <input
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    placeholder="Search events or transcripts"
+                    style={{
+                      flex: 1,
+                      padding: "8px 10px",
+                      borderRadius: 10,
+                      border: "1px solid #1e293b",
+                      background: "#0b1120",
+                      color: "#e2e8f0",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setSearchModalOpen(true)}
+                    style={{
+                      width: 38,
+                      height: 38,
+                      borderRadius: 10,
+                      border: "1px solid #1e293b",
+                      background: "rgba(15, 23, 42, 0.7)",
+                      color: "#e2e8f0",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      lineHeight: 0,
+                      cursor: "pointer",
+                    }}
+                    title="Search filters"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                      <circle cx="11" cy="11" r="7" stroke="#93c5fd" strokeWidth="1.6" />
+                      <path d="m16.5 16.5 4 4" stroke="#93c5fd" strokeWidth="1.6" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen(true)}
+                    style={{
+                      width: 38,
+                      height: 38,
+                      borderRadius: 10,
+                      border: "1px solid #1e293b",
+                      background: "rgba(15, 23, 42, 0.7)",
+                      color: "#e2e8f0",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      lineHeight: 0,
+                      cursor: "pointer",
+                    }}
+                    title="Settings"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                      <path
+                        d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"
+                        stroke="#93c5fd"
+                        strokeWidth="1.6"
+                      />
+                      <path
+                        d="M19.4 13.5a1 1 0 0 0 .2 1.1l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V19a2 2 0 0 1-4 0v-.1a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H5a2 2 0 0 1 0-4h.1a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V5a2 2 0 0 1 4 0v.1a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H19a2 2 0 0 1 0 4h-.1a1 1 0 0 0-.9.6Z"
+                        stroke="#93c5fd"
+                        strokeWidth="1.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVideoOnly((prev) => !prev)}
+                    style={{
+                      width: 38,
+                      height: 38,
+                      borderRadius: 10,
+                      border: "1px solid #1e293b",
+                      background: videoOnly ? "rgba(56, 189, 248, 0.25)" : "rgba(15, 23, 42, 0.7)",
+                      color: videoOnly ? "#e0f2fe" : "#e2e8f0",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      lineHeight: 0,
+                      cursor: "pointer",
+                    }}
+                    title="Only events with video"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                      <rect x="3" y="6" width="14" height="12" rx="2" stroke="#93c5fd" strokeWidth="1.6" />
+                      <path d="M17 10l4-2v8l-4-2" stroke="#93c5fd" strokeWidth="1.6" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                </div>
               </div>
-            {eventCount === 0 ? (
-              <div style={{ color: "#94a3b8" }}>No events yet.</div>
-            ) : (
-              segments.map((segment) => {
+              {eventCount === 0 ? (
+                <div style={{ color: "#94a3b8" }}>No events yet.</div>
+              ) : (
+                segments.map((segment) => {
                 const rows = groupConsecutiveByType(segment.events);
 
                 return (
@@ -2062,7 +2284,136 @@ export default function LiveEventsOnePage() {
                   </div>
                 );
               })
-            )}
+              )}
+              {searchModalOpen ? (
+                <div
+                  style={{
+                    position: "fixed",
+                    inset: 0,
+                    background: "rgba(2, 6, 23, 0.7)",
+                    display: "grid",
+                    placeItems: "center",
+                    zIndex: 50,
+                  }}
+                  onClick={() => setSearchModalOpen(false)}
+                >
+                  <div
+                    onClick={(event) => event.stopPropagation()}
+                    style={{
+                      width: 360,
+                      maxWidth: "90vw",
+                      background: "#0f172a",
+                      borderRadius: 14,
+                      border: "1px solid rgba(30, 41, 59, 0.8)",
+                      padding: 16,
+                      display: "grid",
+                      gap: 12,
+                    }}
+                  >
+                    <strong>Search scope</strong>
+                    {Object.entries(searchScopes).map(([key, enabled]) => (
+                      <label key={key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          onChange={(event) =>
+                            setSearchScopes((prev) => ({ ...prev, [key]: event.target.checked }))
+                          }
+                        />
+                        <span style={{ textTransform: "capitalize" }}>{key}</span>
+                      </label>
+                    ))}
+                    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                      <button
+                        type="button"
+                        onClick={() => setSearchModalOpen(false)}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 8,
+                          border: "1px solid #1e293b",
+                          background: "#0b1120",
+                          color: "#e2e8f0",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+              {settingsOpen ? (
+                <div
+                  style={{
+                    position: "fixed",
+                    inset: 0,
+                    background: "rgba(2, 6, 23, 0.7)",
+                    display: "grid",
+                    placeItems: "center",
+                    zIndex: 50,
+                  }}
+                  onClick={() => setSettingsOpen(false)}
+                >
+                  <div
+                    onClick={(event) => event.stopPropagation()}
+                    style={{
+                      width: 420,
+                      maxWidth: "90vw",
+                      background: "#0f172a",
+                      borderRadius: 14,
+                      border: "1px solid rgba(30, 41, 59, 0.8)",
+                      padding: 16,
+                      display: "grid",
+                      gap: 12,
+                    }}
+                  >
+                    <strong>Event visibility</strong>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {Object.entries(eventVisibility).map(([key, enabled]) => (
+                        <label
+                          key={key}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            padding: "6px 10px",
+                            borderRadius: 999,
+                            border: "1px solid rgba(30, 41, 59, 0.6)",
+                            background: enabled ? "rgba(56, 189, 248, 0.2)" : "rgba(15, 23, 42, 0.6)",
+                            color: enabled ? "#e0f2fe" : "#94a3b8",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={enabled}
+                            onChange={(event) =>
+                              setEventVisibility((prev) => ({ ...prev, [key]: event.target.checked }))
+                            }
+                          />
+                          <span style={{ textTransform: "capitalize" }}>{key.replace(/_/g, " ")}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                      <button
+                        type="button"
+                        onClick={() => setSettingsOpen(false)}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 8,
+                          border: "1px solid #1e293b",
+                          background: "#0b1120",
+                          color: "#e2e8f0",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </section>
         </div>
