@@ -1398,6 +1398,25 @@ export default function LiveEventsOnePage() {
           boxSizing: "border-box",
         }}
       >
+        <style>{`
+          .live-events-one-sidebar {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(148, 163, 184, 0.5) transparent;
+          }
+          .live-events-one-sidebar::-webkit-scrollbar {
+            width: 8px;
+          }
+          .live-events-one-sidebar::-webkit-scrollbar-track {
+            background: transparent;
+          }
+          .live-events-one-sidebar::-webkit-scrollbar-thumb {
+            background: rgba(51, 65, 85, 0.7);
+            border-radius: 999px;
+          }
+          .live-events-one-sidebar::-webkit-scrollbar-thumb:hover {
+            background: rgba(100, 116, 139, 0.9);
+          }
+        `}</style>
         <div
           style={{
             maxWidth: "100%",
@@ -1924,6 +1943,7 @@ export default function LiveEventsOnePage() {
                 minHeight: 0,
                 minWidth: 0,
               }}
+              className="live-events-one-sidebar"
             >
               <div
                 style={{
