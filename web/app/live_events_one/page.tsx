@@ -1312,8 +1312,7 @@ export default function LiveEventsOnePage() {
     const shortcut = event.event_type === "key_shortcut" ? formatShortcut(payload) : null;
 
     return (
-      <>
-
+      <div style={{ display: "grid", gap: 6, overflowWrap: "anywhere", wordBreak: "break-word", minWidth: 0 }}>
         {event.event_type === "clipboard_text" && clipTextValue ? (
           <div style={{ display: "grid", gap: 8 }}>
             <strong>Clipboard text</strong>
@@ -1346,7 +1345,7 @@ export default function LiveEventsOnePage() {
                 style={{ maxWidth: 360, borderRadius: 10, border: "1px solid #1e293b" }}
               />
             ) : null}
-            <div style={{ color: "#64748b" }}>{clipboardPath}</div>
+            <div style={{ color: "#64748b", overflowWrap: "anywhere" }}>{clipboardPath}</div>
           </div>
         ) : null}
 
@@ -1381,7 +1380,7 @@ export default function LiveEventsOnePage() {
             Click @ {mouse.x},{mouse.y}
           </div>
         ) : null}
-      </>
+      </div>
     );
   };
 
@@ -2085,6 +2084,7 @@ export default function LiveEventsOnePage() {
                                 display: "grid",
                                 gap: 6,
                                 cursor: "pointer",
+                                minWidth: 0,
                               }}
                               onClick={() => handleSeekToWallMs(row.events[0].ts_wall_ms)}
                             >
@@ -2230,11 +2230,20 @@ export default function LiveEventsOnePage() {
                               display: "grid",
                               gap: 12,
                               cursor: "pointer",
+                              minWidth: 0,
                             }}
                             onClick={() => handleSeekToWallMs(event.ts_wall_ms)}
                           >
                             {isActiveWindow ? (
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  flexWrap: "wrap",
+                                  gap: 12,
+                                  alignItems: "center",
+                                  minWidth: 0,
+                                }}
+                              >
                                 {appIcon ? (
                                   <img
                                     src={appIcon}
@@ -2257,8 +2266,8 @@ export default function LiveEventsOnePage() {
                                     {windowInitial}
                                   </div>
                                 )}
-                                <div style={{ display: "grid", gap: 4 }}>
-                                    <div style={{ display: "flex", flexDirection: "row", gap: 16 }}>
+                                <div style={{ display: "grid", gap: 4, minWidth: 0 }}>
+                                    <div style={{ display: "flex", flexDirection: "row", gap: 16, flexWrap: "wrap" }}>
                                       <strong style={{ textTransform: "capitalize" }}>
                                         {event.event_type.replace(/_/g, " ")}
                                       </strong>
@@ -2268,12 +2277,22 @@ export default function LiveEventsOnePage() {
                                         <span style={{ color: "#64748b" }}>+{monoTime}</span>
                                       </div>
                                   </div>
-                                  {windowName ? <div style={{ color: "#cbd5f5" }}>{windowName}</div> : null}
+                                  {windowName ? (
+                                    <div style={{ color: "#cbd5f5", overflowWrap: "anywhere" }}>{windowName}</div>
+                                  ) : null}
                                 </div>
                               </div>
                             ) : (
                               <>
-                                <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: 12,
+                                    alignItems: "center",
+                                    minWidth: 0,
+                                  }}
+                                >
                                   {eventIcon ? (
                                     <img
                                       src={eventIcon}
@@ -2287,7 +2306,9 @@ export default function LiveEventsOnePage() {
                                   <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
                                   <span style={{ color: "#64748b" }}>+{monoTime}</span>
                                 </div>
-                                {windowName ? <div style={{ color: "#94a3b8" }}>{windowName}</div> : null}
+                                {windowName ? (
+                                  <div style={{ color: "#94a3b8", overflowWrap: "anywhere" }}>{windowName}</div>
+                                ) : null}
                               </>
                             )}
                             {renderEventDetails(event)}
