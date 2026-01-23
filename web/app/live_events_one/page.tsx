@@ -1940,13 +1940,22 @@ export default function LiveEventsOnePage() {
                     {segments.reduce((sum, seg) => sum + seg.events.length, 0)} events
                   </span>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    alignItems: "center",
+                    gap: 10,
+                    marginTop: 10,
+                  }}
+                >
                   <input
                     value={searchQuery}
                     onChange={(event) => setSearchQuery(event.target.value)}
                     placeholder="Search events or transcripts"
                     style={{
-                      flex: 1,
+                      flex: "1 1 220px",
+                      minWidth: 200,
                       padding: "8px 10px",
                       borderRadius: 10,
                       border: "1px solid #1e293b",
