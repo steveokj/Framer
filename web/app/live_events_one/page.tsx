@@ -1716,12 +1716,13 @@ export default function LiveEventsOnePage() {
           <section
             style={{
               display: "grid",
-              gridTemplateColumns: "minmax(0, 1fr) 640px",
+              gridTemplateColumns: "minmax(0, 1fr) minmax(0, min(640px, 100%))",
               gap: 24,
               alignItems: "start",
               height: "100%",
               minHeight: 0,
               boxSizing: "border-box",
+              overflowX: "hidden",
             }}
           >
             <div style={{ display: "grid", gap: 16, minHeight: 0 }}>
@@ -1914,11 +1915,14 @@ export default function LiveEventsOnePage() {
                 display: "grid",
                 gap: 16,
                 width: "100%",
+                maxWidth: "min(640px, 100%)",
                 justifySelf: "end",
                 overflowY: "auto",
+                overflowX: "hidden",
                 paddingRight: 0,
                 height: "100%",
                 minHeight: 0,
+                minWidth: 0,
               }}
             >
               <div
