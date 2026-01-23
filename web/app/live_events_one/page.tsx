@@ -1021,6 +1021,10 @@ export default function LiveEventsOnePage() {
     });
   }, [searchQuery, searchScopes, visibleEvents]);
 
+  const videoSegmentsByTime = useMemo(() => {
+    return visibleSegments.filter((segment) => segment.start_ms != null && segment.end_ms != null);
+  }, [visibleSegments]);
+
   const videoOnlyEvents = useMemo(() => {
     if (!videoOnly) {
       return filteredBySearch;
@@ -1050,10 +1054,6 @@ export default function LiveEventsOnePage() {
     }
     return null;
   }, [activeSegmentId, visibleSegments]);
-
-  const videoSegmentsByTime = useMemo(() => {
-    return visibleSegments.filter((segment) => segment.start_ms != null && segment.end_ms != null);
-  }, [visibleSegments]);
 
   const activeSegmentIndex = useMemo(() => {
     if (!activeSegment) {
