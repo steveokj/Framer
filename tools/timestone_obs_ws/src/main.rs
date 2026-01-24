@@ -76,18 +76,18 @@ fn main() -> Result<()> {
         .lock_path
         .unwrap_or_else(|| base_dir.join(LOCK_FILE));
     let lock_info = read_lock_info(&lock_path).unwrap_or_default();
-    let session_id = args
-        .session_id
-        .or(lock_info.session_id)
-        .ok_or_else(|| anyhow!("Missing session id. Start timestone_recorder or pass --session-id."))?;
+    let session_id = args.session_id.or(lock_info.session_id);
 
     let conn = open_db(&db_path)?;
-    ensure_session_row(
-        &conn,
-        &session_id,
-        lock_info.start_wall_ms,
-        lock_info.start_wall_iso,
-    )?;
+    init_db(&conn)?;
+    if let Some(session_id) = session_id.as_deref() {
+        ensure_session_row(
+            &conn,
+            session_id,
+            lock_info.start_wall_ms,
+            lock_info.start_wall_iso,
+        )?;
+    }
 
     let control = ControlSender::new(&args.control_host, args.control_port)?;
     let stream_state_path = base_dir.join(STREAM_STATE_FILE);
@@ -140,7 +140,7 @@ fn main() -> Result<()> {
                     if let Some(data) = message.get("d") {
                         handle_event(
                             &conn,
-                            &session_id,
+                            session_id.as_deref(),
                             data,
                             &mut socket,
                             &mut request_counter,
@@ -295,6 +295,35 @@ fn ensure_session_row(
     Ok(())
 }
 
+fn init_db(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT UNIQUE,
+            start_wall_ms INTEGER,
+            start_wall_iso TEXT,
+            obs_video_path TEXT
+        );
+        CREATE TABLE IF NOT EXISTS obs_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            ts_wall_ms INTEGER,
+            event_type TEXT,
+            output_active INTEGER,
+            output_paused INTEGER,
+            output_path TEXT,
+            payload TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_obs_events_time ON obs_events(ts_wall_ms);
+        CREATE INDEX IF NOT EXISTS idx_obs_events_session ON obs_events(session_id);
+        ",
+    )?;
+    Ok(())
+}
+
 fn update_session_obs_path(conn: &Connection, session_id: &str, obs_video_path: &str) -> Result<()> {
     conn.execute(
         "UPDATE sessions SET obs_video_path = ? WHERE session_id = ?",
@@ -393,7 +422,7 @@ fn send_identify(
 
 fn handle_event(
     conn: &Connection,
-    session_id: &str,
+    session_id: Option<&str>,
     data: &Value,
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     request_counter: &mut u64,
@@ -417,9 +446,11 @@ fn handle_event(
                 _ => "obs_record_state",
             };
             if let Some(path) = event_data.get("outputPath").and_then(|v| v.as_str()) {
-                let _ = update_session_obs_path(conn, session_id, path);
+                if let Some(session_id) = session_id {
+                    let _ = update_session_obs_path(conn, session_id, path);
+                }
             }
-            insert_event(conn, session_id, mapped, event_data.clone(), verbose)?;
+            insert_obs_event(conn, session_id, mapped, &event_data, verbose)?;
             if matches!(
                 output_state,
                 "OBS_WEBSOCKET_OUTPUT_STARTED" | "OBS_WEBSOCKET_OUTPUT_RESUMED"
@@ -449,9 +480,11 @@ fn handle_event(
         }
         "RecordFileChanged" => {
             if let Some(path) = event_data.get("newOutputPath").and_then(|v| v.as_str()) {
-                let _ = update_session_obs_path(conn, session_id, path);
+                if let Some(session_id) = session_id {
+                    let _ = update_session_obs_path(conn, session_id, path);
+                }
             }
-            insert_event(conn, session_id, "obs_record_file_changed", event_data.clone(), verbose)?;
+            insert_obs_event(conn, session_id, "obs_record_file_changed", &event_data, verbose)?;
         }
         _ => {}
     }
@@ -529,28 +562,28 @@ fn write_stream_state(path: &Path, active: bool) -> Result<()> {
     Ok(())
 }
 
-fn insert_event(
+fn insert_obs_event(
     conn: &Connection,
-    session_id: &str,
+    session_id: Option<&str>,
     event_type: &str,
-    payload: Value,
+    payload: &Value,
     verbose: bool,
 ) -> Result<()> {
     let ts_wall_ms = now_wall_ms();
-    let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    let payload_str = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    let output_active = payload.get("outputActive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let output_paused = payload.get("outputPaused").and_then(|v| v.as_bool()).unwrap_or(false);
+    let output_path = payload.get("outputPath").and_then(|v| v.as_str()).map(|s| s.to_string());
     conn.execute(
-        "INSERT INTO events (session_id, ts_wall_ms, ts_mono_ms, event_type, process_name, window_title, window_class, window_rect, mouse, payload)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO obs_events (session_id, ts_wall_ms, event_type, output_active, output_paused, output_path, payload)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         params![
             session_id,
             ts_wall_ms,
-            ts_wall_ms,
             event_type,
-            Option::<String>::None,
-            Option::<String>::None,
-            Option::<String>::None,
-            Option::<String>::None,
-            Option::<String>::None,
+            if output_active { 1 } else { 0 },
+            if output_paused { 1 } else { 0 },
+            output_path,
             payload_str
         ],
     )
