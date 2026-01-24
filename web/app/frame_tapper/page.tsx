@@ -447,6 +447,9 @@ export default function LiveEventsOnePage() {
   const [searchModalOpen, setSearchModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [videoOnly, setVideoOnly] = useState(false);
+  const [framesOnlyIds, setFramesOnlyIds] = useState<Set<number>>(new Set());
+  const [framesOnlyLoading, setFramesOnlyLoading] = useState(false);
+  const [framesOnlyError, setFramesOnlyError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<EventView | null>(null);
   const [eventFrames, setEventFrames] = useState<EventFrame[]>([]);
   const [frameIndex, setFrameIndex] = useState(0);
@@ -601,27 +604,15 @@ export default function LiveEventsOnePage() {
     }
   }, [filterMode, sessionId]);
 
-  const refreshObsVideos = useCallback(async () => {
-    if (!obsFolder.trim()) {
-      setObsSegments([]);
-      setObsError(null);
-      setObsPickerWarning(null);
-      setObsTotalCount(0);
-      setObsFilteredCount(0);
-      return;
-    }
+  const resolveFilterRange = useCallback(() => {
     let startMs: number | null = null;
     let endMs: number | null = null;
     if (filterMode === "session" && sessionId) {
       const sessionEvents = events.filter((event) => event.session_id === sessionId);
-      if (sessionEvents.length === 0) {
-        setObsSegments([]);
-        setObsTotalCount(0);
-        setObsFilteredCount(0);
-        return;
+      if (sessionEvents.length) {
+        startMs = sessionEvents.reduce((min, event) => Math.min(min, event.ts_wall_ms), sessionEvents[0].ts_wall_ms);
+        endMs = sessionEvents.reduce((max, event) => Math.max(max, event.ts_wall_ms), sessionEvents[0].ts_wall_ms);
       }
-      startMs = sessionEvents.reduce((min, event) => Math.min(min, event.ts_wall_ms), sessionEvents[0].ts_wall_ms);
-      endMs = sessionEvents.reduce((max, event) => Math.max(max, event.ts_wall_ms), sessionEvents[0].ts_wall_ms);
     } else if (filterMode === "day") {
       const start = Date.parse(`${filterDay}T00:00:00`);
       if (Number.isFinite(start)) {
@@ -650,6 +641,28 @@ export default function LiveEventsOnePage() {
         endMs = new Date(year, Math.max(0, month), 1).getTime();
       }
     }
+    return { startMs, endMs };
+  }, [
+    events,
+    filterDay,
+    filterMode,
+    filterMonth,
+    filterRangeEnd,
+    filterRangeStart,
+    filterWeekStart,
+    sessionId,
+  ]);
+
+  const refreshObsVideos = useCallback(async () => {
+    if (!obsFolder.trim()) {
+      setObsSegments([]);
+      setObsError(null);
+      setObsPickerWarning(null);
+      setObsTotalCount(0);
+      setObsFilteredCount(0);
+      return;
+    }
+    const { startMs, endMs } = resolveFilterRange();
     setObsLoading(true);
     setObsError(null);
     try {
@@ -680,17 +693,43 @@ export default function LiveEventsOnePage() {
     } finally {
       setObsLoading(false);
     }
-  }, [
-    obsFolder,
-    filterMode,
-    filterDay,
-    filterRangeStart,
-    filterRangeEnd,
-    filterWeekStart,
-    filterMonth,
-    sessionId,
-    events,
-  ]);
+  }, [obsFolder, resolveFilterRange]);
+
+  const fetchFramesOnlyIds = useCallback(async () => {
+    if (!videoOnly) {
+      setFramesOnlyIds(new Set());
+      setFramesOnlyError(null);
+      setFramesOnlyLoading(false);
+      return;
+    }
+    setFramesOnlyLoading(true);
+    setFramesOnlyError(null);
+    try {
+      const { startMs, endMs } = resolveFilterRange();
+      const res = await fetch("/api/timestone_event_frames", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          listEventIds: true,
+          startMs,
+          endMs,
+          dbPath: "data/timestone/timestone_events.sqlite3",
+        }),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to load frame events (${res.status})`);
+      }
+      const data = await res.json();
+      const ids = Array.isArray(data?.event_ids) ? data.event_ids : [];
+      setFramesOnlyIds(new Set(ids));
+    } catch (err) {
+      setFramesOnlyIds(new Set());
+      setFramesOnlyError(err instanceof Error ? err.message : "Failed to load frame events");
+    } finally {
+      setFramesOnlyLoading(false);
+    }
+  }, [resolveFilterRange, videoOnly]);
 
   const fetchEventsSnapshot = useCallback(async () => {
     setEventsLoading(true);
@@ -899,6 +938,10 @@ export default function LiveEventsOnePage() {
   }, [refreshObsVideos]);
 
   useEffect(() => {
+    fetchFramesOnlyIds();
+  }, [fetchFramesOnlyIds]);
+
+  useEffect(() => {
     fetchEventsSnapshot();
   }, [fetchEventsSnapshot]);
 
@@ -1105,27 +1148,15 @@ export default function LiveEventsOnePage() {
     });
   }, [searchQuery, searchScopes, visibleEvents]);
 
-  const videoSegmentsByTime = useMemo(() => {
-    return visibleSegments.filter((segment) => segment.start_ms != null && segment.end_ms != null);
-  }, [visibleSegments]);
-
   const videoOnlyEvents = useMemo(() => {
     if (!videoOnly) {
       return filteredBySearch;
     }
-    if (!videoSegmentsByTime.length) {
+    if (!framesOnlyIds.size) {
       return [];
     }
-    return filteredBySearch.filter((event) =>
-      videoSegmentsByTime.some(
-        (segment) =>
-          segment.start_ms != null &&
-          segment.end_ms != null &&
-          event.ts_wall_ms >= segment.start_ms &&
-          event.ts_wall_ms <= segment.end_ms,
-      ),
-    );
-  }, [filteredBySearch, videoOnly, videoSegmentsByTime]);
+    return filteredBySearch.filter((event) => framesOnlyIds.has(event.id));
+  }, [filteredBySearch, framesOnlyIds, videoOnly]);
 
   const segments = useMemo(() => segmentByActiveWindow(videoOnlyEvents), [videoOnlyEvents]);
 
@@ -2213,15 +2244,27 @@ export default function LiveEventsOnePage() {
                       lineHeight: 0,
                       cursor: "pointer",
                     }}
-                    title="Only events with video"
+                    title="Only events with frames"
                   >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                      <rect x="3" y="6" width="14" height="12" rx="2" stroke="#93c5fd" strokeWidth="1.6" />
-                      <path d="M17 10l4-2v8l-4-2" stroke="#93c5fd" strokeWidth="1.6" strokeLinejoin="round" />
-                    </svg>
+                    {framesOnlyLoading ? (
+                      <SyncIcon size={18} color="#93c5fd" />
+                    ) : (
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                        <rect x="4" y="5" width="16" height="14" rx="2" stroke="#93c5fd" strokeWidth="1.6" />
+                        <path
+                          d="M7 15l3-3 3 3 3-4 2 4"
+                          stroke="#93c5fd"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <circle cx="9" cy="9" r="1.2" fill="#93c5fd" />
+                      </svg>
+                    )}
                   </button>
                 </div>
               </div>
+              {framesOnlyError ? <div style={{ color: "#fca5a5" }}>{framesOnlyError}</div> : null}
               {eventCount === 0 ? (
                 <div style={{ color: "#94a3b8" }}>No events yet.</div>
               ) : (

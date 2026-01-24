@@ -52,8 +52,9 @@ export async function POST(req: NextRequest): Promise<Response> {
     });
   }
 
+  const listEventIds = Boolean(body?.listEventIds);
   const eventId = Number(body?.eventId);
-  if (!Number.isFinite(eventId)) {
+  if (!listEventIds && !Number.isFinite(eventId)) {
     return new Response(JSON.stringify({ error: "eventId is required" }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
@@ -62,13 +63,20 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const dbPathInput = (body?.dbPath as string | undefined)?.trim() || "data/timestone/timestone_events.sqlite3";
   const dbPath = await resolvePath(dbPathInput);
-  const args: string[] = [
-    path.join(process.cwd(), "scripts", "timestone_event_frames.py"),
-    "--db",
-    dbPath,
-    "--event-id",
-    String(eventId),
-  ];
+  const args: string[] = [path.join(process.cwd(), "scripts", "timestone_event_frames.py"), "--db", dbPath];
+  if (listEventIds) {
+    const startMs = Number.isFinite(body?.startMs) ? Number(body.startMs) : null;
+    const endMs = Number.isFinite(body?.endMs) ? Number(body.endMs) : null;
+    args.push("--list-event-ids");
+    if (startMs != null) {
+      args.push("--start-ms", String(startMs));
+    }
+    if (endMs != null) {
+      args.push("--end-ms", String(endMs));
+    }
+  } else {
+    args.push("--event-id", String(eventId));
+  }
 
   const { stdout, stderr, code } = await runPython(args);
   if (code !== 0) {
