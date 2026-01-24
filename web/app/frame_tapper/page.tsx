@@ -942,6 +942,16 @@ export default function LiveEventsOnePage() {
   }, [fetchFramesOnlyIds]);
 
   useEffect(() => {
+    if (!liveEnabled || !videoOnly) {
+      return;
+    }
+    const id = window.setInterval(() => {
+      fetchFramesOnlyIds();
+    }, SSE_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [fetchFramesOnlyIds, liveEnabled, videoOnly]);
+
+  useEffect(() => {
     fetchEventsSnapshot();
   }, [fetchEventsSnapshot]);
 
