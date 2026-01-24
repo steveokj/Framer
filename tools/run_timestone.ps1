@@ -28,7 +28,7 @@ function Stop-All {
   if ($script:obsAuto) {
     try {
       Write-Host "[launcher] Stopping OBS recording and stream..."
-      & $script:obsExe --host $script:obsHost --port $script:obsPort --command stop | Out-Null
+      & $script:obsExe --host $script:obsHost --port $script:obsPort --command stop --enable-stream | Out-Null
     } catch {
       Write-Host "[launcher] Failed to stop OBS via websocket."
     }
@@ -98,7 +98,7 @@ Start-Sleep -Seconds 1
 
 Write-Host "[launcher] Starting OBS WS listener..."
 $script:procs += Start-Process -FilePath $script:obsExe -ArgumentList @(
-  "--host",$ObsHost,"--port",$ObsPort,"--verbose"
+  "--host",$ObsHost,"--port",$ObsPort,"--verbose","--enable-stream"
 ) -WorkingDirectory $repoRoot -NoNewWindow -PassThru
 
 Start-Sleep -Seconds 1
@@ -106,7 +106,7 @@ Start-Sleep -Seconds 1
 if ($script:obsAuto) {
   try {
     Write-Host "[launcher] Starting OBS recording and stream..."
-    & $script:obsExe --host $script:obsHost --port $script:obsPort --command start | Out-Null
+    & $script:obsExe --host $script:obsHost --port $script:obsPort --command start --enable-stream | Out-Null
   } catch {
     Write-Host "[launcher] Failed to start OBS via websocket."
   }

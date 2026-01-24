@@ -35,6 +35,7 @@ struct Args {
     event_mask: i64,
     control_host: String,
     control_port: u16,
+    enable_stream: bool,
     verbose: bool,
     command: Option<ObsCommand>,
 }
@@ -124,7 +125,13 @@ fn main() -> Result<()> {
     }
 
     if let Some(command) = args.command {
-        perform_command(&mut socket, command, &mut request_counter, args.verbose)?;
+        perform_command(
+            &mut socket,
+            command,
+            &mut request_counter,
+            args.verbose,
+            args.enable_stream,
+        )?;
         return Ok(());
     }
 
@@ -162,6 +169,7 @@ fn main() -> Result<()> {
                             &stream_state_path,
                             &mut tracker,
                             args.verbose,
+                            args.enable_stream,
                         )?;
                     }
                 }
@@ -174,6 +182,7 @@ fn main() -> Result<()> {
                             &control,
                             &stream_state_path,
                             args.verbose,
+                            args.enable_stream,
                         )?;
                     }
                 }
@@ -194,6 +203,7 @@ fn parse_args() -> Result<Args> {
         event_mask: DEFAULT_EVENT_MASK,
         control_host: DEFAULT_CONTROL_HOST.to_string(),
         control_port: DEFAULT_CONTROL_PORT,
+        enable_stream: false,
         verbose: false,
         command: None,
     };
@@ -242,6 +252,9 @@ fn parse_args() -> Result<Args> {
                         args.control_port = parsed;
                     }
                 }
+            }
+            "--enable-stream" => {
+                args.enable_stream = true;
             }
             "--verbose" => {
                 args.verbose = true;
@@ -557,6 +570,7 @@ fn handle_event(
     stream_state_path: &Path,
     tracker: &mut RecordTracker,
     verbose: bool,
+    enable_stream: bool,
 ) -> Result<()> {
     let event_type = data.get("eventType").and_then(|v| v.as_str()).unwrap_or("");
     let event_data = data.get("eventData").cloned().unwrap_or(json!({}));
@@ -586,31 +600,41 @@ fn handle_event(
                 output_state,
                 tracker,
             )?;
-            if matches!(
-                output_state,
-                "OBS_WEBSOCKET_OUTPUT_STARTED" | "OBS_WEBSOCKET_OUTPUT_RESUMED"
-            ) {
-                send_request(socket, "StartStream", json!({}), request_counter, verbose)?;
+            if enable_stream {
+                if matches!(
+                    output_state,
+                    "OBS_WEBSOCKET_OUTPUT_STARTED" | "OBS_WEBSOCKET_OUTPUT_RESUMED"
+                ) {
+                    send_request(socket, "StartStream", json!({}), request_counter, verbose)?;
+                } else if matches!(
+                    output_state,
+                    "OBS_WEBSOCKET_OUTPUT_PAUSED" | "OBS_WEBSOCKET_OUTPUT_STOPPED"
+                ) {
+                    send_request(socket, "StopStream", json!({}), request_counter, verbose)?;
+                    let _ = control.send("recording:stop", verbose);
+                    let _ = write_stream_state(stream_state_path, false);
+                }
             } else if matches!(
                 output_state,
                 "OBS_WEBSOCKET_OUTPUT_PAUSED" | "OBS_WEBSOCKET_OUTPUT_STOPPED"
             ) {
-                send_request(socket, "StopStream", json!({}), request_counter, verbose)?;
                 let _ = control.send("recording:stop", verbose);
                 let _ = write_stream_state(stream_state_path, false);
             }
         }
         "StreamStateChanged" => {
-            let output_active = event_data
-                .get("outputActive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if output_active {
-                let _ = control.send("recording:start", verbose);
-                let _ = write_stream_state(stream_state_path, true);
-            } else {
-                let _ = control.send("recording:stop", verbose);
-                let _ = write_stream_state(stream_state_path, false);
+            if enable_stream {
+                let output_active = event_data
+                    .get("outputActive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if output_active {
+                    let _ = control.send("recording:start", verbose);
+                    let _ = write_stream_state(stream_state_path, true);
+                } else {
+                    let _ = control.send("recording:stop", verbose);
+                    let _ = write_stream_state(stream_state_path, false);
+                }
             }
         }
         "RecordFileChanged" => {
@@ -657,16 +681,21 @@ fn perform_command(
     command: ObsCommand,
     counter: &mut u64,
     verbose: bool,
+    enable_stream: bool,
 ) -> Result<()> {
     match command {
         ObsCommand::Start => {
             log_line(verbose, "Sending OBS start commands...");
             let _ = send_request(socket, "StartRecord", json!({}), counter, verbose);
-            let _ = send_request(socket, "StartStream", json!({}), counter, verbose);
+            if enable_stream {
+                let _ = send_request(socket, "StartStream", json!({}), counter, verbose);
+            }
         }
         ObsCommand::Stop => {
             log_line(verbose, "Sending OBS stop commands...");
-            let _ = send_request(socket, "StopStream", json!({}), counter, verbose);
+            if enable_stream {
+                let _ = send_request(socket, "StopStream", json!({}), counter, verbose);
+            }
             let _ = send_request(socket, "StopRecord", json!({}), counter, verbose);
         }
     }
@@ -680,6 +709,7 @@ fn handle_response(
     control: &ControlSender,
     stream_state_path: &Path,
     verbose: bool,
+    enable_stream: bool,
 ) -> Result<()> {
     let request_type = data.get("requestType").and_then(|v| v.as_str()).unwrap_or("");
     if request_type == "GetRecordStatus" {
@@ -692,23 +722,25 @@ fn handle_response(
             .get("outputPaused")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if output_active && !output_paused {
+        if enable_stream && output_active && !output_paused {
             send_request(socket, "StartStream", json!({}), request_counter, verbose)?;
         }
         return Ok(());
     }
     if request_type == "GetStreamStatus" {
-        let response = data.get("responseData").cloned().unwrap_or(json!({}));
-        let output_active = response
-            .get("outputActive")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if output_active {
-            let _ = control.send("recording:start", verbose);
-            let _ = write_stream_state(stream_state_path, true);
-        } else {
-            let _ = control.send("recording:stop", verbose);
-            let _ = write_stream_state(stream_state_path, false);
+        if enable_stream {
+            let response = data.get("responseData").cloned().unwrap_or(json!({}));
+            let output_active = response
+                .get("outputActive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if output_active {
+                let _ = control.send("recording:start", verbose);
+                let _ = write_stream_state(stream_state_path, true);
+            } else {
+                let _ = control.send("recording:stop", verbose);
+                let _ = write_stream_state(stream_state_path, false);
+            }
         }
     }
     Ok(())
