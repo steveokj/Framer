@@ -96,7 +96,6 @@ fn main() -> Result<()> {
     let ws_url = Url::parse(&format!("ws://{}:{}", args.host, args.port))?;
     let (mut socket, _) = connect(ws_url)?;
 
-    let mut authenticated = false;
     let mut request_counter: u64 = 0;
     loop {
         if let Some(message) = read_json_message(&mut socket, args.verbose)? {
@@ -106,14 +105,9 @@ fn main() -> Result<()> {
                 send_identify(&mut socket, auth.as_deref(), args.event_mask)?;
             }
             if op == 2 {
-                authenticated = true;
                 break;
             }
         }
-    }
-
-    if !authenticated {
-        return Err(anyhow!("Failed to identify with OBS WebSocket."));
     }
 
     log_line(args.verbose, "Connected. Listening for recording events...");
@@ -344,7 +338,7 @@ fn read_json_message(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     verbose: bool,
 ) -> Result<Option<Value>> {
-    let msg = socket.read_message()?;
+    let msg = socket.read()?;
     match msg {
         Message::Text(text) => {
             if verbose {
@@ -362,11 +356,11 @@ fn read_json_message(
             Ok(Some(parsed))
         }
         Message::Ping(payload) => {
-            socket.write_message(Message::Pong(payload))?;
+            socket.send(Message::Pong(payload))?;
             Ok(None)
         }
         Message::Pong(_) => Ok(None),
-        Message::Close(_) => Ok(None),
+        Message::Close(_) => Err(anyhow!("OBS WebSocket closed the connection.")),
         _ => Ok(None),
     }
 }
@@ -416,7 +410,7 @@ fn send_identify(
         payload["d"]["authentication"] = Value::String(auth.to_string());
     }
     let text = payload.to_string();
-    socket.write_message(Message::Text(text))?;
+    socket.send(Message::Text(text))?;
     Ok(())
 }
 
@@ -511,7 +505,7 @@ fn send_request(
     if verbose {
         log_line(verbose, &format!("[obs] -> {payload}"));
     }
-    socket.write_message(Message::Text(payload.to_string()))?;
+    socket.send(Message::Text(payload.to_string()))?;
     Ok(())
 }
 
