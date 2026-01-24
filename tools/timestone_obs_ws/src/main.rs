@@ -22,6 +22,7 @@ const DEFAULT_PORT: u16 = 4455;
 const DEFAULT_EVENT_MASK: i64 = 64; // Outputs
 const DEFAULT_CONTROL_HOST: &str = "127.0.0.1";
 const DEFAULT_CONTROL_PORT: u16 = 40777;
+const STREAM_STATE_FILE: &str = "stream.state";
 
 #[derive(Default)]
 struct Args {
@@ -89,6 +90,7 @@ fn main() -> Result<()> {
     )?;
 
     let control = ControlSender::new(&args.control_host, args.control_port)?;
+    let stream_state_path = base_dir.join(STREAM_STATE_FILE);
 
     log_line(args.verbose, &format!("Connecting to OBS WS {}:{}...", args.host, args.port));
     let ws_url = Url::parse(&format!("ws://{}:{}", args.host, args.port))?;
@@ -136,13 +138,14 @@ fn main() -> Result<()> {
                             &mut socket,
                             &mut request_counter,
                             &control,
+                            &stream_state_path,
                             args.verbose,
                         )?;
                     }
                 }
                 7 => {
                     if let Some(data) = message.get("d") {
-                        handle_response(data, &control, args.verbose)?;
+                        handle_response(data, &control, &stream_state_path, args.verbose)?;
                     }
                 }
                 _ => {}
@@ -381,6 +384,7 @@ fn handle_event(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     request_counter: &mut u64,
     control: &ControlSender,
+    stream_state_path: &Path,
     verbose: bool,
 ) -> Result<()> {
     let event_type = data.get("eventType").and_then(|v| v.as_str()).unwrap_or("");
@@ -408,12 +412,14 @@ fn handle_event(
             ) {
                 send_request(socket, "StartStream", json!({}), request_counter, verbose)?;
                 let _ = control.send("recording:start", verbose);
+                let _ = write_stream_state(stream_state_path, true);
             } else if matches!(
                 output_state,
                 "OBS_WEBSOCKET_OUTPUT_PAUSED" | "OBS_WEBSOCKET_OUTPUT_STOPPED"
             ) {
                 send_request(socket, "StopStream", json!({}), request_counter, verbose)?;
                 let _ = control.send("recording:stop", verbose);
+                let _ = write_stream_state(stream_state_path, false);
             }
         }
         "RecordFileChanged" => {
@@ -451,7 +457,12 @@ fn send_request(
     Ok(())
 }
 
-fn handle_response(data: &Value, control: &ControlSender, verbose: bool) -> Result<()> {
+fn handle_response(
+    data: &Value,
+    control: &ControlSender,
+    stream_state_path: &Path,
+    verbose: bool,
+) -> Result<()> {
     let request_type = data.get("requestType").and_then(|v| v.as_str()).unwrap_or("");
     if request_type != "GetRecordStatus" {
         return Ok(());
@@ -467,9 +478,17 @@ fn handle_response(data: &Value, control: &ControlSender, verbose: bool) -> Resu
         .unwrap_or(false);
     if output_active && !output_paused {
         let _ = control.send("recording:start", verbose);
+        let _ = write_stream_state(stream_state_path, true);
     } else {
         let _ = control.send("recording:stop", verbose);
+        let _ = write_stream_state(stream_state_path, false);
     }
+    Ok(())
+}
+
+fn write_stream_state(path: &Path, active: bool) -> Result<()> {
+    let contents = if active { "active" } else { "inactive" };
+    fs::write(path, contents).context("Failed to write stream state")?;
     Ok(())
 }
 

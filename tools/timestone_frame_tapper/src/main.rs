@@ -19,6 +19,7 @@ const DEFAULT_BUFFER_SEC: i64 = 20;
 const DEFAULT_SCALE_WIDTH: u32 = 1280;
 const DEFAULT_CONTROL_HOST: &str = "127.0.0.1";
 const DEFAULT_CONTROL_PORT: u16 = 40777;
+const STREAM_STATE_FILE: &str = "stream.state";
 
 #[derive(Clone)]
 struct FrameMeta {
@@ -64,6 +65,7 @@ fn main() -> Result<()> {
         .frames_dir
         .clone()
         .unwrap_or_else(|| base_dir.join("frames").join("live"));
+    let stream_state_path = base_dir.join(STREAM_STATE_FILE);
     let lock_path = base_dir.join(LOCK_FILE);
     let lock_info = read_lock_info(&lock_path).unwrap_or_default();
     let session_id = args
@@ -94,8 +96,11 @@ fn main() -> Result<()> {
     let mut last_event_id = latest_event_id(&conn, &session_id)?;
 
     let mut ffmpeg: Option<Child> = None;
-    let mut active = false;
+    let mut active = read_stream_state(&stream_state_path).unwrap_or(false);
     log_line(args.verbose, "Frame tapper running.");
+    if active {
+        log_line(args.verbose, "State: active (from stream.state)");
+    }
 
     loop {
         if let Some(next_active) = poll_control(&control_socket)? {
@@ -311,6 +316,18 @@ fn poll_control(socket: &UdpSocket) -> Result<Option<bool>> {
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
         Err(err) => Err(err.into()),
     }
+}
+
+fn read_stream_state(path: &Path) -> Option<bool> {
+    let contents = fs::read_to_string(path).ok()?;
+    let value = contents.trim().to_lowercase();
+    if value == "active" {
+        return Some(true);
+    }
+    if value == "inactive" {
+        return Some(false);
+    }
+    None
 }
 
 fn poll_events(
