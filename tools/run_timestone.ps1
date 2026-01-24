@@ -2,6 +2,7 @@ param(
   [string]$ObsHost = "192.168.2.34",
   [int]$ObsPort = 4455,
   [string]$ObsPassword = $env:OBS_WS_PASSWORD,
+  [switch]$ObsAuto,
   [string]$StreamUrl = "rtmp://127.0.0.1/live/timestone",
   [string]$MediaMtxExe = "",
   [string]$MediaMtxConfig = ""
@@ -37,6 +38,14 @@ $null = Register-EngineEvent -SourceIdentifier ConsoleCancelEvent -Action {
   param($sender, $eventArgs)
   $eventArgs.Cancel = $true
   Write-Host "`n[launcher] Stopping timestone..."
+  if ($ObsAuto) {
+    try {
+      Write-Host "[launcher] Stopping OBS recording and stream..."
+      & $script:obsExe --host $ObsHost --port $ObsPort --command stop | Out-Null
+    } catch {
+      Write-Host "[launcher] Failed to stop OBS via websocket."
+    }
+  }
   try {
     if (Test-Path $script:recorderExe) {
       & $script:recorderExe stop | Out-Null
@@ -87,6 +96,15 @@ $script:procs += Start-Process -FilePath $script:obsExe -ArgumentList @(
 ) -WorkingDirectory $repoRoot -NoNewWindow -PassThru
 
 Start-Sleep -Seconds 1
+
+if ($ObsAuto) {
+  try {
+    Write-Host "[launcher] Starting OBS recording and stream..."
+    & $script:obsExe --host $ObsHost --port $ObsPort --command start | Out-Null
+  } catch {
+    Write-Host "[launcher] Failed to start OBS via websocket."
+  }
+}
 
 Write-Host "[launcher] Starting frame tapper..."
 $script:procs += Start-Process -FilePath $script:tapperExe -ArgumentList @(

@@ -36,6 +36,7 @@ struct Args {
     control_host: String,
     control_port: u16,
     verbose: bool,
+    command: Option<ObsCommand>,
 }
 
 #[derive(Default)]
@@ -48,6 +49,12 @@ struct LockInfo {
 struct ControlSender {
     socket: UdpSocket,
     addr: String,
+}
+
+#[derive(Clone, Copy)]
+enum ObsCommand {
+    Start,
+    Stop,
 }
 
 impl ControlSender {
@@ -108,6 +115,11 @@ fn main() -> Result<()> {
                 break;
             }
         }
+    }
+
+    if let Some(command) = args.command {
+        perform_command(&mut socket, command, &mut request_counter, args.verbose)?;
+        return Ok(());
     }
 
     log_line(args.verbose, "Connected. Listening for recording events...");
@@ -174,6 +186,7 @@ fn parse_args() -> Result<Args> {
         control_host: DEFAULT_CONTROL_HOST.to_string(),
         control_port: DEFAULT_CONTROL_PORT,
         verbose: false,
+        command: None,
     };
     let mut iter = env::args().skip(1).peekable();
     while let Some(arg) = iter.next() {
@@ -223,6 +236,15 @@ fn parse_args() -> Result<Args> {
             }
             "--verbose" => {
                 args.verbose = true;
+            }
+            "--command" => {
+                if let Some(value) = iter.next() {
+                    args.command = match value.as_str() {
+                        "start" => Some(ObsCommand::Start),
+                        "stop" => Some(ObsCommand::Stop),
+                        _ => None,
+                    };
+                }
             }
             _ => {}
         }
@@ -506,6 +528,27 @@ fn send_request(
         log_line(verbose, &format!("[obs] -> {payload}"));
     }
     socket.send(Message::Text(payload.to_string()))?;
+    Ok(())
+}
+
+fn perform_command(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    command: ObsCommand,
+    counter: &mut u64,
+    verbose: bool,
+) -> Result<()> {
+    match command {
+        ObsCommand::Start => {
+            log_line(verbose, "Sending OBS start commands...");
+            let _ = send_request(socket, "StartRecord", json!({}), counter, verbose);
+            let _ = send_request(socket, "StartStream", json!({}), counter, verbose);
+        }
+        ObsCommand::Stop => {
+            log_line(verbose, "Sending OBS stop commands...");
+            let _ = send_request(socket, "StopStream", json!({}), counter, verbose);
+            let _ = send_request(socket, "StopRecord", json!({}), counter, verbose);
+        }
+    }
     Ok(())
 }
 
