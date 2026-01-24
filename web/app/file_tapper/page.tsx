@@ -45,6 +45,16 @@ type EventFrame = {
   frame_wall_ms: number | null;
 };
 
+type TranscriptSegment = {
+  segment_id: number;
+  start_ms: number;
+  end_ms: number;
+  wall_start_ms: number;
+  wall_end_ms: number;
+  text: string;
+  engine: string | null;
+};
+
 type EventSegment = {
   id: string;
   events: EventView[];
@@ -179,6 +189,7 @@ const EVENT_ICON_MAP: Record<string, string | undefined> = {
   key_down: process.env.NEXT_PUBLIC_EVENT_ICON_KEY_DOWN,
   key_shortcut: process.env.NEXT_PUBLIC_EVENT_ICON_KEY_SHORTCUT,
   text_input: process.env.NEXT_PUBLIC_EVENT_ICON_TEXT_INPUT,
+  transcript: process.env.NEXT_PUBLIC_EVENT_ICON_TRANSCRIPT,
   clipboard_text: process.env.NEXT_PUBLIC_EVENT_ICON_CLIPBOARD_TEXT,
   clipboard_image: process.env.NEXT_PUBLIC_EVENT_ICON_CLIPBOARD_IMAGE,
   clipboard_files: process.env.NEXT_PUBLIC_EVENT_ICON_CLIPBOARD_FILES,
@@ -409,6 +420,9 @@ export default function LiveEventsOnePage() {
   const [events, setEvents] = useState<EventView[]>([]);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  const [transcripts, setTranscripts] = useState<TranscriptSegment[]>([]);
+  const [transcriptsLoading, setTranscriptsLoading] = useState(false);
+  const [transcriptsError, setTranscriptsError] = useState<string | null>(null);
   const [status, setStatus] = useState("Idle");
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
@@ -455,10 +469,14 @@ export default function LiveEventsOnePage() {
   const [frameIndex, setFrameIndex] = useState(0);
   const [frameLoading, setFrameLoading] = useState(false);
   const [frameError, setFrameError] = useState<string | null>(null);
+  const [ocrText, setOcrText] = useState<string | null>(null);
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrError, setOcrError] = useState<string | null>(null);
   const [videoModalOpen, setVideoModalOpen] = useState(false);
   const [pendingVideoWallMs, setPendingVideoWallMs] = useState<number | null>(null);
   const [eventVisibility, setEventVisibility] = useState<Record<string, boolean>>(() => ({
     active_window_changed: true,
+    transcript: true,
     key_shortcut: true,
     key_down: true,
     text_input: true,
@@ -576,6 +594,12 @@ export default function LiveEventsOnePage() {
   const selectEvent = useCallback(
     (event: EventView) => {
       setSelectedEvent(event);
+      if (event.event_type === "transcript") {
+        setEventFrames([]);
+        setFrameIndex(0);
+        setFrameError(null);
+        return;
+      }
       loadEventFrames(event);
     },
     [loadEventFrames]
@@ -664,6 +688,40 @@ export default function LiveEventsOnePage() {
     filterWeekStart,
     sessionId,
   ]);
+
+  const fetchTranscripts = useCallback(async () => {
+    setTranscriptsLoading(true);
+    setTranscriptsError(null);
+    try {
+      const { startMs, endMs } = resolveFilterRange();
+      const payload: Record<string, any> = {};
+      if (filterMode === "session" && sessionId) {
+        payload.sessionId = sessionId;
+      }
+      if (startMs != null) {
+        payload.startMs = startMs;
+      }
+      if (endMs != null) {
+        payload.endMs = endMs;
+      }
+      const res = await fetch("/api/timestone_transcripts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Failed to load transcripts (${res.status})`);
+      }
+      const data = await res.json();
+      setTranscripts(Array.isArray(data?.transcripts) ? data.transcripts : []);
+    } catch (err) {
+      setTranscripts([]);
+      setTranscriptsError(err instanceof Error ? err.message : "Failed to load transcripts");
+    } finally {
+      setTranscriptsLoading(false);
+    }
+  }, [filterMode, resolveFilterRange, sessionId]);
 
   const refreshObsVideos = useCallback(async () => {
     if (!obsFolder.trim()) {
@@ -938,6 +996,10 @@ export default function LiveEventsOnePage() {
   }, [fetchEventsSnapshot]);
 
   useEffect(() => {
+    fetchTranscripts();
+  }, [fetchTranscripts, events.length]);
+
+  useEffect(() => {
     if (!liveEnabled) {
       return;
     }
@@ -1102,7 +1164,32 @@ export default function LiveEventsOnePage() {
   }, [resolvedSegments, filterRange, sessionRange]);
 
   const eventCount = filteredEvents.length;
-  const displayEvents = useMemo(() => mergeTextInputEvents(filteredEvents), [filteredEvents]);
+  const transcriptEvents = useMemo<EventView[]>(() => {
+    if (!transcripts.length) {
+      return [];
+    }
+    return transcripts.map((segment, index) => ({
+      id: -1 * (index + 1),
+      session_id: sessionId || "",
+      ts_wall_ms: segment.wall_start_ms,
+      ts_mono_ms: 0,
+      event_type: "transcript",
+      process_name: null,
+      window_title: null,
+      window_class: null,
+      window_rect: null,
+      mouse: null,
+      payload: null,
+      payloadData: { text: segment.text, start_ms: segment.start_ms, end_ms: segment.end_ms },
+      mouseData: null,
+    }));
+  }, [sessionId, transcripts]);
+  const combinedEvents = useMemo(() => {
+    const combined = [...filteredEvents, ...transcriptEvents];
+    combined.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
+    return combined;
+  }, [filteredEvents, transcriptEvents]);
+  const displayEvents = useMemo(() => mergeTextInputEvents(combinedEvents), [combinedEvents]);
   const visibleEvents = useMemo(() => {
     return displayEvents.filter((event) => eventVisibility[event.event_type] !== false);
   }, [displayEvents, eventVisibility]);
@@ -1137,7 +1224,7 @@ export default function LiveEventsOnePage() {
           return true;
         }
       }
-      if (searchScopes.transcript && event.event_type === "text_input") {
+      if (searchScopes.transcript && event.event_type === "transcript") {
         const blob = eventSearchBlob(event);
         if (blob.includes(needle)) {
           return true;
@@ -1252,6 +1339,40 @@ export default function LiveEventsOnePage() {
     }
     setFrameLoading(true);
   }, [frameUrl]);
+
+  useEffect(() => {
+    if (!activeFrame?.frame_path) {
+      setOcrText(null);
+      setOcrError(null);
+      setOcrLoading(false);
+      return;
+    }
+    setOcrLoading(true);
+    setOcrError(null);
+    const run = async () => {
+      try {
+        const res = await fetch("/api/timestone_event_ocr", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ framePath: activeFrame.frame_path }),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || `Failed to load OCR (${res.status})`);
+        }
+        const data = await res.json();
+        const rows = Array.isArray(data?.ocr) ? data.ocr : [];
+        const text = rows.map((row: any) => row.ocr_text).filter(Boolean).join("\n");
+        setOcrText(text || null);
+      } catch (err) {
+        setOcrText(null);
+        setOcrError(err instanceof Error ? err.message : "Failed to load OCR");
+      } finally {
+        setOcrLoading(false);
+      }
+    };
+    run();
+  }, [activeFrame]);
 
   const currentWallMs = useMemo(() => {
     if (videoModalOpen && activeSegment?.start_ms) {
@@ -1544,6 +1665,9 @@ export default function LiveEventsOnePage() {
 
     return (
       <div style={{ display: "grid", gap: 6, overflowWrap: "anywhere", wordBreak: "break-word", minWidth: 0 }}>
+        {event.event_type === "transcript" && clipTextValue ? (
+          <div style={{ color: "#cbd5f5", whiteSpace: "pre-wrap" }}>{clipText(clipTextValue, 600)}</div>
+        ) : null}
         {event.event_type === "clipboard_text" && clipTextValue ? (
           <div style={{ display: "grid", gap: 8 }}>
             <strong>Clipboard text</strong>
@@ -2013,6 +2137,8 @@ export default function LiveEventsOnePage() {
                 {videoWarning ? <div style={{ color: "#facc15" }}>{videoWarning}</div> : null}
                 {videoError ? <div style={{ color: "#fca5a5" }}>{videoError}</div> : null}
                 {frameError ? <div style={{ color: "#fca5a5" }}>{frameError}</div> : null}
+                {ocrError ? <div style={{ color: "#fca5a5" }}>{ocrError}</div> : null}
+                {transcriptsError ? <div style={{ color: "#fca5a5" }}>{transcriptsError}</div> : null}
               </div>
               <div
                 style={{
@@ -2160,6 +2286,25 @@ export default function LiveEventsOnePage() {
                     <PlayIcon color="#e0f2fe" />
                   </button>
                 </div>
+              </div>
+              <div
+                style={{
+                  borderRadius: 12,
+                  border: "1px solid rgba(30, 41, 59, 0.6)",
+                  background: "rgba(11, 17, 32, 0.9)",
+                  padding: 12,
+                  display: "grid",
+                  gap: 8,
+                }}
+              >
+                <strong>OCR</strong>
+                {ocrLoading ? (
+                  <div style={{ color: "#94a3b8" }}>Loading OCR...</div>
+                ) : ocrText ? (
+                  <div style={{ color: "#cbd5f5", whiteSpace: "pre-wrap" }}>{ocrText}</div>
+                ) : (
+                  <div style={{ color: "#64748b" }}>No OCR for this frame.</div>
+                )}
               </div>
             </div>
             <div

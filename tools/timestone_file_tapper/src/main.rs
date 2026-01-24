@@ -12,6 +12,8 @@ const DEFAULT_SCALE_WIDTH: u32 = 1280;
 const DEFAULT_JPEG_QUALITY: u8 = 4;
 const DEFAULT_POLL_MS: u64 = 1500;
 const DEFAULT_GRACE_MS: i64 = 2000;
+const DEFAULT_TRANSCRIBE_MODEL: &str = "medium";
+const DEFAULT_OCR_LANG: &str = "eng";
 
 #[derive(Default)]
 struct Args {
@@ -23,6 +25,8 @@ struct Args {
     jpeg_quality: u8,
     poll_ms: u64,
     grace_ms: i64,
+    transcribe_model: String,
+    ocr_lang: String,
     verbose: bool,
 }
 
@@ -41,9 +45,19 @@ struct EventInfo {
     ts_wall_ms: i64,
 }
 
+#[derive(Clone)]
+struct TranscriptSegment {
+    start_ms: i64,
+    end_ms: i64,
+    text: String,
+    engine: String,
+}
+
 fn main() -> Result<()> {
     let args = parse_args()?;
     let base_dir = ensure_app_dir()?;
+    let repo_root = env::current_dir().context("Failed to read current dir")?;
+    let scripts_dir = repo_root.join("tools").join("scripts");
     let db_path = args
         .db_path
         .clone()
@@ -104,12 +118,35 @@ fn main() -> Result<()> {
                     "event_{}_{}.jpg",
                     event.id, event.ts_wall_ms
                 ));
+                log_line(
+                    args.verbose,
+                    &format!("Extracting frame for event {} @ {}ms", event.id, offset_ms),
+                );
                 if extract_frame(&obs_path, offset_ms, &frame_path, args.scale_width, args.jpeg_quality, args.verbose)? {
                     insert_event_frame(&conn, event.id, &frame_path, event.ts_wall_ms)?;
+                    if !ocr_exists_for_frame(&conn, &frame_path)? {
+                        log_line(args.verbose, &format!("Running OCR for event {}", event.id));
+                        if let Some(ocr_text) = run_ocr_script(
+                            &scripts_dir,
+                            &frame_path,
+                            &args.ocr_lang,
+                            args.verbose,
+                        )? {
+                            insert_event_ocr(&conn, event.id, &frame_path, &ocr_text, "tesseract")?;
+                            log_line(args.verbose, &format!("OCR stored for event {}", event.id));
+                        }
+                    }
                 }
             }
-            if !segment_audio_exists(&conn, segment.id)? {
+            let audio_path = if let Some(path) = fetch_segment_audio_path(&conn, segment.id)? {
+                if path.exists() {
+                    Some(path)
+                } else {
+                    None
+                }
+            } else {
                 let audio_path = audio_dir.join(format!("segment_{}.wav", segment.id));
+                log_line(args.verbose, &format!("Extracting audio for segment {}", segment.id));
                 if extract_audio_segment(
                     &obs_path,
                     offset_before_ms,
@@ -118,6 +155,27 @@ fn main() -> Result<()> {
                     args.verbose,
                 )? {
                     insert_segment_audio(&conn, segment.id, &audio_path, offset_before_ms, duration_ms)?;
+                    Some(audio_path)
+                } else {
+                    None
+                }
+            };
+            if let Some(audio_path) = audio_path {
+                if !segment_transcriptions_exist(&conn, segment.id)? {
+                    log_line(args.verbose, &format!("Transcribing audio for segment {}", segment.id));
+                    let segments = run_transcribe_script(
+                        &scripts_dir,
+                        &audio_path,
+                        &args.transcribe_model,
+                        args.verbose,
+                    )?;
+                    if !segments.is_empty() {
+                        insert_segment_transcripts(&conn, segment.id, segment.start_wall_ms, &segments)?;
+                        log_line(
+                            args.verbose,
+                            &format!("Saved {} transcript segments for {}", segments.len(), segment.id),
+                        );
+                    }
                 }
             }
             mark_segment_processed(&conn, segment.id)?;
@@ -136,6 +194,8 @@ fn parse_args() -> Result<Args> {
         jpeg_quality: DEFAULT_JPEG_QUALITY,
         poll_ms: DEFAULT_POLL_MS,
         grace_ms: DEFAULT_GRACE_MS,
+        transcribe_model: DEFAULT_TRANSCRIBE_MODEL.to_string(),
+        ocr_lang: DEFAULT_OCR_LANG.to_string(),
         verbose: false,
     };
     let mut iter = env::args().skip(1).peekable();
@@ -179,6 +239,20 @@ fn parse_args() -> Result<Args> {
                     args.grace_ms = value.parse().unwrap_or(DEFAULT_GRACE_MS);
                 }
             }
+            "--transcribe-model" => {
+                if let Some(value) = iter.next() {
+                    if !value.trim().is_empty() {
+                        args.transcribe_model = value;
+                    }
+                }
+            }
+            "--ocr-lang" => {
+                if let Some(value) = iter.next() {
+                    if !value.trim().is_empty() {
+                        args.ocr_lang = value;
+                    }
+                }
+            }
             "--verbose" => {
                 args.verbose = true;
             }
@@ -217,6 +291,29 @@ fn init_db(conn: &Connection) -> Result<()> {
             duration_ms INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_segment_audio_segment ON segment_audio(segment_id);
+        CREATE TABLE IF NOT EXISTS segment_transcriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            segment_id INTEGER,
+            start_ms INTEGER,
+            end_ms INTEGER,
+            wall_start_ms INTEGER,
+            wall_end_ms INTEGER,
+            text TEXT,
+            engine TEXT,
+            created_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_segment_transcripts_segment ON segment_transcriptions(segment_id);
+        CREATE INDEX IF NOT EXISTS idx_segment_transcripts_wall ON segment_transcriptions(wall_start_ms);
+        CREATE TABLE IF NOT EXISTS event_ocr (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER,
+            frame_path TEXT,
+            ocr_text TEXT,
+            ocr_engine TEXT,
+            created_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_event_ocr_event ON event_ocr(event_id);
+        CREATE INDEX IF NOT EXISTS idx_event_ocr_frame ON event_ocr(frame_path);
         "
     )?;
     Ok(())
@@ -312,6 +409,12 @@ fn event_frames_exist(conn: &Connection, event_id: i64) -> Result<bool> {
     Ok(count > 0)
 }
 
+fn ocr_exists_for_frame(conn: &Connection, frame_path: &Path) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM event_ocr WHERE frame_path = ?")?;
+    let count: i64 = stmt.query_row(params![frame_path.to_string_lossy()], |row| row.get(0))?;
+    Ok(count > 0)
+}
+
 fn extract_frame(
     obs_path: &str,
     offset_ms: i64,
@@ -353,10 +456,29 @@ fn insert_event_frame(conn: &Connection, event_id: i64, frame_path: &Path, frame
     Ok(())
 }
 
-fn segment_audio_exists(conn: &Connection, segment_id: i64) -> Result<bool> {
-    let mut stmt = conn.prepare("SELECT COUNT(*) FROM segment_audio WHERE segment_id = ?")?;
-    let count: i64 = stmt.query_row(params![segment_id], |row| row.get(0))?;
-    Ok(count > 0)
+fn insert_event_ocr(
+    conn: &Connection,
+    event_id: i64,
+    frame_path: &Path,
+    ocr_text: &str,
+    engine: &str,
+) -> Result<()> {
+    let created_ms = now_wall_ms();
+    conn.execute(
+        "INSERT INTO event_ocr (event_id, frame_path, ocr_text, ocr_engine, created_ms) VALUES (?, ?, ?, ?, ?)",
+        params![event_id, frame_path.to_string_lossy(), ocr_text, engine, created_ms],
+    )?;
+    Ok(())
+}
+
+fn fetch_segment_audio_path(conn: &Connection, segment_id: i64) -> Result<Option<PathBuf>> {
+    let mut stmt = conn.prepare("SELECT audio_path FROM segment_audio WHERE segment_id = ? LIMIT 1")?;
+    let mut rows = stmt.query(params![segment_id])?;
+    if let Some(row) = rows.next()? {
+        let path: String = row.get(0)?;
+        return Ok(Some(PathBuf::from(path)));
+    }
+    Ok(None)
 }
 
 fn extract_audio_segment(
@@ -407,12 +529,133 @@ fn insert_segment_audio(
     Ok(())
 }
 
+fn segment_transcriptions_exist(conn: &Connection, segment_id: i64) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM segment_transcriptions WHERE segment_id = ?")?;
+    let count: i64 = stmt.query_row(params![segment_id], |row| row.get(0))?;
+    Ok(count > 0)
+}
+
+fn insert_segment_transcripts(
+    conn: &Connection,
+    segment_id: i64,
+    segment_start_wall_ms: i64,
+    segments: &[TranscriptSegment],
+) -> Result<()> {
+    let created_ms = now_wall_ms();
+    for seg in segments {
+        let wall_start = segment_start_wall_ms + seg.start_ms;
+        let wall_end = segment_start_wall_ms + seg.end_ms;
+        conn.execute(
+            "INSERT INTO segment_transcriptions (segment_id, start_ms, end_ms, wall_start_ms, wall_end_ms, text, engine, created_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                segment_id,
+                seg.start_ms,
+                seg.end_ms,
+                wall_start,
+                wall_end,
+                seg.text,
+                seg.engine,
+                created_ms
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn mark_segment_processed(conn: &Connection, segment_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE record_segments SET processed = 1 WHERE id = ?",
         params![segment_id],
     )?;
     Ok(())
+}
+
+fn run_transcribe_script(
+    scripts_dir: &Path,
+    audio_path: &Path,
+    model: &str,
+    verbose: bool,
+) -> Result<Vec<TranscriptSegment>> {
+    let script_path = scripts_dir.join("timestone_transcribe_segment.py");
+    if !script_path.exists() {
+        return Ok(Vec::new());
+    }
+    let py = env::var("PYTHON").unwrap_or_else(|_| "python".to_string());
+    let mut cmd = Command::new(py);
+    cmd.arg(script_path)
+        .arg("--audio")
+        .arg(audio_path)
+        .arg("--model")
+        .arg(model)
+        .stdout(Stdio::piped())
+        .stderr(if verbose { Stdio::inherit() } else { Stdio::piped() });
+    let output = cmd.output().context("Failed to run transcribe script")?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|_| serde_json::json!({}));
+    let engine = payload
+        .get("engine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("whisper")
+        .to_string();
+    let mut segments = Vec::new();
+    if let Some(items) = payload.get("segments").and_then(|v| v.as_array()) {
+        for item in items {
+            let start_ms = item.get("start_ms").and_then(|v| v.as_i64()).unwrap_or(0);
+            let end_ms = item.get("end_ms").and_then(|v| v.as_i64()).unwrap_or(start_ms);
+            let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if text.trim().is_empty() {
+                continue;
+            }
+            segments.push(TranscriptSegment {
+                start_ms,
+                end_ms,
+                text,
+                engine: engine.clone(),
+            });
+        }
+    }
+    Ok(segments)
+}
+
+fn run_ocr_script(
+    scripts_dir: &Path,
+    frame_path: &Path,
+    lang: &str,
+    verbose: bool,
+) -> Result<Option<String>> {
+    let script_path = scripts_dir.join("timestone_ocr_frame.py");
+    if !script_path.exists() {
+        return Ok(None);
+    }
+    let py = env::var("PYTHON").unwrap_or_else(|_| "python".to_string());
+    let mut cmd = Command::new(py);
+    cmd.arg(script_path)
+        .arg("--image")
+        .arg(frame_path)
+        .arg("--lang")
+        .arg(lang)
+        .stdout(Stdio::piped())
+        .stderr(if verbose { Stdio::inherit() } else { Stdio::piped() });
+    if let Ok(tess) = env::var("TESSERACT_CMD") {
+        cmd.arg("--tesseract").arg(tess);
+    } else if let Ok(tess) = env::var("TESSERACT_PATH") {
+        cmd.arg("--tesseract").arg(tess);
+    }
+    let output = cmd.output().context("Failed to run OCR script")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|_| serde_json::json!({}));
+    let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(text))
 }
 
 fn now_wall_ms() -> i64 {

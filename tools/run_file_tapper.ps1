@@ -94,12 +94,11 @@ if ($script:obsAuto) {
   }
 }
 
-Write-Host "[launcher] Starting file tapper..."
-$script:procs += Start-Process -FilePath $script:fileTapperExe -ArgumentList @("--verbose") -WorkingDirectory $repoRoot -NoNewWindow -PassThru
-
-Write-Host "[launcher] All components started. Press Ctrl+C to stop."
+Write-Host "[launcher] Starting file tapper (logs below)..."
+Push-Location $repoRoot
 try {
-  while ($true) { Start-Sleep -Seconds 1 }
+  & $script:fileTapperExe --verbose
 } finally {
+  Pop-Location
   Stop-All
 }
