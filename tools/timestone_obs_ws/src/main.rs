@@ -46,6 +46,12 @@ struct LockInfo {
     start_wall_iso: Option<String>,
 }
 
+#[derive(Default)]
+struct RecordTracker {
+    active_segment_id: Option<i64>,
+    current_path: Option<String>,
+}
+
 struct ControlSender {
     socket: UdpSocket,
     addr: String,
@@ -138,6 +144,8 @@ fn main() -> Result<()> {
         args.verbose,
     )?;
 
+    let mut tracker = RecordTracker::default();
+
     loop {
         if let Some(message) = read_json_message(&mut socket, args.verbose)? {
             let op = message.get("op").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -152,6 +160,7 @@ fn main() -> Result<()> {
                             &mut request_counter,
                             &control,
                             &stream_state_path,
+                            &mut tracker,
                             args.verbose,
                         )?;
                     }
@@ -333,8 +342,19 @@ fn init_db(conn: &Connection) -> Result<()> {
             output_path TEXT,
             payload TEXT
         );
+        CREATE TABLE IF NOT EXISTS record_segments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            start_wall_ms INTEGER,
+            end_wall_ms INTEGER,
+            obs_path TEXT,
+            processed INTEGER DEFAULT 0,
+            created_wall_ms INTEGER
+        );
         CREATE INDEX IF NOT EXISTS idx_obs_events_time ON obs_events(ts_wall_ms);
         CREATE INDEX IF NOT EXISTS idx_obs_events_session ON obs_events(session_id);
+        CREATE INDEX IF NOT EXISTS idx_record_segments_session ON record_segments(session_id);
+        CREATE INDEX IF NOT EXISTS idx_record_segments_time ON record_segments(start_wall_ms);
         ",
     )?;
     Ok(())
@@ -346,6 +366,97 @@ fn update_session_obs_path(conn: &Connection, session_id: &str, obs_video_path: 
         params![obs_video_path, session_id],
     )
     .context("Failed to update obs video path")?;
+    Ok(())
+}
+
+fn update_record_segments(
+    conn: &Connection,
+    session_id: Option<&str>,
+    output_state: &str,
+    tracker: &mut RecordTracker,
+) -> Result<()> {
+    match output_state {
+        "OBS_WEBSOCKET_OUTPUT_STARTED" | "OBS_WEBSOCKET_OUTPUT_RESUMED" => {
+            close_open_segment(conn, session_id, tracker)?;
+            start_segment(conn, session_id, tracker)?;
+        }
+        "OBS_WEBSOCKET_OUTPUT_PAUSED" | "OBS_WEBSOCKET_OUTPUT_STOPPED" => {
+            close_open_segment(conn, session_id, tracker)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn start_segment(
+    conn: &Connection,
+    session_id: Option<&str>,
+    tracker: &mut RecordTracker,
+) -> Result<()> {
+    let start_wall_ms = now_wall_ms();
+    let created_wall_ms = start_wall_ms;
+    let obs_path = tracker.current_path.clone();
+    conn.execute(
+        "INSERT INTO record_segments (session_id, start_wall_ms, end_wall_ms, obs_path, processed, created_wall_ms)
+         VALUES (?, ?, NULL, ?, 0, ?)",
+        params![session_id, start_wall_ms, obs_path, created_wall_ms],
+    )
+    .context("Failed to insert record segment")?;
+    tracker.active_segment_id = Some(conn.last_insert_rowid());
+    Ok(())
+}
+
+fn close_open_segment(
+    conn: &Connection,
+    session_id: Option<&str>,
+    tracker: &mut RecordTracker,
+) -> Result<()> {
+    let end_wall_ms = now_wall_ms();
+    let segment_id = match tracker.active_segment_id {
+        Some(id) => Some(id),
+        None => find_open_segment(conn, session_id)?,
+    };
+    if let Some(id) = segment_id {
+        conn.execute(
+            "UPDATE record_segments SET end_wall_ms = ? WHERE id = ?",
+            params![end_wall_ms, id],
+        )
+        .context("Failed to close record segment")?;
+        tracker.active_segment_id = None;
+    }
+    Ok(())
+}
+
+fn find_open_segment(conn: &Connection, session_id: Option<&str>) -> Result<Option<i64>> {
+    let mut stmt = if session_id.is_some() {
+        conn.prepare(
+            "SELECT id FROM record_segments WHERE session_id = ? AND end_wall_ms IS NULL ORDER BY start_wall_ms DESC LIMIT 1",
+        )?
+    } else {
+        conn.prepare(
+            "SELECT id FROM record_segments WHERE session_id IS NULL AND end_wall_ms IS NULL ORDER BY start_wall_ms DESC LIMIT 1",
+        )?
+    };
+    let mut rows = if let Some(session_id) = session_id {
+        stmt.query(params![session_id])?
+    } else {
+        stmt.query([])?
+    };
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn update_segment_path(conn: &Connection, segment_id: Option<i64>, obs_path: &str) -> Result<()> {
+    if let Some(segment_id) = segment_id {
+        conn.execute(
+            "UPDATE record_segments SET obs_path = ? WHERE id = ?",
+            params![obs_path, segment_id],
+        )
+        .context("Failed to update segment path")?;
+    }
     Ok(())
 }
 
@@ -444,6 +555,7 @@ fn handle_event(
     request_counter: &mut u64,
     control: &ControlSender,
     stream_state_path: &Path,
+    tracker: &mut RecordTracker,
     verbose: bool,
 ) -> Result<()> {
     let event_type = data.get("eventType").and_then(|v| v.as_str()).unwrap_or("");
@@ -462,11 +574,18 @@ fn handle_event(
                 _ => "obs_record_state",
             };
             if let Some(path) = event_data.get("outputPath").and_then(|v| v.as_str()) {
+                tracker.current_path = Some(path.to_string());
                 if let Some(session_id) = session_id {
                     let _ = update_session_obs_path(conn, session_id, path);
                 }
             }
             insert_obs_event(conn, session_id, mapped, &event_data, verbose)?;
+            update_record_segments(
+                conn,
+                session_id,
+                output_state,
+                tracker,
+            )?;
             if matches!(
                 output_state,
                 "OBS_WEBSOCKET_OUTPUT_STARTED" | "OBS_WEBSOCKET_OUTPUT_RESUMED"
@@ -496,6 +615,8 @@ fn handle_event(
         }
         "RecordFileChanged" => {
             if let Some(path) = event_data.get("newOutputPath").and_then(|v| v.as_str()) {
+                tracker.current_path = Some(path.to_string());
+                let _ = update_segment_path(conn, tracker.active_segment_id, path);
                 if let Some(session_id) = session_id {
                     let _ = update_session_obs_path(conn, session_id, path);
                 }

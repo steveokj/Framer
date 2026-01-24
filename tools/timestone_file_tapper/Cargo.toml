@@ -1,0 +1,10 @@
+[package]
+name = "timestone_file_tapper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+rusqlite = { version = "0.30", features = ["bundled"] }
+serde_json = "1.0"

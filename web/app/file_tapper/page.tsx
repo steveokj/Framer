@@ -40,6 +40,11 @@ type EventView = TimestoneEvent & {
   mouseData: any;
 };
 
+type EventFrame = {
+  frame_path: string;
+  frame_wall_ms: number | null;
+};
+
 type EventSegment = {
   id: string;
   events: EventView[];
@@ -166,7 +171,6 @@ const MAX_EVENTS = 400;
 const SSE_POLL_MS = 500;
 const SSE_HEARTBEAT_MS = 15000;
 const TEXT_MERGE_WINDOW_MS = 1500;
-const FRAME_STEP_SEC = 1 / 30;
 const DEFAULT_OBS_FOLDER = "C:\\Users\\steve\\Desktop\\Desktop II\\OBS";
 const LAST_FOLDER_STORAGE_KEY = "timestone:lastObsFolder:file_tapper";
 const LAST_SESSION_STORAGE_KEY = "timestone:lastSessionId:file_tapper";
@@ -447,7 +451,8 @@ export default function LiveEventsOnePage() {
   const [pageActive, setPageActive] = useState(true);
   const [selectedEvent, setSelectedEvent] = useState<EventView | null>(null);
   const [selectedSegment, setSelectedSegment] = useState<ObsVideoSegment | null>(null);
-  const [frameOffsetSec, setFrameOffsetSec] = useState(0);
+  const [eventFrames, setEventFrames] = useState<EventFrame[]>([]);
+  const [frameIndex, setFrameIndex] = useState(0);
   const [frameLoading, setFrameLoading] = useState(false);
   const [frameError, setFrameError] = useState<string | null>(null);
   const [videoModalOpen, setVideoModalOpen] = useState(false);
@@ -517,9 +522,64 @@ export default function LiveEventsOnePage() {
     [sessions, sessionId]
   );
 
-  const selectEvent = useCallback((event: EventView) => {
-    setSelectedEvent(event);
+  const pickClosestFrameIndex = useCallback((frames: EventFrame[], wallMs: number) => {
+    if (!frames.length) {
+      return 0;
+    }
+    let bestIndex = 0;
+    let bestDiff = Math.abs((frames[0].frame_wall_ms ?? wallMs) - wallMs);
+    for (let i = 1; i < frames.length; i += 1) {
+      const candidate = frames[i];
+      const diff = Math.abs((candidate.frame_wall_ms ?? wallMs) - wallMs);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestIndex = i;
+      }
+    }
+    return bestIndex;
   }, []);
+
+  const loadEventFrames = useCallback(
+    async (event: EventView | null) => {
+      if (!event) {
+        setEventFrames([]);
+        setFrameIndex(0);
+        return;
+      }
+      setFrameLoading(true);
+      setFrameError(null);
+      try {
+        const res = await fetch("/api/timestone_event_frames", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ eventId: event.id }),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || `Failed to load frames (${res.status})`);
+        }
+        const data = await res.json();
+        const frames = Array.isArray(data.frames) ? data.frames : [];
+        setEventFrames(frames);
+        setFrameIndex(pickClosestFrameIndex(frames, event.ts_wall_ms));
+      } catch (err) {
+        setFrameError(err instanceof Error ? err.message : "Failed to load frames");
+        setEventFrames([]);
+        setFrameIndex(0);
+      } finally {
+        setFrameLoading(false);
+      }
+    },
+    [pickClosestFrameIndex]
+  );
+
+  const selectEvent = useCallback(
+    (event: EventView) => {
+      setSelectedEvent(event);
+      loadEventFrames(event);
+    },
+    [loadEventFrames]
+  );
 
   const refreshSessions = useCallback(async () => {
     setError(null);
@@ -1171,13 +1231,19 @@ export default function LiveEventsOnePage() {
   }, [activeSegment, videoPath]);
 
   const videoUrl = useMemo(() => (videoPath ? buildFileUrl(videoPath) : null), [videoPath]);
-  const frameUrl = useMemo(() => {
-    if (!selectedSegment?.path || !selectedEvent) {
+  const activeFrame = useMemo(() => {
+    if (!eventFrames.length) {
       return null;
     }
-    const offset = Number.isFinite(frameOffsetSec) ? frameOffsetSec : 0;
-    return `/api/video/frame?file_path=${encodeURIComponent(selectedSegment.path)}&offset_index=${offset.toFixed(3)}`;
-  }, [frameOffsetSec, selectedEvent, selectedSegment]);
+    const clamped = Math.min(Math.max(frameIndex, 0), eventFrames.length - 1);
+    return eventFrames[clamped];
+  }, [eventFrames, frameIndex]);
+  const frameUrl = useMemo(() => {
+    if (!activeFrame?.frame_path) {
+      return null;
+    }
+    return buildFileUrl(activeFrame.frame_path);
+  }, [activeFrame]);
 
   useEffect(() => {
     if (!frameUrl) {
@@ -1225,25 +1291,14 @@ export default function LiveEventsOnePage() {
   useEffect(() => {
     if (!selectedEvent) {
       setSelectedSegment(null);
-      setFrameOffsetSec(0);
-      setFrameError(null);
       return;
     }
     const segment = findSegmentForWallMs(selectedEvent.ts_wall_ms);
     if (!segment || segment.start_ms == null) {
       setSelectedSegment(null);
-      setFrameOffsetSec(0);
-      setFrameError("No video segment found for this event.");
       return;
     }
-    const rawOffset = Math.max(0, (selectedEvent.ts_wall_ms - segment.start_ms) / 1000);
-    const clamped =
-      segment.duration_s != null && Number.isFinite(segment.duration_s)
-        ? Math.max(0, Math.min(segment.duration_s, rawOffset))
-        : rawOffset;
     setSelectedSegment(segment);
-    setFrameOffsetSec(clamped);
-    setFrameError(null);
   }, [findSegmentForWallMs, selectedEvent]);
   const toggleGroup = useCallback((id: string) => {
     setExpandedGroups((prev) => {
@@ -1315,17 +1370,17 @@ export default function LiveEventsOnePage() {
   }, []);
 
   const handlePrevFrame = useCallback(() => {
-    setFrameOffsetSec((current) => Math.max(0, current - FRAME_STEP_SEC));
+    setFrameIndex((current) => Math.max(0, current - 1));
   }, []);
 
   const handleNextFrame = useCallback(() => {
-    setFrameOffsetSec((current) => {
-      if (!selectedSegment?.duration_s || !Number.isFinite(selectedSegment.duration_s)) {
-        return current + FRAME_STEP_SEC;
+    setFrameIndex((current) => {
+      if (!eventFrames.length) {
+        return current;
       }
-      return Math.min(selectedSegment.duration_s, current + FRAME_STEP_SEC);
+      return Math.min(eventFrames.length - 1, current + 1);
     });
-  }, [selectedSegment]);
+  }, [eventFrames.length]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -1341,14 +1396,15 @@ export default function LiveEventsOnePage() {
         handleNextFrame();
       } else if (event.key.toLowerCase() === "v" && selectedEvent) {
         event.preventDefault();
-        openVideoAtWallMs(selectedEvent.ts_wall_ms);
+        const frameWall = activeFrame?.frame_wall_ms ?? selectedEvent.ts_wall_ms;
+        openVideoAtWallMs(frameWall);
       } else if (event.key === "Escape" && videoModalOpen) {
         setVideoModalOpen(false);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [handleNextFrame, handlePrevFrame, openVideoAtWallMs, selectedEvent, videoModalOpen]);
+  }, [activeFrame, handleNextFrame, handlePrevFrame, openVideoAtWallMs, selectedEvent, videoModalOpen]);
 
   const handleRestart = useCallback(() => {
     const video = videoRef.current;
@@ -1997,7 +2053,7 @@ export default function LiveEventsOnePage() {
                     onLoad={() => setFrameLoading(false)}
                     onError={() => {
                       setFrameLoading(false);
-                      setFrameError("Failed to load frame from video.");
+                      setFrameError("Failed to load frame.");
                     }}
                   />
                 ) : (
@@ -2010,7 +2066,7 @@ export default function LiveEventsOnePage() {
                       background: "#0f172a",
                     }}
                   >
-                    {selectedEvent ? "No video segment for this event." : "Select an event to preview frames."}
+                    {selectedEvent ? "No frames captured for this event." : "Select an event to preview frames."}
                   </div>
                 )}
                 <div
@@ -2033,7 +2089,7 @@ export default function LiveEventsOnePage() {
                       aria-label="Previous frame"
                       title="Previous frame"
                       onClick={handlePrevFrame}
-                      disabled={!selectedSegment}
+                      disabled={!eventFrames.length}
                       style={{
                         width: 40,
                         height: 40,
@@ -2044,8 +2100,8 @@ export default function LiveEventsOnePage() {
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "center",
-                        cursor: selectedSegment ? "pointer" : "not-allowed",
-                        opacity: selectedSegment ? 1 : 0.5,
+                        cursor: eventFrames.length ? "pointer" : "not-allowed",
+                        opacity: eventFrames.length ? 1 : 0.5,
                       }}
                     >
                       <ChevronLeftIcon />
@@ -2055,7 +2111,7 @@ export default function LiveEventsOnePage() {
                       aria-label="Next frame"
                       title="Next frame"
                       onClick={handleNextFrame}
-                      disabled={!selectedSegment}
+                      disabled={!eventFrames.length}
                       style={{
                         width: 40,
                         height: 40,
@@ -2066,14 +2122,14 @@ export default function LiveEventsOnePage() {
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "center",
-                        cursor: selectedSegment ? "pointer" : "not-allowed",
-                        opacity: selectedSegment ? 1 : 0.5,
+                        cursor: eventFrames.length ? "pointer" : "not-allowed",
+                        opacity: eventFrames.length ? 1 : 0.5,
                       }}
                     >
                       <ChevronRightIcon />
                     </button>
                     <span style={{ color: "#e2e8f0", fontVariantNumeric: "tabular-nums" }}>
-                      {selectedSegment ? `${frameOffsetSec.toFixed(2)}s` : "--"}
+                      {eventFrames.length ? `${frameIndex + 1} / ${eventFrames.length}` : "-- / --"}
                     </span>
                   </div>
                   <button
@@ -2084,7 +2140,8 @@ export default function LiveEventsOnePage() {
                       if (!selectedEvent) {
                         return;
                       }
-                      openVideoAtWallMs(selectedEvent.ts_wall_ms);
+                      const frameWall = activeFrame?.frame_wall_ms ?? selectedEvent.ts_wall_ms;
+                      openVideoAtWallMs(frameWall);
                     }}
                     style={{
                       width: 44,

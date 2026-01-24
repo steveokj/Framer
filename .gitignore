@@ -107,6 +107,7 @@ Thumbs.db
 tools/timestone_recorder/target/
 tools/timestone_obs_ws/target/
 tools/timestone_frame_tapper/target/
+tools/timestone_file_tapper/target/
 
 # Local recorder config
 data/timestone/config.json
