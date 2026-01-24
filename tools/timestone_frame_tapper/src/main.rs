@@ -20,7 +20,7 @@ const DEFAULT_SCALE_WIDTH: u32 = 1280;
 const DEFAULT_CONTROL_HOST: &str = "127.0.0.1";
 const DEFAULT_CONTROL_PORT: u16 = 40777;
 const STREAM_STATE_FILE: &str = "stream.state";
-const STARTUP_GRACE_MS: i64 = 2000;
+const STARTUP_GRACE_MS: i64 = 5000;
 
 #[derive(Clone)]
 struct FrameMeta {
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
 
     let mut ffmpeg: Option<Child> = None;
     let mut active = read_stream_state(&stream_state_path).unwrap_or(false);
-    let mut retry_delay_ms: i64 = 1000;
+    let mut retry_delay_ms: i64 = 2000;
     let mut next_retry_at_ms: i64 = 0;
     log_line(args.verbose, "Frame tapper running.");
     if active {
@@ -113,14 +113,14 @@ fn main() -> Result<()> {
                     last_event_id = latest_event_id(&conn, &session_id)?;
                     pending.clear();
                     log_line(args.verbose, "State: active");
-                    log_line(args.verbose, "Recording active. Starting capture.");
-                    retry_delay_ms = 1000;
+                    log_line(args.verbose, "Recording active. Waiting for stream...");
+                    retry_delay_ms = 2000;
                     next_retry_at_ms = now_wall_ms() + STARTUP_GRACE_MS;
                 } else {
                     pending.clear();
                     log_line(args.verbose, "State: inactive");
                     log_line(args.verbose, "Recording inactive. Pausing capture.");
-                    retry_delay_ms = 1000;
+                    retry_delay_ms = 2000;
                     next_retry_at_ms = 0;
                 }
             }
