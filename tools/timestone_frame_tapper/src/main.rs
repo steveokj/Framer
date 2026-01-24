@@ -20,6 +20,7 @@ const DEFAULT_SCALE_WIDTH: u32 = 1280;
 const DEFAULT_CONTROL_HOST: &str = "127.0.0.1";
 const DEFAULT_CONTROL_PORT: u16 = 40777;
 const STREAM_STATE_FILE: &str = "stream.state";
+const STARTUP_GRACE_MS: i64 = 2000;
 
 #[derive(Clone)]
 struct FrameMeta {
@@ -114,7 +115,7 @@ fn main() -> Result<()> {
                     log_line(args.verbose, "State: active");
                     log_line(args.verbose, "Recording active. Starting capture.");
                     retry_delay_ms = 1000;
-                    next_retry_at_ms = now_wall_ms() + 1000;
+                    next_retry_at_ms = now_wall_ms() + STARTUP_GRACE_MS;
                 } else {
                     pending.clear();
                     log_line(args.verbose, "State: inactive");
