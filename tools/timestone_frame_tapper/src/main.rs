@@ -97,6 +97,8 @@ fn main() -> Result<()> {
 
     let mut ffmpeg: Option<Child> = None;
     let mut active = read_stream_state(&stream_state_path).unwrap_or(false);
+    let mut retry_delay_ms: i64 = 1000;
+    let mut next_retry_at_ms: i64 = 0;
     log_line(args.verbose, "Frame tapper running.");
     if active {
         log_line(args.verbose, "State: active (from stream.state)");
@@ -111,17 +113,24 @@ fn main() -> Result<()> {
                     pending.clear();
                     log_line(args.verbose, "State: active");
                     log_line(args.verbose, "Recording active. Starting capture.");
+                    retry_delay_ms = 1000;
+                    next_retry_at_ms = now_wall_ms() + 1000;
                 } else {
                     pending.clear();
                     log_line(args.verbose, "State: inactive");
                     log_line(args.verbose, "Recording inactive. Pausing capture.");
+                    retry_delay_ms = 1000;
+                    next_retry_at_ms = 0;
                 }
             }
         }
 
         if active && ffmpeg.is_none() {
-            ffmpeg = Some(spawn_ffmpeg(&args, &frames_dir)?);
-            log_line(args.verbose, "ffmpeg started.");
+            let now = now_wall_ms();
+            if now >= next_retry_at_ms {
+                ffmpeg = Some(spawn_ffmpeg(&args, &frames_dir)?);
+                log_line(args.verbose, "ffmpeg started.");
+            }
         }
         if !active {
             if let Some(mut child) = ffmpeg.take() {
@@ -133,7 +142,11 @@ fn main() -> Result<()> {
             continue;
         }
 
-        refresh_frames(&frames_dir, &mut frames, &mut seen_files, args.buffer_sec)?;
+        let new_frames = refresh_frames(&frames_dir, &mut frames, &mut seen_files, args.buffer_sec)?;
+        if new_frames > 0 {
+            retry_delay_ms = 1000;
+            next_retry_at_ms = 0;
+        }
         poll_events(
             &conn,
             &session_id,
@@ -151,8 +164,10 @@ fn main() -> Result<()> {
                     args.verbose,
                     &format!("ffmpeg exited with status {status}. Restarting soon..."),
                 );
-                std::thread::sleep(Duration::from_millis(1000));
-                ffmpeg = Some(spawn_ffmpeg(&args, &frames_dir)?);
+                ffmpeg = None;
+                let now = now_wall_ms();
+                next_retry_at_ms = now + retry_delay_ms;
+                retry_delay_ms = (retry_delay_ms * 2).min(8000);
             }
         }
 
@@ -364,8 +379,9 @@ fn refresh_frames(
     frames: &mut VecDeque<FrameMeta>,
     seen: &mut HashSet<String>,
     buffer_sec: i64,
-) -> Result<()> {
+) -> Result<usize> {
     let mut entries: Vec<PathBuf> = Vec::new();
+    let mut new_count = 0;
     if frames_dir.exists() {
         for entry in fs::read_dir(frames_dir)? {
             let entry = entry?;
@@ -383,10 +399,11 @@ fn refresh_frames(
             }
             entries.push(path);
             seen.insert(name);
+            new_count += 1;
         }
     }
     if entries.is_empty() {
-        return Ok(());
+        return Ok(new_count);
     }
     entries.sort();
     for path in entries {
@@ -403,7 +420,7 @@ fn refresh_frames(
             let _ = fs::remove_file(&front.path);
         }
     }
-    Ok(())
+    Ok(new_count)
 }
 
 fn cleanup_frames(
