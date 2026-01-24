@@ -2,5 +2,5 @@ rtmp: yes
 rtmpAddress: :1935
 
 paths:
-  live:
+  all:
     source: publisher
