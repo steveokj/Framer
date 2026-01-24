@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::fs;
@@ -79,10 +79,23 @@ fn main() -> Result<()> {
     let mut seen_files: HashSet<String> = HashSet::new();
     let mut last_event_id = latest_event_id(&conn, &session_id)?;
 
-    let mut ffmpeg = spawn_ffmpeg(&args, &frames_dir)?;
+    let mut ffmpeg: Option<Child> = None;
     log_line(args.verbose, "Frame tapper running.");
 
     loop {
+        let should_run = is_recording_active(&conn, &session_id)?;
+        if should_run && ffmpeg.is_none() {
+            ffmpeg = Some(spawn_ffmpeg(&args, &frames_dir)?);
+            log_line(args.verbose, "ffmpeg started.");
+        }
+        if !should_run {
+            if let Some(mut child) = ffmpeg.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+                log_line(args.verbose, "ffmpeg stopped (recording inactive).");
+            }
+        }
+
         refresh_frames(&frames_dir, &mut frames, &mut seen_files, args.buffer_sec)?;
         poll_events(
             &conn,
@@ -95,13 +108,15 @@ fn main() -> Result<()> {
         flush_pending(&conn, &mut pending, &frames, &frames_dir, args.before_ms, args.after_ms)?;
         cleanup_frames(&mut frames, &mut seen_files, args.buffer_sec)?;
 
-        if let Some(status) = ffmpeg.try_wait()? {
-            log_line(
-                args.verbose,
-                &format!("ffmpeg exited with status {status}. Restarting soon..."),
-            );
-            std::thread::sleep(Duration::from_millis(1000));
-            ffmpeg = spawn_ffmpeg(&args, &frames_dir)?;
+        if let Some(child) = ffmpeg.as_mut() {
+            if let Some(status) = child.try_wait()? {
+                log_line(
+                    args.verbose,
+                    &format!("ffmpeg exited with status {status}. Restarting soon..."),
+                );
+                std::thread::sleep(Duration::from_millis(1000));
+                ffmpeg = Some(spawn_ffmpeg(&args, &frames_dir)?);
+            }
         }
 
         std::thread::sleep(Duration::from_millis(250));
@@ -232,6 +247,22 @@ fn latest_event_id(conn: &Connection, session_id: &str) -> Result<i64> {
     )?;
     let id: i64 = stmt.query_row(params![session_id], |row| row.get(0))?;
     Ok(id)
+}
+
+fn is_recording_active(conn: &Connection, session_id: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT event_type FROM events
+         WHERE session_id = ?
+           AND event_type IN ('obs_record_start','obs_record_resume','obs_record_pause','obs_record_stop')
+         ORDER BY ts_wall_ms DESC
+         LIMIT 1",
+    )?;
+    let event_type: Option<String> =
+        stmt.query_row(params![session_id], |row| row.get(0)).optional()?;
+    Ok(matches!(
+        event_type.as_deref(),
+        Some("obs_record_start") | Some("obs_record_resume")
+    ))
 }
 
 fn poll_events(

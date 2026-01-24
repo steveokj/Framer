@@ -68,6 +68,7 @@ fn main() -> Result<()> {
     let (mut socket, _) = connect(ws_url)?;
 
     let mut authenticated = false;
+    let mut request_counter: u64 = 0;
     loop {
         if let Some(message) = read_json_message(&mut socket, args.verbose)? {
             let op = message.get("op").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -95,7 +96,14 @@ fn main() -> Result<()> {
                 continue;
             }
             if let Some(data) = message.get("d") {
-                handle_event(&conn, &session_id, data, args.verbose)?;
+                handle_event(
+                    &conn,
+                    &session_id,
+                    data,
+                    &mut socket,
+                    &mut request_counter,
+                    args.verbose,
+                )?;
             }
         }
     }
@@ -310,7 +318,14 @@ fn send_identify(
     Ok(())
 }
 
-fn handle_event(conn: &Connection, session_id: &str, data: &Value, verbose: bool) -> Result<()> {
+fn handle_event(
+    conn: &Connection,
+    session_id: &str,
+    data: &Value,
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    request_counter: &mut u64,
+    verbose: bool,
+) -> Result<()> {
     let event_type = data.get("eventType").and_then(|v| v.as_str()).unwrap_or("");
     let event_data = data.get("eventData").cloned().unwrap_or(json!({}));
     match event_type {
@@ -330,6 +345,17 @@ fn handle_event(conn: &Connection, session_id: &str, data: &Value, verbose: bool
                 let _ = update_session_obs_path(conn, session_id, path);
             }
             insert_event(conn, session_id, mapped, event_data.clone(), verbose)?;
+            if matches!(
+                output_state,
+                "OBS_WEBSOCKET_OUTPUT_STARTED" | "OBS_WEBSOCKET_OUTPUT_RESUMED"
+            ) {
+                send_request(socket, "StartStream", json!({}), request_counter, verbose)?;
+            } else if matches!(
+                output_state,
+                "OBS_WEBSOCKET_OUTPUT_PAUSED" | "OBS_WEBSOCKET_OUTPUT_STOPPED"
+            ) {
+                send_request(socket, "StopStream", json!({}), request_counter, verbose)?;
+            }
         }
         "RecordFileChanged" => {
             if let Some(path) = event_data.get("newOutputPath").and_then(|v| v.as_str()) {
@@ -339,6 +365,30 @@ fn handle_event(conn: &Connection, session_id: &str, data: &Value, verbose: bool
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn send_request(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    request_type: &str,
+    request_data: Value,
+    counter: &mut u64,
+    verbose: bool,
+) -> Result<()> {
+    *counter += 1;
+    let request_id = format!("tstone-{}", counter);
+    let payload = json!({
+        "op": 6,
+        "d": {
+            "requestType": request_type,
+            "requestId": request_id,
+            "requestData": request_data
+        }
+    });
+    if verbose {
+        log_line(verbose, &format!("[obs] -> {payload}"));
+    }
+    socket.write_message(Message::Text(payload.to_string()))?;
     Ok(())
 }
 
