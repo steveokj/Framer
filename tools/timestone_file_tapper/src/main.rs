@@ -434,6 +434,8 @@ fn extract_frame(
         .arg(obs_path)
         .arg("-ss")
         .arg(offset_arg)
+        .arg("-update")
+        .arg("1")
         .arg("-frames:v")
         .arg("1")
         .arg("-vf")
