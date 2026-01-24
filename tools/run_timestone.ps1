@@ -11,6 +11,9 @@ param(
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $script:repoRoot = $repoRoot
 $script:procs = @()
+$script:obsAuto = [bool]$ObsAuto
+$script:obsHost = $ObsHost
+$script:obsPort = $ObsPort
 $script:recorderExe = Join-Path $repoRoot "tools\timestone_recorder\target\debug\timestone_recorder.exe"
 $script:obsExe = Join-Path $repoRoot "tools\timestone_obs_ws\target\debug\timestone_obs_ws.exe"
 $script:tapperExe = Join-Path $repoRoot "tools\timestone_frame_tapper\target\debug\timestone_frame_tapper.exe"
@@ -38,10 +41,10 @@ $null = Register-EngineEvent -SourceIdentifier ConsoleCancelEvent -Action {
   param($sender, $eventArgs)
   $eventArgs.Cancel = $true
   Write-Host "`n[launcher] Stopping timestone..."
-  if ($ObsAuto) {
+  if ($script:obsAuto) {
     try {
       Write-Host "[launcher] Stopping OBS recording and stream..."
-      & $script:obsExe --host $ObsHost --port $ObsPort --command stop | Out-Null
+      & $script:obsExe --host $script:obsHost --port $script:obsPort --command stop | Out-Null
     } catch {
       Write-Host "[launcher] Failed to stop OBS via websocket."
     }
@@ -97,10 +100,10 @@ $script:procs += Start-Process -FilePath $script:obsExe -ArgumentList @(
 
 Start-Sleep -Seconds 1
 
-if ($ObsAuto) {
+if ($script:obsAuto) {
   try {
     Write-Host "[launcher] Starting OBS recording and stream..."
-    & $script:obsExe --host $ObsHost --port $ObsPort --command start | Out-Null
+    & $script:obsExe --host $script:obsHost --port $script:obsPort --command start | Out-Null
   } catch {
     Write-Host "[launcher] Failed to start OBS via websocket."
   }
