@@ -396,7 +396,7 @@ fn system_time_to_ms(time: SystemTime) -> i64 {
 
 fn spawn_ffmpeg(args: &Args, frames_dir: &Path) -> Result<Child> {
     let output_pattern = frames_dir
-        .join("frame_%Y%m%d_%H%M%S_%f.jpg")
+        .join("frame_%08d.jpg")
         .to_string_lossy()
         .to_string();
     let vf = format!("fps={},scale={}:-1", args.fps, args.scale_width);
@@ -405,16 +405,20 @@ fn spawn_ffmpeg(args: &Args, frames_dir: &Path) -> Result<Child> {
     cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg(log_level)
+        .arg("-fflags")
+        .arg("+genpts")
         .arg("-use_wallclock_as_timestamps")
         .arg("1")
+        .arg("-analyzeduration")
+        .arg("5000000")
+        .arg("-probesize")
+        .arg("5000000")
         .arg("-i")
         .arg(&args.stream_url)
         .arg("-vf")
         .arg(vf)
         .arg("-q:v")
         .arg("5")
-        .arg("-strftime")
-        .arg("1")
         .arg(output_pattern)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
