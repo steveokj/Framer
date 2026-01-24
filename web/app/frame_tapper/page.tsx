@@ -447,6 +447,8 @@ export default function LiveEventsOnePage() {
   const [searchModalOpen, setSearchModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [videoOnly, setVideoOnly] = useState(false);
+  const [pauseWhenInactive, setPauseWhenInactive] = useState(true);
+  const [pageActive, setPageActive] = useState(true);
   const [framesOnlyIds, setFramesOnlyIds] = useState<Set<number>>(new Set());
   const [framesOnlyLoading, setFramesOnlyLoading] = useState(false);
   const [framesOnlyError, setFramesOnlyError] = useState<string | null>(null);
@@ -934,6 +936,25 @@ export default function LiveEventsOnePage() {
   }, [refreshSessions]);
 
   useEffect(() => {
+    if (!pauseWhenInactive) {
+      setPageActive(true);
+      return;
+    }
+    const update = () => {
+      setPageActive(!document.hidden && document.hasFocus());
+    };
+    update();
+    document.addEventListener("visibilitychange", update);
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    return () => {
+      document.removeEventListener("visibilitychange", update);
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+    };
+  }, [pauseWhenInactive]);
+
+  useEffect(() => {
     refreshObsVideos();
   }, [refreshObsVideos]);
 
@@ -945,11 +966,14 @@ export default function LiveEventsOnePage() {
     if (!liveEnabled || !videoOnly) {
       return;
     }
+    if (pauseWhenInactive && !pageActive) {
+      return;
+    }
     const id = window.setInterval(() => {
       fetchFramesOnlyIds();
     }, SSE_POLL_MS);
     return () => window.clearInterval(id);
-  }, [fetchFramesOnlyIds, liveEnabled, videoOnly]);
+  }, [fetchFramesOnlyIds, liveEnabled, pageActive, pauseWhenInactive, videoOnly]);
 
   useEffect(() => {
     fetchEventsSnapshot();
@@ -959,12 +983,19 @@ export default function LiveEventsOnePage() {
     if (!liveEnabled) {
       return;
     }
+    if (pauseWhenInactive && !pageActive) {
+      return;
+    }
     refreshObsVideos();
-  }, [liveEnabled, refreshObsVideos]);
+  }, [liveEnabled, pageActive, pauseWhenInactive, refreshObsVideos]);
 
   useEffect(() => {
     setError(null);
     if (!sessionId || filterMode !== "session") {
+      return;
+    }
+    if (pauseWhenInactive && !pageActive) {
+      setStatus("Paused (inactive)");
       return;
     }
     let cancelled = false;
@@ -1003,7 +1034,7 @@ export default function LiveEventsOnePage() {
       cancelled = true;
       source?.close();
     };
-  }, [buildStreamUrl, ingestEvents, liveEnabled, sessionId, filterMode]);
+  }, [buildStreamUrl, ingestEvents, liveEnabled, pageActive, pauseWhenInactive, sessionId, filterMode]);
 
   const resolvedSegments = useMemo(() => {
     if (!obsSegments.length) {
@@ -1907,7 +1938,14 @@ export default function LiveEventsOnePage() {
                 ) : null}
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", color: "#94a3b8" }}>
-                <span>Status: {liveEnabled && filterMode === "session" ? status : "Paused"}</span>
+                <span>
+                  Status:{" "}
+                  {!liveEnabled || filterMode !== "session"
+                    ? "Paused"
+                    : pauseWhenInactive && !pageActive
+                      ? "Paused (inactive)"
+                      : status}
+                </span>
                 {activeSession ? <span>Started {formatSessionDate(activeSession.start_wall_iso)}</span> : null}
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                   Events loaded: {eventCount}
@@ -2812,6 +2850,15 @@ export default function LiveEventsOnePage() {
                       gap: 12,
                     }}
                   >
+                    <strong>Live polling</strong>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={pauseWhenInactive}
+                        onChange={(event) => setPauseWhenInactive(event.target.checked)}
+                      />
+                      <span>Pause live polling when tab/window is inactive</span>
+                    </label>
                     <strong>Event visibility</strong>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                       {Object.entries(eventVisibility).map(([key, enabled]) => (
