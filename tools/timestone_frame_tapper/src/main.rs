@@ -96,7 +96,12 @@ fn main() -> Result<()> {
         cleanup_frames(&mut frames, &mut seen_files, args.buffer_sec)?;
 
         if let Some(status) = ffmpeg.try_wait()? {
-            return Err(anyhow!("ffmpeg exited with status {status}"));
+            log_line(
+                args.verbose,
+                &format!("ffmpeg exited with status {status}. Restarting soon..."),
+            );
+            std::thread::sleep(Duration::from_millis(1000));
+            ffmpeg = spawn_ffmpeg(&args, &frames_dir)?;
         }
 
         std::thread::sleep(Duration::from_millis(250));
@@ -395,10 +400,11 @@ fn spawn_ffmpeg(args: &Args, frames_dir: &Path) -> Result<Child> {
         .to_string_lossy()
         .to_string();
     let vf = format!("fps={},scale={}:-1", args.fps, args.scale_width);
+    let log_level = if args.verbose { "warning" } else { "error" };
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-hide_banner")
         .arg("-loglevel")
-        .arg("error")
+        .arg(log_level)
         .arg("-i")
         .arg(&args.stream_url)
         .arg("-vf")
@@ -410,7 +416,7 @@ fn spawn_ffmpeg(args: &Args, frames_dir: &Path) -> Result<Child> {
         .arg(output_pattern)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(if args.verbose { Stdio::inherit() } else { Stdio::null() });
     cmd.spawn().context("Failed to start ffmpeg")
 }
 
