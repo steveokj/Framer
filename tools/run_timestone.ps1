@@ -10,6 +10,24 @@ param(
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $script:repoRoot = $repoRoot
 $script:procs = @()
+$script:recorderExe = Join-Path $repoRoot "tools\timestone_recorder\target\debug\timestone_recorder.exe"
+$script:obsExe = Join-Path $repoRoot "tools\timestone_obs_ws\target\debug\timestone_obs_ws.exe"
+$script:tapperExe = Join-Path $repoRoot "tools\timestone_frame_tapper\target\debug\timestone_frame_tapper.exe"
+
+function Ensure-Binary {
+  param(
+    [string]$Manifest,
+    [string]$ExePath,
+    [string]$Label
+  )
+  if (-not (Test-Path $ExePath)) {
+    Write-Host "[launcher] Building $Label..."
+    & cargo build --manifest-path $Manifest
+    if ($LASTEXITCODE -ne 0) {
+      throw "Build failed for $Label"
+    }
+  }
+}
 
 if ($ObsPassword) {
   $env:OBS_WS_PASSWORD = $ObsPassword
@@ -20,16 +38,22 @@ $null = Register-EngineEvent -SourceIdentifier ConsoleCancelEvent -Action {
   $eventArgs.Cancel = $true
   Write-Host "`n[launcher] Stopping timestone..."
   try {
-    Start-Process -FilePath "cargo" -ArgumentList @("run","--manifest-path","tools\timestone_recorder\Cargo.toml","--","stop") -WorkingDirectory $script:repoRoot -NoNewWindow -Wait | Out-Null
+    if (Test-Path $script:recorderExe) {
+      & $script:recorderExe stop | Out-Null
+    }
   } catch {
     Write-Host "[launcher] Failed to send recorder stop signal."
   }
   foreach ($p in $script:procs) {
     if ($p -and -not $p.HasExited) {
-      Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+      Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+      Start-Sleep -Milliseconds 300
+      if (-not $p.HasExited) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+      }
     }
   }
-  Exit
+  Exit 0
 }
 
 if (-not $MediaMtxExe) {
@@ -41,6 +65,10 @@ if (-not $MediaMtxConfig) {
 
 Write-Host "[launcher] Repo root: $repoRoot"
 
+Ensure-Binary "tools\timestone_recorder\Cargo.toml" $script:recorderExe "timestone_recorder"
+Ensure-Binary "tools\timestone_obs_ws\Cargo.toml" $script:obsExe "timestone_obs_ws"
+Ensure-Binary "tools\timestone_frame_tapper\Cargo.toml" $script:tapperExe "timestone_frame_tapper"
+
 if (-not (Test-Path $MediaMtxExe)) {
   Write-Host "[launcher] MediaMTX exe not found: $MediaMtxExe" -ForegroundColor Yellow
 } else {
@@ -49,20 +77,20 @@ if (-not (Test-Path $MediaMtxExe)) {
 }
 
 Write-Host "[launcher] Starting timestone_recorder..."
-$script:procs += Start-Process -FilePath "cargo" -ArgumentList @("run","--manifest-path","tools\timestone_recorder\Cargo.toml","--","start") -WorkingDirectory $repoRoot -NoNewWindow -PassThru
+$script:procs += Start-Process -FilePath $script:recorderExe -ArgumentList @("start") -WorkingDirectory $repoRoot -NoNewWindow -PassThru
 
 Start-Sleep -Seconds 1
 
 Write-Host "[launcher] Starting OBS WS listener..."
-$script:procs += Start-Process -FilePath "cargo" -ArgumentList @(
-  "run","--manifest-path","tools\timestone_obs_ws\Cargo.toml","--","--host",$ObsHost,"--port",$ObsPort,"--verbose"
+$script:procs += Start-Process -FilePath $script:obsExe -ArgumentList @(
+  "--host",$ObsHost,"--port",$ObsPort,"--verbose"
 ) -WorkingDirectory $repoRoot -NoNewWindow -PassThru
 
 Start-Sleep -Seconds 1
 
 Write-Host "[launcher] Starting frame tapper..."
-$script:procs += Start-Process -FilePath "cargo" -ArgumentList @(
-  "run","--manifest-path","tools\timestone_frame_tapper\Cargo.toml","--","--stream",$StreamUrl,"--verbose"
+$script:procs += Start-Process -FilePath $script:tapperExe -ArgumentList @(
+  "--stream",$StreamUrl,"--verbose"
 ) -WorkingDirectory $repoRoot -NoNewWindow -PassThru
 
 Write-Host "[launcher] All components started. Press Ctrl+C to stop."
