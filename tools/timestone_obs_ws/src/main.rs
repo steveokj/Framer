@@ -124,6 +124,13 @@ fn main() -> Result<()> {
         &mut request_counter,
         args.verbose,
     )?;
+    send_request(
+        &mut socket,
+        "GetStreamStatus",
+        json!({}),
+        &mut request_counter,
+        args.verbose,
+    )?;
 
     loop {
         if let Some(message) = read_json_message(&mut socket, args.verbose)? {
@@ -145,7 +152,14 @@ fn main() -> Result<()> {
                 }
                 7 => {
                     if let Some(data) = message.get("d") {
-                        handle_response(data, &control, &stream_state_path, args.verbose)?;
+                        handle_response(
+                            data,
+                            &mut socket,
+                            &mut request_counter,
+                            &control,
+                            &stream_state_path,
+                            args.verbose,
+                        )?;
                     }
                 }
                 _ => {}
@@ -411,13 +425,24 @@ fn handle_event(
                 "OBS_WEBSOCKET_OUTPUT_STARTED" | "OBS_WEBSOCKET_OUTPUT_RESUMED"
             ) {
                 send_request(socket, "StartStream", json!({}), request_counter, verbose)?;
-                let _ = control.send("recording:start", verbose);
-                let _ = write_stream_state(stream_state_path, true);
             } else if matches!(
                 output_state,
                 "OBS_WEBSOCKET_OUTPUT_PAUSED" | "OBS_WEBSOCKET_OUTPUT_STOPPED"
             ) {
                 send_request(socket, "StopStream", json!({}), request_counter, verbose)?;
+                let _ = control.send("recording:stop", verbose);
+                let _ = write_stream_state(stream_state_path, false);
+            }
+        }
+        "StreamStateChanged" => {
+            let output_active = event_data
+                .get("outputActive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if output_active {
+                let _ = control.send("recording:start", verbose);
+                let _ = write_stream_state(stream_state_path, true);
+            } else {
                 let _ = control.send("recording:stop", verbose);
                 let _ = write_stream_state(stream_state_path, false);
             }
@@ -459,29 +484,41 @@ fn send_request(
 
 fn handle_response(
     data: &Value,
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    request_counter: &mut u64,
     control: &ControlSender,
     stream_state_path: &Path,
     verbose: bool,
 ) -> Result<()> {
     let request_type = data.get("requestType").and_then(|v| v.as_str()).unwrap_or("");
-    if request_type != "GetRecordStatus" {
+    if request_type == "GetRecordStatus" {
+        let response = data.get("responseData").cloned().unwrap_or(json!({}));
+        let output_active = response
+            .get("outputActive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let output_paused = response
+            .get("outputPaused")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if output_active && !output_paused {
+            send_request(socket, "StartStream", json!({}), request_counter, verbose)?;
+        }
         return Ok(());
     }
-    let response = data.get("responseData").cloned().unwrap_or(json!({}));
-    let output_active = response
-        .get("outputActive")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let output_paused = response
-        .get("outputPaused")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if output_active && !output_paused {
-        let _ = control.send("recording:start", verbose);
-        let _ = write_stream_state(stream_state_path, true);
-    } else {
-        let _ = control.send("recording:stop", verbose);
-        let _ = write_stream_state(stream_state_path, false);
+    if request_type == "GetStreamStatus" {
+        let response = data.get("responseData").cloned().unwrap_or(json!({}));
+        let output_active = response
+            .get("outputActive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if output_active {
+            let _ = control.send("recording:start", verbose);
+            let _ = write_stream_state(stream_state_path, true);
+        } else {
+            let _ = control.send("recording:stop", verbose);
+            let _ = write_stream_state(stream_state_path, false);
+        }
     }
     Ok(())
 }
