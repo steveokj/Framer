@@ -82,6 +82,10 @@ fn main() -> Result<()> {
     let control_socket = UdpSocket::bind(&control_addr)
         .with_context(|| format!("Failed to bind control socket on {control_addr}"))?;
     control_socket.set_nonblocking(true)?;
+    log_line(
+        args.verbose,
+        &format!("Control listener on {control_addr}. Waiting for recording:start..."),
+    );
 
     let mut processed = load_processed_events(&conn)?;
     let mut pending: Vec<PendingEvent> = Vec::new();
@@ -100,9 +104,11 @@ fn main() -> Result<()> {
                 if active {
                     last_event_id = latest_event_id(&conn, &session_id)?;
                     pending.clear();
+                    log_line(args.verbose, "State: active");
                     log_line(args.verbose, "Recording active. Starting capture.");
                 } else {
                     pending.clear();
+                    log_line(args.verbose, "State: inactive");
                     log_line(args.verbose, "Recording inactive. Pausing capture.");
                 }
             }
