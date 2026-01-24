@@ -17,29 +17,13 @@ $script:obsPort = $ObsPort
 $script:recorderExe = Join-Path $repoRoot "tools\timestone_recorder\target\debug\timestone_recorder.exe"
 $script:obsExe = Join-Path $repoRoot "tools\timestone_obs_ws\target\debug\timestone_obs_ws.exe"
 $script:tapperExe = Join-Path $repoRoot "tools\timestone_frame_tapper\target\debug\timestone_frame_tapper.exe"
+$script:stopping = $false
 
-function Ensure-Binary {
-  param(
-    [string]$Manifest,
-    [string]$ExePath,
-    [string]$Label
-  )
-  if (-not (Test-Path $ExePath)) {
-    Write-Host "[launcher] Building $Label..."
-    & cargo build --manifest-path $Manifest
-    if ($LASTEXITCODE -ne 0) {
-      throw "Build failed for $Label"
-    }
+function Stop-All {
+  if ($script:stopping) {
+    return
   }
-}
-
-if ($ObsPassword) {
-  $env:OBS_WS_PASSWORD = $ObsPassword
-}
-
-$null = Register-EngineEvent -SourceIdentifier ConsoleCancelEvent -Action {
-  param($sender, $eventArgs)
-  $eventArgs.Cancel = $true
+  $script:stopping = $true
   Write-Host "`n[launcher] Stopping timestone..."
   if ($script:obsAuto) {
     try {
@@ -65,8 +49,27 @@ $null = Register-EngineEvent -SourceIdentifier ConsoleCancelEvent -Action {
       }
     }
   }
-  Exit 0
 }
+
+function Ensure-Binary {
+  param(
+    [string]$Manifest,
+    [string]$ExePath,
+    [string]$Label
+  )
+  if (-not (Test-Path $ExePath)) {
+    Write-Host "[launcher] Building $Label..."
+    & cargo build --manifest-path $Manifest
+    if ($LASTEXITCODE -ne 0) {
+      throw "Build failed for $Label"
+    }
+  }
+}
+
+if ($ObsPassword) {
+  $env:OBS_WS_PASSWORD = $ObsPassword
+}
+
 
 if (-not $MediaMtxExe) {
   $MediaMtxExe = Join-Path $repoRoot "tools\mediamtx\mediamtx.exe"
@@ -115,4 +118,8 @@ $script:procs += Start-Process -FilePath $script:tapperExe -ArgumentList @(
 ) -WorkingDirectory $repoRoot -NoNewWindow -PassThru
 
 Write-Host "[launcher] All components started. Press Ctrl+C to stop."
-while ($true) { Start-Sleep -Seconds 1 }
+try {
+  while ($true) { Start-Sleep -Seconds 1 }
+} finally {
+  Stop-All
+}
