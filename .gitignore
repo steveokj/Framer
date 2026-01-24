@@ -105,6 +105,7 @@ Thumbs.db
 
 # Rust build artifacts
 tools/timestone_recorder/target/
+tools/timestone_obs_ws/target/
 
 # Local recorder config
 data/timestone/config.json
