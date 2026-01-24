@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::net::UdpSocket;
+use std::net::TcpStream;
+use std::io::{Read, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const APP_DIR: &str = "data\\timestone";
@@ -21,6 +23,8 @@ const DEFAULT_CONTROL_HOST: &str = "127.0.0.1";
 const DEFAULT_CONTROL_PORT: u16 = 40777;
 const STREAM_STATE_FILE: &str = "stream.state";
 const STARTUP_GRACE_MS: i64 = 5000;
+const DEFAULT_API_HOST: &str = "127.0.0.1";
+const DEFAULT_API_PORT: u16 = 9997;
 
 #[derive(Clone)]
 struct FrameMeta {
@@ -48,6 +52,8 @@ struct Args {
     verbose: bool,
     control_host: String,
     control_port: u16,
+    api_host: String,
+    api_port: u16,
 }
 
 #[derive(Default)]
@@ -100,6 +106,7 @@ fn main() -> Result<()> {
     let mut active = read_stream_state(&stream_state_path).unwrap_or(false);
     let mut retry_delay_ms: i64 = 2000;
     let mut next_retry_at_ms: i64 = 0;
+    let api_addr = format!("{}:{}", args.api_host, args.api_port);
     log_line(args.verbose, "Frame tapper running.");
     if active {
         log_line(args.verbose, "State: active (from stream.state)");
@@ -129,8 +136,14 @@ fn main() -> Result<()> {
         if active && ffmpeg.is_none() {
             let now = now_wall_ms();
             if now >= next_retry_at_ms {
-                ffmpeg = Some(spawn_ffmpeg(&args, &frames_dir)?);
-                log_line(args.verbose, "ffmpeg started.");
+                if is_stream_ready(&api_addr, &args.stream_url) {
+                    ffmpeg = Some(spawn_ffmpeg(&args, &frames_dir)?);
+                    log_line(args.verbose, "ffmpeg started.");
+                } else {
+                    retry_delay_ms = (retry_delay_ms * 2).min(8000);
+                    next_retry_at_ms = now + retry_delay_ms;
+                    log_line(args.verbose, "Stream not ready yet. Waiting...");
+                }
             }
         }
         if !active {
@@ -190,6 +203,8 @@ fn parse_args() -> Result<Args> {
         verbose: false,
         control_host: DEFAULT_CONTROL_HOST.to_string(),
         control_port: DEFAULT_CONTROL_PORT,
+        api_host: DEFAULT_API_HOST.to_string(),
+        api_port: DEFAULT_API_PORT,
     };
     let mut iter = env::args().skip(1).peekable();
     while let Some(arg) = iter.next() {
@@ -247,6 +262,18 @@ fn parse_args() -> Result<Args> {
                 if let Some(value) = iter.next() {
                     if let Ok(parsed) = value.parse::<u16>() {
                         args.control_port = parsed;
+                    }
+                }
+            }
+            "--api-host" => {
+                if let Some(value) = iter.next() {
+                    args.api_host = value;
+                }
+            }
+            "--api-port" => {
+                if let Some(value) = iter.next() {
+                    if let Ok(parsed) = value.parse::<u16>() {
+                        args.api_port = parsed;
                     }
                 }
             }
@@ -344,6 +371,49 @@ fn read_stream_state(path: &Path) -> Option<bool> {
         return Some(false);
     }
     None
+}
+
+fn is_stream_ready(api_addr: &str, stream_url: &str) -> bool {
+    if let Some(path_name) = extract_path_name(stream_url) {
+        return fetch_stream_ready(api_addr, &path_name).unwrap_or(false);
+    }
+    false
+}
+
+fn extract_path_name(stream_url: &str) -> Option<String> {
+    let trimmed = stream_url.trim();
+    let parts: Vec<&str> = trimmed.split('/').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let path_parts = &parts[3..];
+    Some(path_parts.join("/"))
+}
+
+fn fetch_stream_ready(api_addr: &str, path_name: &str) -> Result<bool> {
+    let mut stream = TcpStream::connect(api_addr)
+        .with_context(|| format!("Failed to connect to MediaMTX API at {api_addr}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok();
+    let request_path = format!("/v3/paths/get/{path_name}");
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        request_path, api_addr
+    );
+    stream.write_all(request.as_bytes())?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let parts: Vec<&str> = response.split("\r\n\r\n").collect();
+    if parts.len() < 2 {
+        return Ok(false);
+    }
+    let body = parts[1];
+    let parsed: serde_json::Value = serde_json::from_str(body)?;
+    Ok(parsed.get("ready").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
 fn poll_events(
