@@ -1402,6 +1402,7 @@ export default function LiveEventsOnePage() {
           .live-events-one-sidebar {
             scrollbar-width: thin;
             scrollbar-color: rgba(148, 163, 184, 0.5) transparent;
+            scrollbar-gutter: stable;
           }
           .live-events-one-sidebar::-webkit-scrollbar {
             width: 8px;
@@ -1938,7 +1939,7 @@ export default function LiveEventsOnePage() {
                 justifySelf: "end",
                 overflowY: "auto",
                 overflowX: "hidden",
-                paddingRight: 0,
+                paddingRight: 8,
                 height: "100%",
                 minHeight: 0,
                 minWidth: 0,
