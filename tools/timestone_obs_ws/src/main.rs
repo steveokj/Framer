@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
-use std::net::TcpStream;
+use std::net::{TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tungstenite::{connect, Message, WebSocket};
@@ -20,6 +20,8 @@ const DB_NAME: &str = "timestone_events.sqlite3";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 4455;
 const DEFAULT_EVENT_MASK: i64 = 64; // Outputs
+const DEFAULT_CONTROL_HOST: &str = "127.0.0.1";
+const DEFAULT_CONTROL_PORT: u16 = 40777;
 
 #[derive(Default)]
 struct Args {
@@ -30,6 +32,8 @@ struct Args {
     session_id: Option<String>,
     lock_path: Option<PathBuf>,
     event_mask: i64,
+    control_host: String,
+    control_port: u16,
     verbose: bool,
 }
 
@@ -38,6 +42,27 @@ struct LockInfo {
     session_id: Option<String>,
     start_wall_ms: Option<i64>,
     start_wall_iso: Option<String>,
+}
+
+struct ControlSender {
+    socket: UdpSocket,
+    addr: String,
+}
+
+impl ControlSender {
+    fn new(host: &str, port: u16) -> Result<Self> {
+        let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket")?;
+        let addr = format!("{host}:{port}");
+        Ok(Self { socket, addr })
+    }
+
+    fn send(&self, message: &str, verbose: bool) -> Result<()> {
+        let _ = self.socket.send_to(message.as_bytes(), &self.addr);
+        if verbose {
+            log_line(verbose, &format!("Sent control '{message}' to {}", self.addr));
+        }
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
@@ -62,6 +87,8 @@ fn main() -> Result<()> {
         lock_info.start_wall_ms,
         lock_info.start_wall_iso,
     )?;
+
+    let control = ControlSender::new(&args.control_host, args.control_port)?;
 
     log_line(args.verbose, &format!("Connecting to OBS WS {}:{}...", args.host, args.port));
     let ws_url = Url::parse(&format!("ws://{}:{}", args.host, args.port))?;
@@ -88,22 +115,37 @@ fn main() -> Result<()> {
     }
 
     log_line(args.verbose, "Connected. Listening for recording events...");
+    send_request(
+        &mut socket,
+        "GetRecordStatus",
+        json!({}),
+        &mut request_counter,
+        args.verbose,
+    )?;
 
     loop {
         if let Some(message) = read_json_message(&mut socket, args.verbose)? {
             let op = message.get("op").and_then(|v| v.as_i64()).unwrap_or(-1);
-            if op != 5 {
-                continue;
-            }
-            if let Some(data) = message.get("d") {
-                handle_event(
-                    &conn,
-                    &session_id,
-                    data,
-                    &mut socket,
-                    &mut request_counter,
-                    args.verbose,
-                )?;
+            match op {
+                5 => {
+                    if let Some(data) = message.get("d") {
+                        handle_event(
+                            &conn,
+                            &session_id,
+                            data,
+                            &mut socket,
+                            &mut request_counter,
+                            &control,
+                            args.verbose,
+                        )?;
+                    }
+                }
+                7 => {
+                    if let Some(data) = message.get("d") {
+                        handle_response(data, &control, args.verbose)?;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -118,6 +160,8 @@ fn parse_args() -> Result<Args> {
         session_id: None,
         lock_path: None,
         event_mask: DEFAULT_EVENT_MASK,
+        control_host: DEFAULT_CONTROL_HOST.to_string(),
+        control_port: DEFAULT_CONTROL_PORT,
         verbose: false,
     };
     let mut iter = env::args().skip(1).peekable();
@@ -151,6 +195,18 @@ fn parse_args() -> Result<Args> {
                 if let Some(value) = iter.next() {
                     if let Ok(parsed) = value.parse::<i64>() {
                         args.event_mask = parsed;
+                    }
+                }
+            }
+            "--control-host" => {
+                if let Some(value) = iter.next() {
+                    args.control_host = value;
+                }
+            }
+            "--control-port" => {
+                if let Some(value) = iter.next() {
+                    if let Ok(parsed) = value.parse::<u16>() {
+                        args.control_port = parsed;
                     }
                 }
             }
@@ -324,6 +380,7 @@ fn handle_event(
     data: &Value,
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     request_counter: &mut u64,
+    control: &ControlSender,
     verbose: bool,
 ) -> Result<()> {
     let event_type = data.get("eventType").and_then(|v| v.as_str()).unwrap_or("");
@@ -350,11 +407,13 @@ fn handle_event(
                 "OBS_WEBSOCKET_OUTPUT_STARTED" | "OBS_WEBSOCKET_OUTPUT_RESUMED"
             ) {
                 send_request(socket, "StartStream", json!({}), request_counter, verbose)?;
+                let _ = control.send("recording:start", verbose);
             } else if matches!(
                 output_state,
                 "OBS_WEBSOCKET_OUTPUT_PAUSED" | "OBS_WEBSOCKET_OUTPUT_STOPPED"
             ) {
                 send_request(socket, "StopStream", json!({}), request_counter, verbose)?;
+                let _ = control.send("recording:stop", verbose);
             }
         }
         "RecordFileChanged" => {
@@ -389,6 +448,28 @@ fn send_request(
         log_line(verbose, &format!("[obs] -> {payload}"));
     }
     socket.write_message(Message::Text(payload.to_string()))?;
+    Ok(())
+}
+
+fn handle_response(data: &Value, control: &ControlSender, verbose: bool) -> Result<()> {
+    let request_type = data.get("requestType").and_then(|v| v.as_str()).unwrap_or("");
+    if request_type != "GetRecordStatus" {
+        return Ok(());
+    }
+    let response = data.get("responseData").cloned().unwrap_or(json!({}));
+    let output_active = response
+        .get("outputActive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let output_paused = response
+        .get("outputPaused")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if output_active && !output_paused {
+        let _ = control.send("recording:start", verbose);
+    } else {
+        let _ = control.send("recording:stop", verbose);
+    }
     Ok(())
 }
 

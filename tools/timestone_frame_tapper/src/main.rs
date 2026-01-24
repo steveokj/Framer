@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::net::UdpSocket;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const APP_DIR: &str = "data\\timestone";
@@ -16,6 +17,8 @@ const DEFAULT_BEFORE_MS: i64 = 500;
 const DEFAULT_AFTER_MS: i64 = 1500;
 const DEFAULT_BUFFER_SEC: i64 = 20;
 const DEFAULT_SCALE_WIDTH: u32 = 1280;
+const DEFAULT_CONTROL_HOST: &str = "127.0.0.1";
+const DEFAULT_CONTROL_PORT: u16 = 40777;
 
 #[derive(Clone)]
 struct FrameMeta {
@@ -41,6 +44,8 @@ struct Args {
     session_id: Option<String>,
     frames_dir: Option<PathBuf>,
     verbose: bool,
+    control_host: String,
+    control_port: u16,
 }
 
 #[derive(Default)]
@@ -73,6 +78,11 @@ fn main() -> Result<()> {
     conn.busy_timeout(Duration::from_millis(2000)).ok();
     init_db(&conn)?;
 
+    let control_addr = format!("{}:{}", args.control_host, args.control_port);
+    let control_socket = UdpSocket::bind(&control_addr)
+        .with_context(|| format!("Failed to bind control socket on {control_addr}"))?;
+    control_socket.set_nonblocking(true)?;
+
     let mut processed = load_processed_events(&conn)?;
     let mut pending: Vec<PendingEvent> = Vec::new();
     let mut frames: VecDeque<FrameMeta> = VecDeque::new();
@@ -80,20 +90,36 @@ fn main() -> Result<()> {
     let mut last_event_id = latest_event_id(&conn, &session_id)?;
 
     let mut ffmpeg: Option<Child> = None;
+    let mut active = false;
     log_line(args.verbose, "Frame tapper running.");
 
     loop {
-        let should_run = is_recording_active(&conn, &session_id)?;
-        if should_run && ffmpeg.is_none() {
+        if let Some(next_active) = poll_control(&control_socket)? {
+            if next_active != active {
+                active = next_active;
+                if active {
+                    last_event_id = latest_event_id(&conn, &session_id)?;
+                    pending.clear();
+                    log_line(args.verbose, "Recording active. Starting capture.");
+                } else {
+                    pending.clear();
+                    log_line(args.verbose, "Recording inactive. Pausing capture.");
+                }
+            }
+        }
+
+        if active && ffmpeg.is_none() {
             ffmpeg = Some(spawn_ffmpeg(&args, &frames_dir)?);
             log_line(args.verbose, "ffmpeg started.");
         }
-        if !should_run {
+        if !active {
             if let Some(mut child) = ffmpeg.take() {
                 let _ = child.kill();
                 let _ = child.wait();
                 log_line(args.verbose, "ffmpeg stopped (recording inactive).");
             }
+            std::thread::sleep(Duration::from_millis(250));
+            continue;
         }
 
         refresh_frames(&frames_dir, &mut frames, &mut seen_files, args.buffer_sec)?;
@@ -135,6 +161,8 @@ fn parse_args() -> Result<Args> {
         session_id: None,
         frames_dir: None,
         verbose: false,
+        control_host: DEFAULT_CONTROL_HOST.to_string(),
+        control_port: DEFAULT_CONTROL_PORT,
     };
     let mut iter = env::args().skip(1).peekable();
     while let Some(arg) = iter.next() {
@@ -182,6 +210,18 @@ fn parse_args() -> Result<Args> {
             }
             "--verbose" => {
                 args.verbose = true;
+            }
+            "--control-host" => {
+                if let Some(value) = iter.next() {
+                    args.control_host = value;
+                }
+            }
+            "--control-port" => {
+                if let Some(value) = iter.next() {
+                    if let Ok(parsed) = value.parse::<u16>() {
+                        args.control_port = parsed;
+                    }
+                }
             }
             _ => {}
         }
@@ -249,20 +289,22 @@ fn latest_event_id(conn: &Connection, session_id: &str) -> Result<i64> {
     Ok(id)
 }
 
-fn is_recording_active(conn: &Connection, session_id: &str) -> Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT event_type FROM events
-         WHERE session_id = ?
-           AND event_type IN ('obs_record_start','obs_record_resume','obs_record_pause','obs_record_stop')
-         ORDER BY ts_wall_ms DESC
-         LIMIT 1",
-    )?;
-    let event_type: Option<String> =
-        stmt.query_row(params![session_id], |row| row.get(0)).optional()?;
-    Ok(matches!(
-        event_type.as_deref(),
-        Some("obs_record_start") | Some("obs_record_resume")
-    ))
+fn poll_control(socket: &UdpSocket) -> Result<Option<bool>> {
+    let mut buf = [0u8; 64];
+    match socket.recv_from(&mut buf) {
+        Ok((len, _)) => {
+            let msg = String::from_utf8_lossy(&buf[..len]).to_string();
+            if msg.starts_with("recording:start") || msg.starts_with("recording:resume") {
+                return Ok(Some(true));
+            }
+            if msg.starts_with("recording:stop") || msg.starts_with("recording:pause") {
+                return Ok(Some(false));
+            }
+            Ok(None)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn poll_events(
