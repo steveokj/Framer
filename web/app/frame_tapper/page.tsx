@@ -421,7 +421,7 @@ export default function LiveEventsOnePage() {
   const [obsPickerWarning, setObsPickerWarning] = useState<string | null>(null);
   const [obsTotalCount, setObsTotalCount] = useState(0);
   const [obsFilteredCount, setObsFilteredCount] = useState(0);
-  const [filterMode, setFilterMode] = useState<"all" | "session" | "day" | "range" | "week" | "month">("week");
+  const [filterMode, setFilterMode] = useState<"all" | "session" | "day" | "range" | "week" | "month">("session");
   const [filterDay, setFilterDay] = useState(() => new Date().toISOString().slice(0, 10));
   const [filterRangeStart, setFilterRangeStart] = useState(() => new Date().toISOString().slice(0, 10));
   const [filterRangeEnd, setFilterRangeEnd] = useState(() => new Date().toISOString().slice(0, 10));
@@ -596,8 +596,17 @@ export default function LiveEventsOnePage() {
       const data = await res.json();
       const list = Array.isArray(data.sessions) ? data.sessions : [];
       setSessions(list);
-      if (!sessionId && list.length > 0 && filterMode === "session") {
-        setSessionId(list[0].session_id);
+      if (filterMode === "session" && list.length > 0) {
+        const newest = list.reduce((latest, session) => {
+          if (!latest) {
+            return session;
+          }
+          return session.start_wall_ms > latest.start_wall_ms ? session : latest;
+        }, list[0]);
+        const current = list.find((session) => session.session_id === sessionId) || null;
+        if (!current || (newest && current && newest.start_wall_ms > current.start_wall_ms)) {
+          setSessionId(newest.session_id);
+        }
       }
       setStatus("Live");
     } catch (err) {
