@@ -622,14 +622,20 @@ export default function LiveEventsOnePage() {
       const list = Array.isArray(data.sessions) ? data.sessions : [];
       setSessions(list);
       if (filterMode === "session" && list.length > 0) {
-        const newest = list.reduce((latest, session) => {
+        const withObsPath = list.filter((session) => session.obs_video_path);
+        const candidates = withObsPath.length > 0 ? withObsPath : list;
+        const newest = candidates.reduce((latest, session) => {
           if (!latest) {
             return session;
           }
           return session.start_wall_ms > latest.start_wall_ms ? session : latest;
-        }, list[0]);
+        }, candidates[0]);
         const current = list.find((session) => session.session_id === sessionId) || null;
-        if (!current || (newest && current && newest.start_wall_ms > current.start_wall_ms)) {
+        const shouldSwitch =
+          !current ||
+          (!current.obs_video_path && newest.obs_video_path) ||
+          (current.obs_video_path === newest.obs_video_path && newest.start_wall_ms > current.start_wall_ms);
+        if (shouldSwitch) {
           setSessionId(newest.session_id);
         }
       }
