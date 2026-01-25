@@ -48,6 +48,15 @@ type VideoInfo = {
   offsetMs: number;
 };
 
+type SegmentMarker = {
+  kind: "segment";
+  id: string;
+  ts_wall_ms: number;
+  label: string;
+};
+
+type ListRow = { kind: "event"; event: EventView } | SegmentMarker;
+
 const API_BASE = (
   process.env.NEXT_PUBLIC_API_BASE && process.env.NEXT_PUBLIC_API_BASE.trim().length > 0
     ? process.env.NEXT_PUBLIC_API_BASE
@@ -107,16 +116,48 @@ function safeJsonParse(input: string | null): any {
   }
 }
 
+function eventSearchBlob(event: EventView): string {
+  const payload = event.payloadData || {};
+  const mouse = event.mouseData || {};
+  return [
+    event.event_type,
+    event.window_title || "",
+    event.process_name || "",
+    event.window_class || "",
+    payload?.text || "",
+    payload?.final_text || "",
+    payload?.note || "",
+    payload?.key || "",
+    payload?.vk || "",
+    mouse?.x != null && mouse?.y != null ? `click ${mouse.x},${mouse.y}` : "",
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
 export default function MkvTapperPage() {
   const [sessions, setSessions] = useState<TimestoneSession[]>([]);
   const [sessionId, setSessionId] = useState("");
   const [segments, setSegments] = useState<RecordSegment[]>([]);
   const [events, setEvents] = useState<EventView[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<EventView | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [eventVisibility, setEventVisibility] = useState<Record<string, boolean>>({
+    active_window_changed: true,
+    key_down: true,
+    key_shortcut: true,
+    text_input: true,
+    mouse_click: true,
+    clipboard_text: true,
+    clipboard_image: true,
+    clipboard_files: true,
+    marker: true,
+  });
   const [eventFrames, setEventFrames] = useState<EventFrame[]>([]);
   const [frameIndex, setFrameIndex] = useState(0);
   const [frameLoading, setFrameLoading] = useState(false);
   const [frameError, setFrameError] = useState<string | null>(null);
+  const [eventFrameIds, setEventFrameIds] = useState<Set<number>>(new Set());
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [pendingSeekMs, setPendingSeekMs] = useState<number | null>(null);
   const [status, setStatus] = useState("Idle");
@@ -142,6 +183,68 @@ export default function MkvTapperPage() {
     () => sessions.find((session) => session.session_id === sessionId) || null,
     [sessions, sessionId]
   );
+
+  const eventTypes = useMemo(() => {
+    const types = new Set<string>();
+    events.forEach((event) => types.add(event.event_type));
+    return Array.from(types).sort();
+  }, [events]);
+
+  useEffect(() => {
+    setEventVisibility((prev) => {
+      const next = { ...prev };
+      for (const type of eventTypes) {
+        if (!(type in next)) {
+          next[type] = true;
+        }
+      }
+      return next;
+    });
+  }, [eventTypes]);
+
+  const filteredEvents = useMemo(() => {
+    let list = events;
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      list = list.filter((event) => eventSearchBlob(event).includes(q));
+    }
+    list = list.filter((event) => eventVisibility[event.event_type] !== false);
+    return list;
+  }, [events, eventVisibility, searchQuery]);
+
+  const sessionSegments = useMemo(() => {
+    if (!sessionId) {
+      return [];
+    }
+    return segments
+      .filter((segment) => segment.session_id === sessionId && segment.end_wall_ms != null)
+      .sort((a, b) => a.start_wall_ms - b.start_wall_ms);
+  }, [segments, sessionId]);
+
+  const segmentMarkers = useMemo(() => {
+    if (!sessionSegments.length) {
+      return [];
+    }
+    const lastIndex = sessionSegments.length - 1;
+    return sessionSegments.map((segment, index) => ({
+      kind: "segment" as const,
+      id: `segment-${segment.id}`,
+      ts_wall_ms: segment.end_wall_ms || segment.start_wall_ms,
+      label: index === lastIndex ? "Segment Stop" : "Segment Pause",
+    }));
+  }, [sessionSegments]);
+
+  const listRows = useMemo(() => {
+    const rows: ListRow[] = [
+      ...filteredEvents.map((event) => ({ kind: "event" as const, event })),
+      ...segmentMarkers,
+    ];
+    return rows.sort((a, b) => {
+      const aTs = a.kind === "event" ? a.event.ts_wall_ms : a.ts_wall_ms;
+      const bTs = b.kind === "event" ? b.event.ts_wall_ms : b.ts_wall_ms;
+      return bTs - aTs;
+    });
+  }, [filteredEvents, segmentMarkers]);
 
   const segmentOffsets = useMemo(() => {
     const offsets = new Map<number, number>();
@@ -344,6 +447,30 @@ export default function MkvTapperPage() {
     }
   }, [sessionId]);
 
+  const fetchEventFrameIndex = useCallback(async () => {
+    if (!sessionId) {
+      setEventFrameIds(new Set());
+      return;
+    }
+    try {
+      const res = await fetch("/api/timestone_event_frames_index", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to load frame index (${res.status})`);
+      }
+      const data = await res.json();
+      const ids = Array.isArray(data?.event_ids) ? data.event_ids : [];
+      setEventFrameIds(new Set(ids.map((id: any) => Number(id))));
+    } catch (err) {
+      setEventFrameIds(new Set());
+      setError(err instanceof Error ? err.message : "Failed to load frame index");
+    }
+  }, [sessionId]);
+
   useEffect(() => {
     refreshSessions();
   }, [refreshSessions]);
@@ -351,7 +478,8 @@ export default function MkvTapperPage() {
   useEffect(() => {
     fetchEvents();
     fetchSegments();
-  }, [fetchEvents, fetchSegments]);
+    fetchEventFrameIndex();
+  }, [fetchEvents, fetchSegments, fetchEventFrameIndex]);
 
   useEffect(() => {
     if (pendingSeekMs == null) {
@@ -390,7 +518,7 @@ export default function MkvTapperPage() {
         fontFamily: '"Space Grotesk", "Segoe UI", system-ui',
       }}
     >
-      <div style={{ maxWidth: 1400, margin: "0 auto", display: "grid", gap: 20 }}>
+      <div style={{ maxWidth: 1600, margin: "0 auto", display: "grid", gap: 20 }}>
         <header style={{ display: "grid", gap: 6 }}>
           <h1 style={{ fontSize: 30, margin: 0 }}>MKV Tapper</h1>
           <p style={{ margin: 0, color: "#94a3b8" }}>
@@ -451,8 +579,8 @@ export default function MkvTapperPage() {
         <section
           style={{
             display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) 360px",
-            gap: 20,
+            gridTemplateColumns: "minmax(0, 1fr) minmax(320px, 420px)",
+            gap: 24,
             alignItems: "start",
           }}
         >
@@ -468,7 +596,7 @@ export default function MkvTapperPage() {
               <div style={{ marginBottom: 8, color: "#94a3b8" }}>
                 {activeSession?.obs_video_path ? `Video: ${activeSession.obs_video_path}` : "No OBS video path"}
               </div>
-              <div style={{ position: "relative", width: "100%", height: "min(52vh, 460px)" }}>
+              <div style={{ position: "relative", width: "100%", height: "min(60vh, 520px)" }}>
                 {videoSrc ? (
                   <video
                     ref={videoRef}
@@ -572,36 +700,108 @@ export default function MkvTapperPage() {
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
               <strong>Events</strong>
-              <span style={{ color: "#94a3b8" }}>{events.length}</span>
+              <span style={{ color: "#94a3b8" }}>{filteredEvents.length}</span>
+            </div>
+            <div style={{ display: "grid", gap: 10, marginBottom: 12 }}>
+              <input
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search events"
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 10,
+                  border: "1px solid #1e293b",
+                  background: "#0f172a",
+                  color: "#e2e8f0",
+                }}
+              />
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {eventTypes.map((type) => {
+                  const active = eventVisibility[type] !== false;
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      onClick={() =>
+                        setEventVisibility((prev) => ({ ...prev, [type]: !(prev[type] !== false) }))
+                      }
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 999,
+                        border: "1px solid",
+                        borderColor: active ? "#38bdf8" : "#1e293b",
+                        background: active ? "rgba(56, 189, 248, 0.18)" : "transparent",
+                        color: active ? "#e0f2fe" : "#94a3b8",
+                        fontSize: 12,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {type.replace(/_/g, " ")}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <div style={{ display: "grid", gap: 10 }}>
-              {events.map((event) => (
-                <button
-                  key={event.id}
-                  type="button"
-                  onClick={() => selectEvent(event)}
-                  style={{
-                    textAlign: "left",
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: selectedEvent?.id === event.id ? "1px solid #38bdf8" : "1px solid #1e293b",
-                    background: "rgba(15, 23, 42, 0.7)",
-                    color: "#e2e8f0",
-                    cursor: "pointer",
-                    display: "grid",
-                    gap: 6,
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                    <strong style={{ textTransform: "capitalize" }}>{event.event_type.replace(/_/g, " ")}</strong>
-                    <span style={{ color: "#94a3b8" }}>{formatWallTime(event.ts_wall_ms)}</span>
-                  </div>
-                  <div style={{ color: "#cbd5f5" }}>
-                    {event.window_title || event.process_name || event.window_class || "Unknown window"}
-                  </div>
-                </button>
-              ))}
-              {!events.length && <div style={{ color: "#64748b" }}>No events loaded.</div>}
+              {listRows.map((row) => {
+                if (row.kind === "segment") {
+                  return (
+                    <div
+                      key={row.id}
+                      style={{
+                        padding: "10px 12px",
+                        borderRadius: 10,
+                        border: "1px dashed #334155",
+                        background: "rgba(15, 23, 42, 0.5)",
+                        color: "#e2e8f0",
+                        display: "grid",
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <strong>{row.label}</strong>
+                        <span style={{ color: "#94a3b8" }}>{formatWallTime(row.ts_wall_ms)}</span>
+                      </div>
+                      <div style={{ color: "#94a3b8" }}>Recording boundary</div>
+                    </div>
+                  );
+                }
+                const event = row.event;
+                return (
+                  <button
+                    key={event.id}
+                    type="button"
+                    onClick={() => selectEvent(event)}
+                    style={{
+                      textAlign: "left",
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      border:
+                        selectedEvent?.id === event.id
+                          ? "1px solid #38bdf8"
+                          : eventFrameIds.has(event.id)
+                            ? "1px solid rgba(34,197,94,0.6)"
+                            : "1px solid #1e293b",
+                      background: eventFrameIds.has(event.id)
+                        ? "rgba(34, 197, 94, 0.08)"
+                        : "rgba(15, 23, 42, 0.7)",
+                      color: "#e2e8f0",
+                      cursor: "pointer",
+                      display: "grid",
+                      gap: 6,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                      <strong style={{ textTransform: "capitalize" }}>{event.event_type.replace(/_/g, " ")}</strong>
+                      <span style={{ color: "#94a3b8" }}>{formatWallTime(event.ts_wall_ms)}</span>
+                    </div>
+                    <div style={{ color: "#cbd5f5" }}>
+                      {event.window_title || event.process_name || event.window_class || "Unknown window"}
+                    </div>
+                  </button>
+                );
+              })}
+              {!listRows.length && <div style={{ color: "#64748b" }}>No events loaded.</div>}
             </div>
           </aside>
         </section>
