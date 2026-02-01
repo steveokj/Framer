@@ -16,7 +16,6 @@ $script:obsExe = Join-Path $repoRoot "tools\timestone_obs_ws\target\debug\timest
 $script:fileTapperExe = Join-Path $repoRoot "tools\timestone_file_tapper\target\debug\timestone_file_tapper.exe"
 $script:stopping = $false
 $script:fileTapperProc = $null
-$script:fileTapperExit = $null
 
 function Send-ObsCommand {
   param(
@@ -130,29 +129,27 @@ $script:fileTapperProc.add_ErrorDataReceived({
 $script:fileTapperProc.Start() | Out-Null
 $script:fileTapperProc.BeginOutputReadLine()
 $script:fileTapperProc.BeginErrorReadLine()
-$script:fileTapperProc.add_Exited({
-  param($sender, $e)
-  $script:fileTapperExit = @{
-    Code = $sender.ExitCode
-    Time = (Get-Date)
-  }
-})
 
 Write-Host "[launcher] Controls: P = pause, R = resume, S = stop/exit."
 try {
   while (-not $script:stopping) {
-    if ($script:fileTapperProc.HasExited -and $script:fileTapperExit) {
-      Write-Host ("[launcher] File tapper exited with code {0} at {1}" -f $script:fileTapperExit.Code, $script:fileTapperExit.Time)
+    if ($script:fileTapperProc.HasExited) {
+      $code = $script:fileTapperProc.ExitCode
+      Write-Host ("[launcher] File tapper exited with code {0} at {1}" -f $code, (Get-Date))
       break
     }
-    if ([Console]::KeyAvailable) {
-      $key = [Console]::ReadKey($true)
-      switch ($key.Key) {
-        "P" { Write-Host "[launcher] Pause requested"; Send-ObsCommand "pause" }
-        "R" { Write-Host "[launcher] Resume requested"; Send-ObsCommand "resume" }
-        "S" { Write-Host "[launcher] Stop requested"; break }
+    try {
+      if ([Console]::KeyAvailable) {
+        $key = [Console]::ReadKey($true)
+        switch ($key.Key) {
+          "P" { Write-Host "[launcher] Pause requested"; Send-ObsCommand "pause" }
+          "R" { Write-Host "[launcher] Resume requested"; Send-ObsCommand "resume" }
+          "S" { Write-Host "[launcher] Stop requested"; break }
+        }
+      } else {
+        Start-Sleep -Milliseconds 200
       }
-    } else {
+    } catch {
       Start-Sleep -Milliseconds 200
     }
   }
