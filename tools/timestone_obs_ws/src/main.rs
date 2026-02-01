@@ -62,6 +62,8 @@ struct ControlSender {
 enum ObsCommand {
     Start,
     Stop,
+    Pause,
+    Resume,
 }
 
 impl ControlSender {
@@ -264,6 +266,8 @@ fn parse_args() -> Result<Args> {
                     args.command = match value.as_str() {
                         "start" => Some(ObsCommand::Start),
                         "stop" => Some(ObsCommand::Stop),
+                        "pause" => Some(ObsCommand::Pause),
+                        "resume" => Some(ObsCommand::Resume),
                         _ => None,
                     };
                 }
@@ -697,6 +701,14 @@ fn perform_command(
                 let _ = send_request(socket, "StopStream", json!({}), counter, verbose);
             }
             let _ = send_request(socket, "StopRecord", json!({}), counter, verbose);
+        }
+        ObsCommand::Pause => {
+            log_line(verbose, "Sending OBS pause command...");
+            let _ = send_request(socket, "PauseRecord", json!({}), counter, verbose);
+        }
+        ObsCommand::Resume => {
+            log_line(verbose, "Sending OBS resume command...");
+            let _ = send_request(socket, "ResumeRecord", json!({}), counter, verbose);
         }
     }
     Ok(())

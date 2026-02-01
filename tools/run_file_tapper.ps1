@@ -15,6 +15,18 @@ $script:recorderExe = Join-Path $repoRoot "tools\timestone_recorder\target\debug
 $script:obsExe = Join-Path $repoRoot "tools\timestone_obs_ws\target\debug\timestone_obs_ws.exe"
 $script:fileTapperExe = Join-Path $repoRoot "tools\timestone_file_tapper\target\debug\timestone_file_tapper.exe"
 $script:stopping = $false
+$script:fileTapperProc = $null
+
+function Send-ObsCommand {
+  param(
+    [string]$Command
+  )
+  try {
+    & $script:obsExe --host $script:obsHost --port $script:obsPort --command $Command | Out-Null
+  } catch {
+    Write-Host "[launcher] Failed to send OBS command: $Command"
+  }
+}
 
 function Stop-All {
   if ($script:stopping) {
@@ -25,7 +37,7 @@ function Stop-All {
   if ($script:obsAuto) {
     try {
       Write-Host "[launcher] Stopping OBS recording and stream..."
-      & $script:obsExe --host $script:obsHost --port $script:obsPort --command stop | Out-Null
+      Send-ObsCommand "stop"
     } catch {
       Write-Host "[launcher] Failed to stop OBS via websocket."
     }
@@ -88,17 +100,53 @@ Start-Sleep -Seconds 1
 if ($script:obsAuto) {
   try {
     Write-Host "[launcher] Starting OBS recording and stream..."
-    & $script:obsExe --host $script:obsHost --port $script:obsPort --command start | Out-Null
+    Send-ObsCommand "start"
   } catch {
     Write-Host "[launcher] Failed to start OBS via websocket."
   }
 }
 
 Write-Host "[launcher] Starting file tapper (logs below)..."
-Push-Location $repoRoot
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $script:fileTapperExe
+$psi.Arguments = "--verbose --quiet-ffmpeg"
+$psi.WorkingDirectory = $repoRoot
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$script:fileTapperProc = New-Object System.Diagnostics.Process
+$script:fileTapperProc.StartInfo = $psi
+$script:fileTapperProc.EnableRaisingEvents = $true
+$script:fileTapperProc.add_OutputDataReceived({
+  param($sender, $e)
+  if ($e.Data) { Write-Host $e.Data }
+})
+$script:fileTapperProc.add_ErrorDataReceived({
+  param($sender, $e)
+  if ($e.Data) { Write-Host $e.Data }
+})
+$script:fileTapperProc.Start() | Out-Null
+$script:fileTapperProc.BeginOutputReadLine()
+$script:fileTapperProc.BeginErrorReadLine()
+
+Write-Host "[launcher] Controls: P = pause, R = resume, S = stop/exit."
 try {
-  & $script:fileTapperExe --verbose --quiet-ffmpeg
+  while (-not $script:stopping) {
+    if ($script:fileTapperProc.HasExited) {
+      break
+    }
+    if ([Console]::KeyAvailable) {
+      $key = [Console]::ReadKey($true)
+      switch ($key.Key) {
+        "P" { Write-Host "[launcher] Pause requested"; Send-ObsCommand "pause" }
+        "R" { Write-Host "[launcher] Resume requested"; Send-ObsCommand "resume" }
+        "S" { Write-Host "[launcher] Stop requested"; break }
+      }
+    } else {
+      Start-Sleep -Milliseconds 200
+    }
+  }
 } finally {
-  Pop-Location
   Stop-All
 }
