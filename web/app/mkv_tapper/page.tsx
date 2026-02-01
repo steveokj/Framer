@@ -306,6 +306,7 @@ export default function MkvTapperPage() {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [expandAll, setExpandAll] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [manualOffsetSec, setManualOffsetSec] = useState(5);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const settingsRef = useRef<HTMLDivElement | null>(null);
 
@@ -457,10 +458,11 @@ export default function MkvTapperPage() {
         return null;
       }
       const offsetBefore = segmentOffsets.get(match.id) || 0;
-      const offsetMs = offsetBefore + Math.max(0, event.ts_wall_ms - match.start_wall_ms);
+      const offsetMs =
+        offsetBefore + Math.max(0, event.ts_wall_ms - match.start_wall_ms) + manualOffsetSec * 1000;
       return { path: match.obs_path, offsetMs };
     },
-    [segmentOffsets, segments],
+    [manualOffsetSec, segmentOffsets, segments],
   );
 
   // Toggles expansion state for event groups
@@ -1151,6 +1153,30 @@ export default function MkvTapperPage() {
                       >
                         Frames only
                       </button>
+
+                      <label style={{ display: "grid", gap: 6, fontSize: 12, color: "#cbd5f5" }}>
+                        <span>Manual offset (sec)</span>
+                        <input
+                          type="number"
+                          step="0.5"
+                          value={manualOffsetSec}
+                          onChange={(event) => {
+                            const next = Number(event.target.value);
+                            if (Number.isNaN(next)) {
+                              return;
+                            }
+                            setManualOffsetSec(next);
+                          }}
+                          style={{
+                            padding: "6px 8px",
+                            borderRadius: 8,
+                            border: "1px solid #1e293b",
+                            background: "#0b1120",
+                            color: "#e2e8f0",
+                          }}
+                        />
+                        <span style={{ color: "#64748b" }}>Applies to video seek only.</span>
+                      </label>
 
                       {/* Divider */}
                       <div style={{ height: 1, background: "#1e293b" }} />
