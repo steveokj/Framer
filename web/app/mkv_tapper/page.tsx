@@ -306,7 +306,7 @@ export default function MkvTapperPage() {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [expandAll, setExpandAll] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [manualOffsetSec, setManualOffsetSec] = useState(5);
+  const [manualOffsetSec, setManualOffsetSec] = useState(0.2);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const settingsRef = useRef<HTMLDivElement | null>(null);
 
@@ -798,6 +798,26 @@ export default function MkvTapperPage() {
         fontFamily: '"Space Grotesk", "Segoe UI", system-ui',
       }}
     >
+      <style>{`
+        .mkv-tapper-sidebar {
+          scrollbar-width: thin;
+          scrollbar-color: rgba(148, 163, 184, 0.5) transparent;
+          scrollbar-gutter: stable;
+        }
+        .mkv-tapper-sidebar::-webkit-scrollbar {
+          width: 8px;
+        }
+        .mkv-tapper-sidebar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .mkv-tapper-sidebar::-webkit-scrollbar-thumb {
+          background: rgba(51, 65, 85, 0.7);
+          border-radius: 999px;
+        }
+        .mkv-tapper-sidebar::-webkit-scrollbar-thumb:hover {
+          background: rgba(100, 116, 139, 0.9);
+        }
+      `}</style>
       <div style={{ maxWidth: "100%", margin: "0 auto", display: "grid", gap: 20 }}>
         <header style={{ display: "grid", gap: 6 }}>
           <h1 style={{ fontSize: 30, margin: 0 }}>MKV Tapper</h1>
@@ -1017,6 +1037,7 @@ export default function MkvTapperPage() {
           </div>
 
           <aside
+            className="mkv-tapper-sidebar"
             style={{
               background: "#0b1120",
               borderRadius: 14,
