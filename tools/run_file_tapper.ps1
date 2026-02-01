@@ -97,7 +97,7 @@ if ($script:obsAuto) {
 Write-Host "[launcher] Starting file tapper (logs below)..."
 Push-Location $repoRoot
 try {
-  & $script:fileTapperExe --verbose
+  & $script:fileTapperExe --verbose --quiet-ffmpeg
 } finally {
   Pop-Location
   Stop-All

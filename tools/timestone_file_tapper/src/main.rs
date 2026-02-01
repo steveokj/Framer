@@ -29,6 +29,7 @@ struct Args {
     grace_ms: i64,
     transcribe_model: String,
     ocr_lang: String,
+    quiet_ffmpeg: bool,
     verbose: bool,
 }
 
@@ -124,7 +125,15 @@ fn main() -> Result<()> {
                     args.verbose,
                     &format!("Extracting frame for event {} @ {}ms", event.id, offset_ms),
                 );
-                if extract_frame(&obs_path, offset_ms, &frame_path, args.scale_width, args.jpeg_quality, args.verbose)? {
+                if extract_frame(
+                    &obs_path,
+                    offset_ms,
+                    &frame_path,
+                    args.scale_width,
+                    args.jpeg_quality,
+                    args.verbose,
+                    args.quiet_ffmpeg,
+                )? {
                     insert_event_frame(&conn, event.id, &frame_path, event.ts_wall_ms)?;
                     if !ocr_exists_for_frame(&conn, &frame_path)? {
                         log_line(args.verbose, &format!("Running OCR for event {}", event.id));
@@ -163,6 +172,7 @@ fn main() -> Result<()> {
                         duration_ms,
                         &audio_path,
                         args.verbose,
+                        args.quiet_ffmpeg,
                     ) {
                         Ok(true) => {
                             insert_segment_audio(&conn, segment.id, &audio_path, offset_before_ms, duration_ms)?;
@@ -224,6 +234,7 @@ fn parse_args() -> Result<Args> {
         grace_ms: DEFAULT_GRACE_MS,
         transcribe_model: DEFAULT_TRANSCRIBE_MODEL.to_string(),
         ocr_lang: DEFAULT_OCR_LANG.to_string(),
+        quiet_ffmpeg: false,
         verbose: false,
     };
     let mut iter = env::args().skip(1).peekable();
@@ -280,6 +291,9 @@ fn parse_args() -> Result<Args> {
                         args.ocr_lang = value;
                     }
                 }
+            }
+            "--quiet-ffmpeg" => {
+                args.quiet_ffmpeg = true;
             }
             "--verbose" => {
                 args.verbose = true;
@@ -450,14 +464,22 @@ fn extract_frame(
     scale_width: u32,
     quality: u8,
     verbose: bool,
+    quiet_ffmpeg: bool,
 ) -> Result<bool> {
     let offset_sec = (offset_ms.max(0) as f64) / 1000.0;
     let offset_arg = format!("{offset_sec:.3}");
     let vf = format!("scale={}: -1", scale_width).replace(": ", ":");
     let mut cmd = Command::new("ffmpeg");
+    let log_level = if quiet_ffmpeg {
+        "error"
+    } else if verbose {
+        "info"
+    } else {
+        "error"
+    };
     cmd.arg("-hide_banner")
         .arg("-loglevel")
-        .arg(if verbose { "info" } else { "error" })
+        .arg(log_level)
         .arg("-i")
         .arg(obs_path)
         .arg("-ss")
@@ -473,7 +495,11 @@ fn extract_frame(
         .arg(dest_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(if verbose { Stdio::inherit() } else { Stdio::null() });
+        .stderr(if verbose && !quiet_ffmpeg {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        });
     let status = cmd.status().context("Failed to run ffmpeg for frame")?;
     Ok(status.success())
 }
@@ -517,13 +543,21 @@ fn extract_audio_segment(
     duration_ms: i64,
     dest_path: &Path,
     verbose: bool,
+    quiet_ffmpeg: bool,
 ) -> Result<bool> {
     let start_sec = (start_offset_ms.max(0) as f64) / 1000.0;
     let duration_sec = (duration_ms.max(0) as f64) / 1000.0;
     let mut cmd = Command::new("ffmpeg");
+    let log_level = if quiet_ffmpeg {
+        "error"
+    } else if verbose {
+        "info"
+    } else {
+        "error"
+    };
     cmd.arg("-hide_banner")
         .arg("-loglevel")
-        .arg(if verbose { "info" } else { "error" })
+        .arg(log_level)
         .arg("-i")
         .arg(obs_path)
         .arg("-ss")
@@ -540,7 +574,11 @@ fn extract_audio_segment(
         .arg(dest_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(if verbose { Stdio::inherit() } else { Stdio::null() });
+        .stderr(if verbose && !quiet_ffmpeg {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        });
     let status = cmd.status().context("Failed to run ffmpeg for audio")?;
     Ok(status.success())
 }
