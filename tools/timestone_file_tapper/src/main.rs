@@ -14,6 +14,8 @@ const DEFAULT_POLL_MS: u64 = 1500;
 const DEFAULT_GRACE_MS: i64 = 2000;
 const DEFAULT_TRANSCRIBE_MODEL: &str = "medium";
 const DEFAULT_OCR_LANG: &str = "eng";
+const AUDIO_RETRY_COUNT: usize = 3;
+const AUDIO_RETRY_DELAY_MS: u64 = 800;
 
 #[derive(Default)]
 struct Args {
@@ -146,19 +148,45 @@ fn main() -> Result<()> {
                 }
             } else {
                 let audio_path = audio_dir.join(format!("segment_{}.wav", segment.id));
-                log_line(args.verbose, &format!("Extracting audio for segment {}", segment.id));
-                if extract_audio_segment(
-                    &obs_path,
-                    offset_before_ms,
-                    duration_ms,
-                    &audio_path,
-                    args.verbose,
-                )? {
-                    insert_segment_audio(&conn, segment.id, &audio_path, offset_before_ms, duration_ms)?;
-                    Some(audio_path)
-                } else {
-                    None
+                let mut extracted: Option<PathBuf> = None;
+                for attempt in 1..=AUDIO_RETRY_COUNT {
+                    log_line(
+                        args.verbose,
+                        &format!(
+                            "Extracting audio for segment {} (attempt {}/{})",
+                            segment.id, attempt, AUDIO_RETRY_COUNT
+                        ),
+                    );
+                    match extract_audio_segment(
+                        &obs_path,
+                        offset_before_ms,
+                        duration_ms,
+                        &audio_path,
+                        args.verbose,
+                    ) {
+                        Ok(true) => {
+                            insert_segment_audio(&conn, segment.id, &audio_path, offset_before_ms, duration_ms)?;
+                            extracted = Some(audio_path.clone());
+                            break;
+                        }
+                        Ok(false) => {
+                            log_error(&format!("Audio extract failed for segment {} (ffmpeg status)", segment.id));
+                        }
+                        Err(err) => {
+                            log_error(&format!("Audio extract error for segment {}: {}", segment.id, err));
+                        }
+                    }
+                    if attempt < AUDIO_RETRY_COUNT {
+                        std::thread::sleep(Duration::from_millis(AUDIO_RETRY_DELAY_MS));
+                    }
                 }
+                if extracted.is_none() {
+                    log_error(&format!(
+                        "Audio extraction failed after {} attempts for segment {}. Skipping transcription.",
+                        AUDIO_RETRY_COUNT, segment.id
+                    ));
+                }
+                extracted
             };
             if let Some(audio_path) = audio_path {
                 if !segment_transcriptions_exist(&conn, segment.id)? {
@@ -674,4 +702,8 @@ fn log_line(verbose: bool, message: &str) {
     if verbose {
         println!("[timestone_file_tapper] {message}");
     }
+}
+
+fn log_error(message: &str) {
+    eprintln!("[timestone_file_tapper] {message}");
 }
