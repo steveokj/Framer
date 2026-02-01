@@ -126,17 +126,21 @@ $script:fileTapperProc.add_ErrorDataReceived({
   param($sender, $e)
   if ($e.Data) { Write-Host $e.Data }
 })
-$script:fileTapperProc.Start() | Out-Null
+$started = $script:fileTapperProc.Start()
+if (-not $started) {
+  Write-Host "[launcher] Failed to start file tapper process."
+}
 $script:fileTapperProc.BeginOutputReadLine()
 $script:fileTapperProc.BeginErrorReadLine()
 
 Write-Host "[launcher] Controls: P = pause, R = resume, S = stop/exit."
+$script:fileTapperExitLogged = $false
 try {
   while (-not $script:stopping) {
-    if ($script:fileTapperProc.HasExited) {
+    if ($script:fileTapperProc.HasExited -and -not $script:fileTapperExitLogged) {
       $code = $script:fileTapperProc.ExitCode
       Write-Host ("[launcher] File tapper exited with code {0} at {1}" -f $code, (Get-Date))
-      break
+      $script:fileTapperExitLogged = $true
     }
     try {
       if ([Console]::KeyAvailable) {
@@ -144,12 +148,12 @@ try {
         switch ($key.Key) {
           "P" { Write-Host "[launcher] Pause requested"; Send-ObsCommand "pause" }
           "R" { Write-Host "[launcher] Resume requested"; Send-ObsCommand "resume" }
-          "S" { Write-Host "[launcher] Stop requested"; break }
-        }
-      } else {
-        Start-Sleep -Milliseconds 200
+        "S" { Write-Host "[launcher] Stop requested"; break }
       }
-    } catch {
+    } else {
+      Start-Sleep -Milliseconds 200
+    }
+  } catch {
       Start-Sleep -Milliseconds 200
     }
   }
