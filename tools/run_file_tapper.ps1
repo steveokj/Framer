@@ -14,6 +14,7 @@ $script:obsPort = $ObsPort
 $script:recorderExe = Join-Path $repoRoot "tools\timestone_recorder\target\debug\timestone_recorder.exe"
 $script:obsExe = Join-Path $repoRoot "tools\timestone_obs_ws\target\debug\timestone_obs_ws.exe"
 $script:fileTapperExe = Join-Path $repoRoot "tools\timestone_file_tapper\target\debug\timestone_file_tapper.exe"
+$script:dbPath = Join-Path $repoRoot "data\timestone\timestone_events.sqlite3"
 $script:stopping = $false
 $script:fileTapperProc = $null
 $script:fileTapperExited = $false
@@ -138,59 +139,59 @@ if ($script:obsAuto) {
   }
 }
 
-Write-Host "[launcher] Starting file tapper (logs below)..."
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = $script:fileTapperExe
-$psi.Arguments = "--verbose --quiet-ffmpeg"
-$psi.WorkingDirectory = $repoRoot
-$psi.RedirectStandardOutput = $true
-$psi.RedirectStandardError = $true
-$psi.UseShellExecute = $false
-$psi.CreateNoWindow = $true
-$script:fileTapperProc = New-Object System.Diagnostics.Process
-$script:fileTapperProc.StartInfo = $psi
-$script:fileTapperProc.EnableRaisingEvents = $true
-$script:fileTapperProc.add_OutputDataReceived({
-  param($sender, $e)
-  if ($e.Data) { Write-Host $e.Data }
-})
-$script:fileTapperProc.add_ErrorDataReceived({
-  param($sender, $e)
-  if ($e.Data) { Write-Host $e.Data }
-})
-$started = $script:fileTapperProc.Start()
-if (-not $started) {
-  Write-Host "[launcher] Failed to start file tapper process."
-}
-$script:fileTapperProc.BeginOutputReadLine()
-$script:fileTapperProc.BeginErrorReadLine()
-$script:fileTapperProc.add_Exited({
-  param($sender, $e)
-  $script:fileTapperExited = $true
-  Write-Host ("[launcher] File tapper exited with code {0} at {1}" -f $sender.ExitCode, (Get-Date))
-})
+Write-Host "[launcher] Using DB: $script:dbPath"
+Write-Host "[launcher] Starting file tapper..."
 
+# Start file tapper synchronously with output passthrough
+# Using Start-Process with -Wait would block, so we use a job instead
+$fileTapperJob = Start-Job -ScriptBlock {
+  param($exe, $workDir, $dbPath)
+  Set-Location $workDir
+  & $exe --db $dbPath --verbose --quiet-ffmpeg 2>&1
+} -ArgumentList $script:fileTapperExe, $repoRoot, $script:dbPath
+
+Write-Host "[launcher] File tapper started (Job ID: $($fileTapperJob.Id))"
 Write-Host "[launcher] Controls: P = pause, R = resume, S = stop/exit."
+
 try {
   while (-not $script:stopping) {
-    try {
+    # Check if file tapper job completed
+    if ($fileTapperJob.State -eq 'Completed' -or $fileTapperJob.State -eq 'Failed') {
+      Write-Host "[launcher] File tapper job ended (State: $($fileTapperJob.State))"
+      # Get any remaining output
+      $output = Receive-Job -Job $fileTapperJob
+      if ($output) { $output | ForEach-Object { Write-Host $_ } }
+      break
+    }
+    
+    # Get and display any new output from file tapper
+    $output = Receive-Job -Job $fileTapperJob -ErrorAction SilentlyContinue
+    if ($output) {
+      $output | ForEach-Object { Write-Host $_ }
+    }
+    
+    # Small sleep to prevent tight loop
+    Start-Sleep -Milliseconds 100
+    
+    # Check for key input
+    if ([Console]::KeyAvailable) {
       $key = [Console]::ReadKey($true)
       switch ($key.Key) {
         "P" { Write-Host "[launcher] Pause requested"; Send-ObsCommand "pause" }
         "R" { Write-Host "[launcher] Resume requested"; Send-ObsCommand "resume" }
-        "S" { Write-Host "[launcher] Stop requested"; break }
-        default { }
-      }
-    } catch {
-      $cmd = Read-Host "[launcher] Command (p/r/s)"
-      switch ($cmd.ToLower()) {
-        "p" { Write-Host "[launcher] Pause requested"; Send-ObsCommand "pause" }
-        "r" { Write-Host "[launcher] Resume requested"; Send-ObsCommand "resume" }
-        "s" { Write-Host "[launcher] Stop requested"; break }
+        "S" { 
+          Write-Host "[launcher] Stop requested"
+          $script:stopping = $true
+        }
         default { }
       }
     }
   }
 } finally {
+  # Clean up job
+  if ($fileTapperJob) {
+    Stop-Job -Job $fileTapperJob -ErrorAction SilentlyContinue
+    Remove-Job -Job $fileTapperJob -Force -ErrorAction SilentlyContinue
+  }
   Stop-All
 }
