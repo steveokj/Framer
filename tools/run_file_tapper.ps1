@@ -16,6 +16,7 @@ $script:obsExe = Join-Path $repoRoot "tools\timestone_obs_ws\target\debug\timest
 $script:fileTapperExe = Join-Path $repoRoot "tools\timestone_file_tapper\target\debug\timestone_file_tapper.exe"
 $script:stopping = $false
 $script:fileTapperProc = $null
+$script:fileTapperExited = $false
 
 function Send-ObsCommand {
   param(
@@ -56,6 +57,13 @@ function Stop-All {
       if (-not $p.HasExited) {
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
       }
+    }
+  }
+  if ($script:fileTapperProc -and -not $script:fileTapperProc.HasExited) {
+    try {
+      $script:fileTapperProc.Kill()
+    } catch {
+      Write-Host "[launcher] Failed to stop file tapper process."
     }
   }
 }
@@ -132,29 +140,31 @@ if (-not $started) {
 }
 $script:fileTapperProc.BeginOutputReadLine()
 $script:fileTapperProc.BeginErrorReadLine()
+$script:fileTapperProc.add_Exited({
+  param($sender, $e)
+  $script:fileTapperExited = $true
+  Write-Host ("[launcher] File tapper exited with code {0} at {1}" -f $sender.ExitCode, (Get-Date))
+})
 
 Write-Host "[launcher] Controls: P = pause, R = resume, S = stop/exit."
-$script:fileTapperExitLogged = $false
 try {
   while (-not $script:stopping) {
-    if ($script:fileTapperProc.HasExited -and -not $script:fileTapperExitLogged) {
-      $code = $script:fileTapperProc.ExitCode
-      Write-Host ("[launcher] File tapper exited with code {0} at {1}" -f $code, (Get-Date))
-      $script:fileTapperExitLogged = $true
-    }
     try {
-      if ([Console]::KeyAvailable) {
-        $key = [Console]::ReadKey($true)
-        switch ($key.Key) {
-          "P" { Write-Host "[launcher] Pause requested"; Send-ObsCommand "pause" }
-          "R" { Write-Host "[launcher] Resume requested"; Send-ObsCommand "resume" }
+      $key = [Console]::ReadKey($true)
+      switch ($key.Key) {
+        "P" { Write-Host "[launcher] Pause requested"; Send-ObsCommand "pause" }
+        "R" { Write-Host "[launcher] Resume requested"; Send-ObsCommand "resume" }
         "S" { Write-Host "[launcher] Stop requested"; break }
+        default { }
       }
-    } else {
-      Start-Sleep -Milliseconds 200
-    }
-  } catch {
-      Start-Sleep -Milliseconds 200
+    } catch {
+      $cmd = Read-Host "[launcher] Command (p/r/s)"
+      switch ($cmd.ToLower()) {
+        "p" { Write-Host "[launcher] Pause requested"; Send-ObsCommand "pause" }
+        "r" { Write-Host "[launcher] Resume requested"; Send-ObsCommand "resume" }
+        "s" { Write-Host "[launcher] Stop requested"; break }
+        default { }
+      }
     }
   }
 } finally {
