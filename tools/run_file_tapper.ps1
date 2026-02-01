@@ -29,6 +29,19 @@ function Send-ObsCommand {
   }
 }
 
+function Get-ObsRecordStatus {
+  try {
+    $output = & $script:obsExe --host $script:obsHost --port $script:obsPort --command status 2>$null
+    $json = ($output | Out-String).Trim()
+    if (-not $json) {
+      return $null
+    }
+    return ($json | ConvertFrom-Json)
+  } catch {
+    return $null
+  }
+}
+
 function Stop-All {
   if ($script:stopping) {
     return
@@ -92,6 +105,17 @@ Write-Host "[launcher] Repo root: $repoRoot"
 Ensure-Binary "tools\timestone_recorder\Cargo.toml" $script:recorderExe "timestone_recorder"
 Ensure-Binary "tools\timestone_obs_ws\Cargo.toml" $script:obsExe "timestone_obs_ws"
 Ensure-Binary "tools\timestone_file_tapper\Cargo.toml" $script:fileTapperExe "timestone_file_tapper"
+
+Write-Host "[launcher] Checking OBS record status..."
+$obsStatus = Get-ObsRecordStatus
+if (-not $obsStatus) {
+  Write-Host "[launcher] Unable to query OBS record status. Is OBS running?"
+  exit 1
+}
+if ($obsStatus.outputActive -eq $true) {
+  Write-Host "[launcher] OBS recording already active. Stop recording and re-run this script."
+  exit 1
+}
 
 Write-Host "[launcher] Starting timestone_recorder..."
 $script:procs += Start-Process -FilePath $script:recorderExe -ArgumentList @("start") -WorkingDirectory $repoRoot -NoNewWindow -PassThru

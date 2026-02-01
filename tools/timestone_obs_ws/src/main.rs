@@ -58,12 +58,13 @@ struct ControlSender {
     addr: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ObsCommand {
     Start,
     Stop,
     Pause,
     Resume,
+    Status,
 }
 
 impl ControlSender {
@@ -127,6 +128,31 @@ fn main() -> Result<()> {
     }
 
     if let Some(command) = args.command {
+        if command == ObsCommand::Status {
+            let request_id = send_request_with_id(
+                &mut socket,
+                "GetRecordStatus",
+                json!({}),
+                &mut request_counter,
+                args.verbose,
+            )?;
+            loop {
+                if let Some(message) = read_json_message(&mut socket, args.verbose)? {
+                    let op = message.get("op").and_then(|v| v.as_i64()).unwrap_or(-1);
+                    if op == 7 {
+                        if let Some(data) = message.get("d") {
+                            let resp_id = data.get("requestId").and_then(|v| v.as_str());
+                            if resp_id == Some(request_id.as_str()) {
+                                let response = data.get("responseData").cloned().unwrap_or(json!({}));
+                                println!("{}", response.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
         perform_command(
             &mut socket,
             command,
@@ -268,6 +294,7 @@ fn parse_args() -> Result<Args> {
                         "stop" => Some(ObsCommand::Stop),
                         "pause" => Some(ObsCommand::Pause),
                         "resume" => Some(ObsCommand::Resume),
+                        "status" => Some(ObsCommand::Status),
                         _ => None,
                     };
                 }
@@ -656,13 +683,13 @@ fn handle_event(
     Ok(())
 }
 
-fn send_request(
+fn send_request_with_id(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     request_type: &str,
     request_data: Value,
     counter: &mut u64,
     verbose: bool,
-) -> Result<()> {
+) -> Result<String> {
     *counter += 1;
     let request_id = format!("tstone-{}", counter);
     let payload = json!({
@@ -677,6 +704,17 @@ fn send_request(
         log_line(verbose, &format!("[obs] -> {payload}"));
     }
     socket.send(Message::Text(payload.to_string()))?;
+    Ok(request_id)
+}
+
+fn send_request(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    request_type: &str,
+    request_data: Value,
+    counter: &mut u64,
+    verbose: bool,
+) -> Result<()> {
+    let _ = send_request_with_id(socket, request_type, request_data, counter, verbose)?;
     Ok(())
 }
 
@@ -709,6 +747,9 @@ fn perform_command(
         ObsCommand::Resume => {
             log_line(verbose, "Sending OBS resume command...");
             let _ = send_request(socket, "ResumeRecord", json!({}), counter, verbose);
+        }
+        ObsCommand::Status => {
+            log_line(verbose, "Status command handled elsewhere.");
         }
     }
     Ok(())
