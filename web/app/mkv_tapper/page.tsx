@@ -66,6 +66,42 @@ const API_BASE = (
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
 const LAST_SESSION_STORAGE_KEY = "timestone:lastSessionId:mkv_tapper";
 
+// Icon maps for event types and applications
+const EVENT_ICON_MAP: Record<string, string | undefined> = {
+  mouse_click: process.env.NEXT_PUBLIC_EVENT_ICON_MOUSE_CLICK,
+  key_down: process.env.NEXT_PUBLIC_EVENT_ICON_KEY_DOWN,
+  key_shortcut: process.env.NEXT_PUBLIC_EVENT_ICON_KEY_SHORTCUT,
+  text_input: process.env.NEXT_PUBLIC_EVENT_ICON_TEXT_INPUT,
+  transcript: process.env.NEXT_PUBLIC_EVENT_ICON_TRANSCRIPT,
+  clipboard_text: process.env.NEXT_PUBLIC_EVENT_ICON_CLIPBOARD_TEXT,
+  clipboard_image: process.env.NEXT_PUBLIC_EVENT_ICON_CLIPBOARD_IMAGE,
+  clipboard_files: process.env.NEXT_PUBLIC_EVENT_ICON_CLIPBOARD_FILES,
+};
+
+const APP_ICON_MAP: Record<string, string> = (() => {
+  const raw = process.env.NEXT_PUBLIC_APP_ICON_MAP;
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+})();
+
+// Event row type for grouping consecutive events of same type
+type EventRow =
+  | { kind: "single"; event: EventView }
+  | { kind: "group"; event_type: string; events: EventView[] };
+
+// Segment type: groups events by active window (each active_window_changed starts a new segment)
+type EventSegment = {
+  id: string;
+  events: EventView[];
+};
+
 function normalisePath(input: string): string {
   return input.replace(/\\/g, "/").replace(/^\.?\//, "");
 }
@@ -135,6 +171,109 @@ function eventSearchBlob(event: EventView): string {
     .toLowerCase();
 }
 
+// Resolves icon path to a full URL
+function resolveIconSrc(path: string | null | undefined): string | null {
+  if (!path) {
+    return null;
+  }
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  return buildFileUrl(path);
+}
+
+// Formats elapsed time as MM:SS.mmm
+function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms)) {
+    return "--:--";
+  }
+  const totalSeconds = Math.max(0, ms) / 1000;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.floor(totalSeconds % 60);
+  const millis = Math.floor((totalSeconds - Math.floor(totalSeconds)) * 1000);
+  return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}.${millis
+    .toString()
+    .padStart(3, "0")}`;
+}
+
+// Truncates text to a maximum length with ellipsis
+function clipText(text: string, maxLen = 240): string {
+  if (text.length <= maxLen) {
+    return text;
+  }
+  return `${text.slice(0, maxLen)}...`;
+}
+
+// Formats keyboard shortcut from payload data
+function formatShortcut(payload: any): string | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const modifiers = Array.isArray(payload.modifiers) ? payload.modifiers : [];
+  const key = payload.key || payload.vk;
+  if (!key) {
+    return null;
+  }
+  const combo = [...modifiers, String(key)];
+  return combo.join("+");
+}
+
+// Gets display name for an event's window
+function windowLabel(event: EventView): string | null {
+  return event.window_title || event.process_name || event.window_class || null;
+}
+
+// Segments events by active window - each active_window_changed starts a new segment
+// All events after an active_window_changed belong to that segment until the next one
+function segmentByActiveWindow(events: EventView[]): EventSegment[] {
+  const sorted = [...events].sort((a, b) => a.ts_wall_ms - b.ts_wall_ms);
+  const segments: EventSegment[] = [];
+  let current: EventSegment | null = null;
+  for (const event of sorted) {
+    if (event.event_type === "active_window_changed" || !current) {
+      current = {
+        id: `${event.id}-${event.ts_wall_ms}`,
+        events: [event],
+      };
+      segments.push(current);
+    } else {
+      current.events.push(event);
+    }
+  }
+  // Reverse so newest segments come first, sort events within each segment newest first
+  // (active_window_changed will naturally end up at the bottom since it's chronologically first)
+  return segments
+    .reverse()
+    .map((segment) => ({
+      ...segment,
+      events: [...segment.events].sort((a, b) => b.ts_wall_ms - a.ts_wall_ms),
+    }));
+}
+
+// Groups consecutive events of the same type within a segment for cleaner display
+// Note: active_window_changed is kept as single (it's always first in segment anyway)
+function groupConsecutiveByType(events: EventView[]): EventRow[] {
+  const rows: EventRow[] = [];
+  for (const event of events) {
+    // active_window_changed is always first and never grouped
+    if (event.event_type === "active_window_changed") {
+      rows.push({ kind: "single", event });
+      continue;
+    }
+    const last = rows[rows.length - 1];
+    if (last && last.kind === "group" && last.event_type === event.event_type) {
+      last.events.push(event);
+      continue;
+    }
+    if (last && last.kind === "single" && last.event.event_type === event.event_type) {
+      rows[rows.length - 1] = { kind: "group", event_type: event.event_type, events: [last.event, event] };
+      continue;
+    }
+    rows.push({ kind: "single", event });
+  }
+  return rows;
+}
+
 export default function MkvTapperPage() {
   const [sessions, setSessions] = useState<TimestoneSession[]>([]);
   const [sessionId, setSessionId] = useState("");
@@ -162,7 +301,13 @@ export default function MkvTapperPage() {
   const [pendingSeekMs, setPendingSeekMs] = useState<number | null>(null);
   const [status, setStatus] = useState("Idle");
   const [error, setError] = useState<string | null>(null);
+  const [theaterMode, setTheaterMode] = useState(true);
+  const [framesOnly, setFramesOnly] = useState(true);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [expandAll, setExpandAll] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const settingsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem(LAST_SESSION_STORAGE_KEY);
@@ -204,13 +349,17 @@ export default function MkvTapperPage() {
 
   const filteredEvents = useMemo(() => {
     let list = events;
+    // When framesOnly is active, only show events that have captured frames
+    if (framesOnly) {
+      list = list.filter((event) => eventFrameIds.has(event.id));
+    }
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       list = list.filter((event) => eventSearchBlob(event).includes(q));
     }
     list = list.filter((event) => eventVisibility[event.event_type] !== false);
     return list;
-  }, [events, eventVisibility, searchQuery]);
+  }, [events, eventVisibility, searchQuery, framesOnly, eventFrameIds]);
 
   const sessionSegments = useMemo(() => {
     if (!sessionId) {
@@ -313,6 +462,19 @@ export default function MkvTapperPage() {
     },
     [segmentOffsets, segments],
   );
+
+  // Toggles expansion state for event groups
+  const toggleGroup = useCallback((rowId: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowId)) {
+        next.delete(rowId);
+      } else {
+        next.add(rowId);
+      }
+      return next;
+    });
+  }, []);
 
   const loadEventFrames = useCallback(
     async (event: EventView | null) => {
@@ -481,6 +643,29 @@ export default function MkvTapperPage() {
     fetchEventFrameIndex();
   }, [fetchEvents, fetchSegments, fetchEventFrameIndex]);
 
+  // Reset video/frames when session changes
+  useEffect(() => {
+    setVideoSrc(null);
+    setSelectedEvent(null);
+    setEventFrames([]);
+    setFrameIndex(0);
+    setExpandedGroups(new Set());
+  }, [sessionId]);
+
+  // Close settings dropdown when clicking outside
+  useEffect(() => {
+    if (!settingsOpen) {
+      return;
+    }
+    const handleClickOutside = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setSettingsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [settingsOpen]);
+
   useEffect(() => {
     if (pendingSeekMs == null) {
       return;
@@ -508,6 +693,99 @@ export default function MkvTapperPage() {
   const currentFrame = eventFrames[frameIndex] || null;
   const currentFrameUrl = currentFrame ? buildFileUrl(currentFrame.frame_path) : null;
 
+  // Segment filtered events by active window for sidebar display
+  const eventSegments = useMemo(() => segmentByActiveWindow(filteredEvents), [filteredEvents]);
+
+  // Renders event details like clipboard content, shortcuts, typed text
+  const renderEventDetails = (event: EventView) => {
+    const payload = event.payloadData || {};
+    const mouse = event.mouseData || {};
+    const clipboardPath = payload?.path ? String(payload.path) : null;
+    const clipboardUrl = clipboardPath ? buildFileUrl(clipboardPath) : null;
+    const clipTextValue = payload?.final_text
+      ? String(payload.final_text)
+      : payload?.text
+        ? String(payload.text)
+        : null;
+    const clipFiles = Array.isArray(payload?.files) ? payload.files : [];
+    const shortcut = event.event_type === "key_shortcut" ? formatShortcut(payload) : null;
+
+    return (
+      <div style={{ display: "grid", gap: 6, overflowWrap: "anywhere", wordBreak: "break-word", minWidth: 0 }}>
+        {event.event_type === "transcript" && clipTextValue ? (
+          <div style={{ color: "#cbd5f5", whiteSpace: "pre-wrap" }}>{clipText(clipTextValue, 600)}</div>
+        ) : null}
+        {event.event_type === "clipboard_text" && clipTextValue ? (
+          <div style={{ display: "grid", gap: 8 }}>
+            <strong>Clipboard text</strong>
+            <div
+              style={{
+                padding: "10px 12px",
+                borderRadius: 10,
+                background: "rgba(15, 23, 42, 0.8)",
+                border: "1px solid rgba(30, 41, 59, 0.6)",
+                whiteSpace: "pre-wrap",
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                fontSize: 13,
+              }}
+            >
+              {clipText(clipTextValue, 1200)}
+            </div>
+          </div>
+        ) : null}
+
+        {event.event_type === "clipboard_image" && clipboardPath ? (
+          <div style={{ display: "grid", gap: 8 }}>
+            <strong>Clipboard image</strong>
+            <span style={{ color: "#94a3b8" }}>
+              {payload?.width || "?"} x {payload?.height || "?"}
+            </span>
+            {clipboardUrl ? (
+              <img
+                src={clipboardUrl}
+                alt="Clipboard"
+                style={{ maxWidth: 360, borderRadius: 10, border: "1px solid #1e293b" }}
+              />
+            ) : null}
+            <div style={{ color: "#64748b", overflowWrap: "anywhere" }}>{clipboardPath}</div>
+          </div>
+        ) : null}
+
+        {event.event_type === "clipboard_files" && clipFiles.length > 0 ? (
+          <div style={{ display: "grid", gap: 8 }}>
+            <strong>Clipboard files</strong>
+            <div style={{ display: "grid", gap: 6 }}>
+              {clipFiles.slice(0, 12).map((path: string, idx: number) => (
+                <div key={`${path}-${idx}`} style={{ color: "#cbd5f5" }}>
+                  {path}
+                </div>
+              ))}
+              {clipFiles.length > 12 ? (
+                <div style={{ color: "#94a3b8" }}>+{clipFiles.length - 12} more</div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {event.event_type === "key_shortcut" && shortcut ? (
+          <div style={{ color: "#cbd5f5" }}>Shortcut: {shortcut}</div>
+        ) : null}
+
+        {event.event_type === "key_down" && payload?.key ? <div style={{ color: "#cbd5f5" }}>Key: {payload.key}</div> : null}
+
+        {event.event_type === "text_input" && clipTextValue ? (
+          <div style={{ color: "#cbd5f5" }}>Typed: {clipText(clipTextValue, 200)}</div>
+        ) : null}
+
+        {event.event_type === "mouse_click" && mouse?.x != null && mouse?.y != null ? (
+          <div style={{ color: "#94a3b8" }}>
+            Click @ {mouse.x},{mouse.y}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
   return (
     <div
       style={{
@@ -518,7 +796,7 @@ export default function MkvTapperPage() {
         fontFamily: '"Space Grotesk", "Segoe UI", system-ui',
       }}
     >
-      <div style={{ maxWidth: 1600, margin: "0 auto", display: "grid", gap: 20 }}>
+      <div style={{ maxWidth: "100%", margin: "0 auto", display: "grid", gap: 20 }}>
         <header style={{ display: "grid", gap: 6 }}>
           <h1 style={{ fontSize: 30, margin: 0 }}>MKV Tapper</h1>
           <p style={{ margin: 0, color: "#94a3b8" }}>
@@ -579,7 +857,7 @@ export default function MkvTapperPage() {
         <section
           style={{
             display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) minmax(320px, 420px)",
+            gridTemplateColumns: "minmax(0, 1fr) minmax(380px, 520px)",
             gap: 24,
             alignItems: "start",
           }}
@@ -593,10 +871,58 @@ export default function MkvTapperPage() {
                 border: "1px solid #1e293b",
               }}
             >
-              <div style={{ marginBottom: 8, color: "#94a3b8" }}>
-                {activeSession?.obs_video_path ? `Video: ${activeSession.obs_video_path}` : "No OBS video path"}
+              <div style={{ marginBottom: 8, color: "#94a3b8", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>{activeSession?.obs_video_path ? `Video: ${activeSession.obs_video_path}` : "No OBS video path"}</span>
+                <button
+                  type="button"
+                  onClick={() => setTheaterMode((prev) => !prev)}
+                  title={theaterMode ? "Exit theater mode" : "Enter theater mode"}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 8,
+                    border: "1px solid #1e293b",
+                    background: theaterMode ? "rgba(56, 189, 248, 0.18)" : "#0f172a",
+                    color: theaterMode ? "#e0f2fe" : "#94a3b8",
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    fontSize: 13,
+                  }}
+                >
+                  {/* Expand/collapse icon */}
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    {theaterMode ? (
+                      <>
+                        {/* Collapse icon */}
+                        <polyline points="4 14 10 14 10 20" />
+                        <polyline points="20 10 14 10 14 4" />
+                        <line x1="14" y1="10" x2="21" y2="3" />
+                        <line x1="3" y1="21" x2="10" y2="14" />
+                      </>
+                    ) : (
+                      <>
+                        {/* Expand icon */}
+                        <polyline points="15 3 21 3 21 9" />
+                        <polyline points="9 21 3 21 3 15" />
+                        <line x1="21" y1="3" x2="14" y2="10" />
+                        <line x1="3" y1="21" x2="10" y2="14" />
+                      </>
+                    )}
+                  </svg>
+                  {theaterMode ? "Compact" : "Theater"}
+                </button>
               </div>
-              <div style={{ position: "relative", width: "100%", height: "min(60vh, 520px)" }}>
+              <div style={{ position: "relative", width: "100%", height: theaterMode ? "calc(100vh - 380px)" : "min(60vh, 520px)" }}>
                 {videoSrc ? (
                   <video
                     ref={videoRef}
@@ -696,13 +1022,175 @@ export default function MkvTapperPage() {
               border: "1px solid #1e293b",
               maxHeight: "calc(100vh - 160px)",
               overflowY: "auto",
+              overflowX: "hidden",
+              minWidth: 0,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-              <strong>Events</strong>
-              <span style={{ color: "#94a3b8" }}>{filteredEvents.length}</span>
-            </div>
-            <div style={{ display: "grid", gap: 10, marginBottom: 12 }}>
+            {/* Sticky header section with filters */}
+            <div
+              style={{
+                position: "sticky",
+                top: -16,
+                zIndex: 10,
+                background: "#0b1120",
+                paddingTop: 16,
+                paddingBottom: 12,
+                marginTop: -16,
+                marginLeft: -16,
+                marginRight: -16,
+                paddingLeft: 16,
+                paddingRight: 16,
+              }}
+            >
+              {/* Sidebar header with event count and settings */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <strong>Events</strong>
+                  <span style={{ color: "#94a3b8" }}>{filteredEvents.length} events</span>
+                </div>
+                {/* Settings dropdown */}
+                <div ref={settingsRef} style={{ position: "relative" }}>
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen((prev) => !prev)}
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: 8,
+                      border: "1px solid #1e293b",
+                      background: settingsOpen ? "rgba(56, 189, 248, 0.18)" : "#0f172a",
+                      color: settingsOpen ? "#e0f2fe" : "#94a3b8",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                    title="Event settings"
+                  >
+                    {/* Gear icon */}
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                      <path
+                        d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"
+                        stroke="currentColor"
+                        strokeWidth="1.6"
+                      />
+                      <path
+                        d="M19.4 13.5a1 1 0 0 0 .2 1.1l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V19a2 2 0 0 1-4 0v-.1a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H5a2 2 0 0 1 0-4h.1a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V5a2 2 0 0 1 4 0v.1a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H19a2 2 0 0 1 0 4h-.1a1 1 0 0 0-.9.6Z"
+                        stroke="currentColor"
+                        strokeWidth="1.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                  {/* Dropdown panel */}
+                  {settingsOpen ? (
+                    <div
+                      style={{
+                        position: "absolute",
+                        top: "100%",
+                        right: 0,
+                        marginTop: 8,
+                        width: 280,
+                        maxHeight: 400,
+                        overflowY: "auto",
+                        background: "#0f172a",
+                        border: "1px solid #1e293b",
+                        borderRadius: 12,
+                        padding: 12,
+                        zIndex: 100,
+                        display: "grid",
+                        gap: 12,
+                        boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
+                      }}
+                    >
+                      {/* Expand all toggle */}
+                      <button
+                        type="button"
+                        onClick={() => setExpandAll((prev) => !prev)}
+                        style={{
+                          padding: "8px 12px",
+                          borderRadius: 8,
+                          border: "1px solid",
+                          borderColor: expandAll ? "#38bdf8" : "#1e293b",
+                          background: expandAll ? "rgba(56, 189, 248, 0.18)" : "transparent",
+                          color: expandAll ? "#e0f2fe" : "#94a3b8",
+                          fontSize: 13,
+                          cursor: "pointer",
+                          textAlign: "left",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        {/* Expand icon */}
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="15 3 21 3 21 9" />
+                          <polyline points="9 21 3 21 3 15" />
+                          <line x1="21" y1="3" x2="14" y2="10" />
+                          <line x1="3" y1="21" x2="10" y2="14" />
+                        </svg>
+                        Expand all groups
+                      </button>
+
+                      {/* Frames only toggle */}
+                      <button
+                        type="button"
+                        onClick={() => setFramesOnly((prev) => !prev)}
+                        style={{
+                          padding: "8px 12px",
+                          borderRadius: 8,
+                          border: "1px solid",
+                          borderColor: framesOnly ? "#22c55e" : "#1e293b",
+                          background: framesOnly ? "rgba(34, 197, 94, 0.18)" : "transparent",
+                          color: framesOnly ? "#bbf7d0" : "#94a3b8",
+                          fontSize: 13,
+                          cursor: "pointer",
+                          textAlign: "left",
+                        }}
+                      >
+                        Frames only
+                      </button>
+
+                      {/* Divider */}
+                      <div style={{ height: 1, background: "#1e293b" }} />
+
+                      {/* Event type filters */}
+                      <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>
+                        Event Types
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {eventTypes.map((type) => {
+                          const active = eventVisibility[type] !== false;
+                          return (
+                            <button
+                              key={type}
+                              type="button"
+                              onClick={() =>
+                                setEventVisibility((prev) => ({ ...prev, [type]: !(prev[type] !== false) }))
+                              }
+                              style={{
+                                padding: "5px 10px",
+                                borderRadius: 999,
+                                border: "1px solid",
+                                borderColor: active ? "#38bdf8" : "#1e293b",
+                                background: active ? "rgba(56, 189, 248, 0.18)" : "transparent",
+                                color: active ? "#e0f2fe" : "#94a3b8",
+                                fontSize: 11,
+                                cursor: "pointer",
+                              }}
+                            >
+                              {type.replace(/_/g, " ")}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              {/* Search input */}
               <input
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
@@ -713,95 +1201,327 @@ export default function MkvTapperPage() {
                   border: "1px solid #1e293b",
                   background: "#0f172a",
                   color: "#e2e8f0",
+                  width: "100%",
+                  boxSizing: "border-box",
                 }}
               />
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {eventTypes.map((type) => {
-                  const active = eventVisibility[type] !== false;
-                  return (
-                    <button
-                      key={type}
-                      type="button"
-                      onClick={() =>
-                        setEventVisibility((prev) => ({ ...prev, [type]: !(prev[type] !== false) }))
-                      }
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 999,
-                        border: "1px solid",
-                        borderColor: active ? "#38bdf8" : "#1e293b",
-                        background: active ? "rgba(56, 189, 248, 0.18)" : "transparent",
-                        color: active ? "#e0f2fe" : "#94a3b8",
-                        fontSize: 12,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {type.replace(/_/g, " ")}
-                    </button>
-                  );
-                })}
-              </div>
             </div>
-            <div style={{ display: "grid", gap: 10 }}>
-              {listRows.map((row) => {
-                if (row.kind === "segment") {
+
+            {/* Event list segmented by active window */}
+            <div style={{ display: "grid", gap: 16, minWidth: 0 }}>
+              {eventSegments.length === 0 ? (
+                <div style={{ color: "#64748b" }}>No events loaded.</div>
+              ) : (
+                eventSegments.map((segment) => {
+                  // Find the active_window_changed event (last in the sorted array - oldest chronologically)
+                  const awcEvent = segment.events.find((e) => e.event_type === "active_window_changed");
+                  const segmentHasNoFrames = awcEvent ? !eventFrameIds.has(awcEvent.id) : false;
+
+                  // Group all events in the segment by consecutive type
+                  const rows = groupConsecutiveByType(segment.events);
+
                   return (
                     <div
-                      key={row.id}
+                      key={segment.id}
                       style={{
-                        padding: "10px 12px",
-                        borderRadius: 10,
-                        border: "1px dashed #334155",
-                        background: "rgba(15, 23, 42, 0.5)",
-                        color: "#e2e8f0",
+                        borderRadius: 16,
+                        padding: 16,
+                        border: segmentHasNoFrames
+                          ? "1px solid rgba(244, 114, 182, 0.5)"
+                          : "1px solid rgba(30, 41, 59, 0.7)",
+                        borderLeft: segmentHasNoFrames
+                          ? "3px solid rgba(244, 114, 182, 0.7)"
+                          : "3px solid rgba(56, 189, 248, 0.7)",
+                        background: segmentHasNoFrames
+                          ? "rgba(244, 114, 182, 0.08)"
+                          : "rgba(11, 17, 32, 0.9)",
                         display: "grid",
-                        gap: 6,
+                        gap: 12,
                       }}
                     >
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                        <strong>{row.label}</strong>
-                        <span style={{ color: "#94a3b8" }}>{formatWallTime(row.ts_wall_ms)}</span>
+                      {/* All events within this segment */}
+                      <div style={{ display: "grid", gap: 10 }}>
+                        {rows.map((row, rowIndex) => {
+                          const rowId = `${segment.id}-${rowIndex}`;
+
+                            // Grouped events (consecutive same-type events)
+                          if (row.kind === "group") {
+                            const expanded = expandAll || expandedGroups.has(rowId);
+                              const groupMonoTime = activeSession
+                                ? formatDurationMs(row.events[0].ts_wall_ms - activeSession.start_wall_ms)
+                                : formatDurationMs(row.events[0].ts_mono_ms);
+                              const groupIcon = resolveIconSrc(EVENT_ICON_MAP[row.event_type]);
+
+                              return (
+                                <div
+                                  key={rowId}
+                                  style={{
+                                    borderRadius: 12,
+                                    padding: "10px 12px",
+                                    border: selectedEvent && row.events.some((e) => e.id === selectedEvent.id)
+                                      ? "1px solid #38bdf8"
+                                      : "1px solid rgba(30, 41, 59, 0.6)",
+                                    background: selectedEvent && row.events.some((e) => e.id === selectedEvent.id)
+                                      ? "rgba(30, 64, 175, 0.25)"
+                                      : "rgba(9, 14, 26, 0.9)",
+                                    display: "grid",
+                                    gap: 6,
+                                    cursor: "pointer",
+                                    minWidth: 0,
+                                    overflowWrap: "anywhere",
+                                    wordBreak: "break-word",
+                                  }}
+                                  onClick={() => selectEvent(row.events[0])}
+                                >
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                                    {/* Expand/collapse button */}
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleGroup(rowId);
+                                      }}
+                                      style={{
+                                        width: 24,
+                                        height: 24,
+                                        borderRadius: 6,
+                                        border: "1px solid rgba(30, 41, 59, 0.8)",
+                                        background: "rgba(15, 23, 42, 0.7)",
+                                        color: "#e2e8f0",
+                                        cursor: "pointer",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                      }}
+                                      aria-label={expanded ? "Collapse group" : "Expand group"}
+                                    >
+                                      {expanded ? "-" : "+"}
+                                    </button>
+
+                                    {/* Event type icon */}
+                                    {groupIcon ? (
+                                      <img
+                                        src={groupIcon}
+                                        alt=""
+                                        style={{ width: 20, height: 20, borderRadius: 6, objectFit: "cover" }}
+                                      />
+                                    ) : null}
+
+                                    <strong style={{ textTransform: "capitalize" }}>
+                                      {row.event_type.replace(/_/g, " ")}
+                                    </strong>
+                                    <span style={{ color: "#cbd5f5" }}>
+                                      {formatWallTime(row.events[0].ts_wall_ms)}
+                                    </span>
+                                    <span style={{ color: "#64748b" }}>
+                                      +{groupMonoTime}
+                                    </span>
+
+                                    {/* Event count badge */}
+                                    <span
+                                      style={{
+                                        color: "#0f172a",
+                                        background: "rgba(56, 189, 248, 0.9)",
+                                        borderRadius: 999,
+                                        padding: "2px 8px",
+                                        fontSize: 12,
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      {row.events.length}x
+                                    </span>
+                                  </div>
+
+                                  {renderEventDetails(row.events[0])}
+
+                                  {/* Expanded sub-events */}
+                                  {expanded ? (
+                                    <div style={{ display: "grid", gap: 6, paddingLeft: 10 }}>
+                                      {row.events.map((event) => {
+                                        const eventPayload = event.payloadData || {};
+                                        const eventMouse = event.mouseData || {};
+                                        const eventText = eventPayload?.final_text
+                                          ? String(eventPayload.final_text)
+                                          : eventPayload?.text
+                                            ? String(eventPayload.text)
+                                            : null;
+                                        return (
+                                          <div
+                                            key={event.id}
+                                            style={{
+                                              borderRadius: 10,
+                                              padding: "8px 10px",
+                                              border: selectedEvent?.id === event.id
+                                                ? "1px solid #38bdf8"
+                                                : "1px solid rgba(30, 41, 59, 0.6)",
+                                              background: selectedEvent?.id === event.id
+                                                ? "rgba(30, 64, 175, 0.25)"
+                                                : "rgba(7, 12, 22, 0.85)",
+                                              display: "grid",
+                                              gap: 4,
+                                              cursor: "pointer",
+                                            }}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              selectEvent(event);
+                                            }}
+                                          >
+                                            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                              <span style={{ color: "#cbd5f5", fontSize: 12 }}>
+                                                {formatWallTime(event.ts_wall_ms)}
+                                              </span>
+                                              <span style={{ color: "#94a3b8", fontSize: 12 }}>
+                                                {event.event_type.replace(/_/g, " ")}
+                                              </span>
+                                            </div>
+                                            {event.event_type === "key_down" && eventPayload?.key ? (
+                                              <div style={{ color: "#cbd5f5" }}>Key: {eventPayload.key}</div>
+                                            ) : null}
+                                            {event.event_type === "key_shortcut" ? (
+                                              <div style={{ color: "#cbd5f5" }}>
+                                                Shortcut: {formatShortcut(eventPayload) || "Unknown"}
+                                              </div>
+                                            ) : null}
+                                            {event.event_type === "text_input" && eventText ? (
+                                              <div style={{ color: "#cbd5f5" }}>{clipText(eventText, 160)}</div>
+                                            ) : null}
+                                            {event.event_type === "mouse_click" &&
+                                            eventMouse?.x != null &&
+                                            eventMouse?.y != null ? (
+                                              <div style={{ color: "#94a3b8" }}>
+                                                Click @ {eventMouse.x},{eventMouse.y}
+                                              </div>
+                                            ) : null}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              );
+                            }
+
+                            // Single event (not grouped)
+                          const event = row.event;
+                          const wallTime = formatWallTime(event.ts_wall_ms);
+                          const monoTime = activeSession
+                            ? formatDurationMs(event.ts_wall_ms - activeSession.start_wall_ms)
+                            : formatDurationMs(event.ts_mono_ms);
+                          const eventWindowName = windowLabel(event);
+                          const windowInitial = eventWindowName ? eventWindowName.slice(0, 1).toUpperCase() : "?";
+                          const eventIcon = resolveIconSrc(EVENT_ICON_MAP[event.event_type]);
+                          const isActiveWindow = event.event_type === "active_window_changed";
+                          const appIcon = resolveIconSrc(
+                            isActiveWindow
+                              ? (event.payloadData?.app_icon_path as string | undefined) ||
+                                  APP_ICON_MAP[event.process_name || ""] ||
+                                  null
+                              : null
+                          );
+
+                          return (
+                            <div
+                              key={event.id}
+                              style={{
+                                borderRadius: 14,
+                                padding: isActiveWindow ? 16 : "10px 12px",
+                                border: selectedEvent?.id === event.id
+                                  ? "1px solid #38bdf8"
+                                  : "1px solid rgba(30, 41, 59, 0.6)",
+                                borderLeft: isActiveWindow && selectedEvent?.id !== event.id
+                                  ? "3px solid rgba(56, 189, 248, 0.7)"
+                                  : undefined,
+                                background: selectedEvent?.id === event.id
+                                  ? "rgba(30, 64, 175, 0.25)"
+                                  : "rgba(9, 14, 26, 0.9)",
+                                display: "grid",
+                                gap: isActiveWindow ? 12 : 6,
+                                cursor: "pointer",
+                                minWidth: 0,
+                                overflowWrap: "anywhere",
+                                wordBreak: "break-word",
+                              }}
+                              onClick={() => selectEvent(event)}
+                            >
+                              {isActiveWindow ? (
+                                // Active window changed - special styling with app icon
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: 12,
+                                    alignItems: "center",
+                                    minWidth: 0,
+                                  }}
+                                >
+                                  {appIcon ? (
+                                    <img
+                                      src={appIcon}
+                                      alt=""
+                                      style={{ width: 32, height: 32, borderRadius: 10, objectFit: "cover" }}
+                                    />
+                                  ) : (
+                                    <div
+                                      style={{
+                                        width: 32,
+                                        height: 32,
+                                        borderRadius: 10,
+                                        background: "rgba(56, 189, 248, 0.2)",
+                                        color: "#e2e8f0",
+                                        display: "grid",
+                                        placeItems: "center",
+                                        fontSize: 12,
+                                      }}
+                                    >
+                                      {windowInitial}
+                                    </div>
+                                  )}
+                                  <div style={{ display: "grid", gap: 4, minWidth: 0, flex: 1 }}>
+                                    <div style={{ display: "flex", flexDirection: "row", gap: 16, flexWrap: "wrap" }}>
+                                      <strong style={{ textTransform: "capitalize" }}>
+                                        {event.event_type.replace(/_/g, " ")}
+                                      </strong>
+                                      <div style={{ alignSelf: "start", display: "flex", gap: 12, alignItems: "center" }}>
+                                        <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
+                                        <span style={{ color: "#64748b" }}>+{monoTime}</span>
+                                      </div>
+                                    </div>
+                                    {eventWindowName ? (
+                                      <div style={{ color: "#cbd5f5", overflowWrap: "anywhere" }}>{eventWindowName}</div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              ) : (
+                                // Other event types
+                                <>
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                                    {eventIcon ? (
+                                      <img
+                                        src={eventIcon}
+                                        alt=""
+                                        style={{ width: 20, height: 20, borderRadius: 6, objectFit: "cover" }}
+                                      />
+                                    ) : null}
+                                    <strong style={{ textTransform: "capitalize" }}>
+                                      {event.event_type.replace(/_/g, " ")}
+                                    </strong>
+                                    <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
+                                    <span style={{ color: "#64748b" }}>+{monoTime}</span>
+                                  </div>
+                                  {eventWindowName ? (
+                                    <div style={{ color: "#94a3b8", overflowWrap: "anywhere" }}>{eventWindowName}</div>
+                                  ) : null}
+                                </>
+                              )}
+                              {renderEventDetails(event)}
+                            </div>
+                          );
+                        })}
                       </div>
-                      <div style={{ color: "#94a3b8" }}>Recording boundary</div>
                     </div>
                   );
-                }
-                const event = row.event;
-                return (
-                  <button
-                    key={event.id}
-                    type="button"
-                    onClick={() => selectEvent(event)}
-                    style={{
-                      textAlign: "left",
-                      padding: "10px 12px",
-                      borderRadius: 10,
-                      border:
-                        selectedEvent?.id === event.id
-                          ? "1px solid #38bdf8"
-                          : eventFrameIds.has(event.id)
-                            ? "1px solid rgba(34,197,94,0.6)"
-                            : "1px solid #1e293b",
-                      background: eventFrameIds.has(event.id)
-                        ? "rgba(34, 197, 94, 0.08)"
-                        : "rgba(15, 23, 42, 0.7)",
-                      color: "#e2e8f0",
-                      cursor: "pointer",
-                      display: "grid",
-                      gap: 6,
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                      <strong style={{ textTransform: "capitalize" }}>{event.event_type.replace(/_/g, " ")}</strong>
-                      <span style={{ color: "#94a3b8" }}>{formatWallTime(event.ts_wall_ms)}</span>
-                    </div>
-                    <div style={{ color: "#cbd5f5" }}>
-                      {event.window_title || event.process_name || event.window_class || "Unknown window"}
-                    </div>
-                  </button>
-                );
-              })}
-              {!listRows.length && <div style={{ color: "#64748b" }}>No events loaded.</div>}
+                })
+              )}
             </div>
           </aside>
         </section>
