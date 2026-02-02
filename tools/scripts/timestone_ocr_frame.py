@@ -38,7 +38,31 @@ def main() -> int:
         return 0
 
     text = pytesseract.image_to_string(img, lang=args.lang)
-    print(json.dumps({"text": text.strip()}))
+    boxes = []
+    try:
+        data = pytesseract.image_to_data(img, lang=args.lang, output_type=pytesseract.Output.DICT)
+        count = len(data.get("text", []))
+        for idx in range(count):
+            word = str(data["text"][idx]).strip()
+            if not word:
+                continue
+            try:
+                conf = float(data.get("conf", ["-1"])[idx])
+            except Exception:
+                conf = -1.0
+            boxes.append(
+                {
+                    "text": word,
+                    "conf": conf,
+                    "left": int(data["left"][idx]),
+                    "top": int(data["top"][idx]),
+                    "width": int(data["width"][idx]),
+                    "height": int(data["height"][idx]),
+                }
+            )
+    except Exception:
+        boxes = []
+    print(json.dumps({"text": text.strip(), "boxes": boxes}))
     return 0
 
 

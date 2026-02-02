@@ -33,6 +33,7 @@ struct Args {
     frame_offset_ms: i64,
     ffmpeg_timeout_sec: u64,
     fast_seek: bool,
+    delete_frames_after_ocr: bool,
     transcribe_model: String,
     ocr_lang: String,
     event_types: Option<HashSet<String>>,
@@ -76,6 +77,12 @@ struct TranscriptSegment {
     end_ms: i64,
     text: String,
     engine: String,
+}
+
+#[derive(Clone)]
+struct OcrResult {
+    text: String,
+    boxes_json: Option<String>,
 }
 
 #[derive(Clone)]
@@ -159,11 +166,15 @@ fn main() -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
             for event in events {
-                if !event_type_allowed(&event.event_type, &args.event_types) {
+                let is_keydown_head = event.event_type.eq_ignore_ascii_case("key_down")
+                    && keydown_heads.contains(&event.id);
+                if !ocr_event_allowed(&event.event_type, is_keydown_head, &args.event_types) {
                     continue;
                 }
                 counts.frames_total += 1;
-                if event_frames_exist(&conn, event.id)? {
+                counts.ocr_total += 1;
+                if ocr_exists_for_event(&conn, event.id)? {
+                    counts.ocr_done += 1;
                     counts.frames_done += 1;
                     continue;
                 }
@@ -177,6 +188,12 @@ fn main() -> Result<()> {
                     "event_{}_{}.jpg",
                     event.id, event.ts_wall_ms
                 ));
+                if frame_path.exists() {
+                    if !event_frames_exist(&conn, event.id)? {
+                        insert_event_frame(&conn, event.id, &frame_path, event.ts_wall_ms)?;
+                    }
+                    counts.frames_done += 1;
+                } else {
                 log_line(
                     args.verbose,
                     &format!("Extracting frame for event {} @ {}ms", event.id, offset_ms),
@@ -194,26 +211,30 @@ fn main() -> Result<()> {
                 )? {
                     insert_event_frame(&conn, event.id, &frame_path, event.ts_wall_ms)?;
                     counts.frames_done += 1;
-                    if event.event_type == "key_down"
-                        && (args.ocr_keydown_mode == OcrKeydownMode::All
-                            || keydown_heads.contains(&event.id))
-                    {
-                        counts.ocr_total += 1;
-                        if ocr_exists_for_frame(&conn, &frame_path)? {
-                            counts.ocr_done += 1;
-                        } else {
-                            log_line(args.verbose, &format!("Running OCR for event {}", event.id));
-                            if let Some(ocr_text) = run_ocr_script(
-                                &scripts_dir,
-                                &frame_path,
-                                &args.ocr_lang,
-                                args.verbose,
-                            )? {
-                                insert_event_ocr(&conn, event.id, &frame_path, &ocr_text, "tesseract")?;
-                                counts.ocr_done += 1;
-                                log_line(args.verbose, &format!("OCR stored for event {}", event.id));
-                            }
-                        }
+                }
+                }
+                if !frame_path.exists() {
+                    continue;
+                }
+                log_line(args.verbose, &format!("Running OCR for event {}", event.id));
+                if let Some(ocr) = run_ocr_script(
+                    &scripts_dir,
+                    &frame_path,
+                    &args.ocr_lang,
+                    args.verbose,
+                )? {
+                    insert_event_ocr(
+                        &conn,
+                        event.id,
+                        &frame_path,
+                        &ocr.text,
+                        "tesseract",
+                        ocr.boxes_json.as_deref(),
+                    )?;
+                    counts.ocr_done += 1;
+                    log_line(args.verbose, &format!("OCR stored for event {}", event.id));
+                    if args.delete_frames_after_ocr {
+                        let _ = fs::remove_file(&frame_path);
                     }
                 }
             }
@@ -333,6 +354,7 @@ fn parse_args() -> Result<Args> {
         frame_offset_ms: DEFAULT_FRAME_OFFSET_MS,
         ffmpeg_timeout_sec: DEFAULT_FFMPEG_TIMEOUT_SEC,
         fast_seek: true,
+        delete_frames_after_ocr: false,
         transcribe_model: DEFAULT_TRANSCRIBE_MODEL.to_string(),
         ocr_lang: DEFAULT_OCR_LANG.to_string(),
         event_types: None,
@@ -393,6 +415,9 @@ fn parse_args() -> Result<Args> {
             }
             "--no-fast-seek" => {
                 args.fast_seek = false;
+            }
+            "--delete-frames-after-ocr" => {
+                args.delete_frames_after_ocr = true;
             }
             "--transcribe-model" => {
                 if let Some(value) = iter.next() {
@@ -496,6 +521,7 @@ fn init_db(conn: &Connection) -> Result<()> {
             frame_path TEXT,
             ocr_text TEXT,
             ocr_engine TEXT,
+            ocr_boxes_json TEXT,
             created_ms INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_event_ocr_event ON event_ocr(event_id);
@@ -512,6 +538,23 @@ fn init_db(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_processing_status_updated ON processing_status(updated_ms);
         "
     )?;
+    ensure_event_ocr_columns(conn)?;
+    Ok(())
+}
+
+fn ensure_event_ocr_columns(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(event_ocr)")?;
+    let rows = stmt.query_map(params![], |row| row.get::<_, String>(1))?;
+    let mut has_boxes = false;
+    for row in rows {
+        let name = row?.to_lowercase();
+        if name == "ocr_boxes_json" {
+            has_boxes = true;
+        }
+    }
+    if !has_boxes {
+        conn.execute("ALTER TABLE event_ocr ADD COLUMN ocr_boxes_json TEXT", params![])?;
+    }
     Ok(())
 }
 
@@ -685,10 +728,14 @@ fn keydown_group_heads(events: &[EventInfo]) -> HashSet<i64> {
     heads
 }
 
-fn event_type_allowed(event_type: &str, filter: &Option<HashSet<String>>) -> bool {
+fn ocr_event_allowed(event_type: &str, is_keydown_head: bool, filter: &Option<HashSet<String>>) -> bool {
+    let key = event_type.to_lowercase();
+    if key == "key_down" && !is_keydown_head {
+        return false;
+    }
     match filter {
-        None => true,
-        Some(set) => set.contains(&event_type.to_lowercase()),
+        None => matches!(key.as_str(), "active_window_changed" | "mouse_click" | "key_down"),
+        Some(set) => set.contains(&key),
     }
 }
 
@@ -698,9 +745,9 @@ fn event_frames_exist(conn: &Connection, event_id: i64) -> Result<bool> {
     Ok(count > 0)
 }
 
-fn ocr_exists_for_frame(conn: &Connection, frame_path: &Path) -> Result<bool> {
-    let mut stmt = conn.prepare("SELECT COUNT(*) FROM event_ocr WHERE frame_path = ?")?;
-    let count: i64 = stmt.query_row(params![frame_path.to_string_lossy()], |row| row.get(0))?;
+fn ocr_exists_for_event(conn: &Connection, event_id: i64) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM event_ocr WHERE event_id = ?")?;
+    let count: i64 = stmt.query_row(params![event_id], |row| row.get(0))?;
     Ok(count > 0)
 }
 
@@ -778,11 +825,19 @@ fn insert_event_ocr(
     frame_path: &Path,
     ocr_text: &str,
     engine: &str,
+    boxes_json: Option<&str>,
 ) -> Result<()> {
     let created_ms = now_wall_ms();
     conn.execute(
-        "INSERT INTO event_ocr (event_id, frame_path, ocr_text, ocr_engine, created_ms) VALUES (?, ?, ?, ?, ?)",
-        params![event_id, frame_path.to_string_lossy(), ocr_text, engine, created_ms],
+        "INSERT INTO event_ocr (event_id, frame_path, ocr_text, ocr_engine, ocr_boxes_json, created_ms) VALUES (?, ?, ?, ?, ?, ?)",
+        params![
+            event_id,
+            frame_path.to_string_lossy(),
+            ocr_text,
+            engine,
+            boxes_json.unwrap_or(""),
+            created_ms
+        ],
     )?;
     Ok(())
 }
@@ -954,7 +1009,7 @@ fn run_ocr_script(
     frame_path: &Path,
     lang: &str,
     verbose: bool,
-) -> Result<Option<String>> {
+) -> Result<Option<OcrResult>> {
     let script_path = scripts_dir.join("timestone_ocr_frame.py");
     if !script_path.exists() {
         return Ok(None);
@@ -979,11 +1034,17 @@ fn run_ocr_script(
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|_| serde_json::json!({}));
-    let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let text = payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if text.is_empty() {
         return Ok(None);
     }
-    Ok(Some(text))
+    let boxes_json = payload.get("boxes").map(|v| v.to_string());
+    Ok(Some(OcrResult { text, boxes_json }))
 }
 
 fn now_wall_ms() -> i64 {
