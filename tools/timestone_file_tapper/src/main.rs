@@ -75,6 +75,16 @@ struct TranscriptSegment {
     engine: String,
 }
 
+#[derive(Clone)]
+struct ProcessingCounts {
+    frames_done: i64,
+    frames_total: i64,
+    ocr_done: i64,
+    ocr_total: i64,
+    audio_done: bool,
+    transcribe_done: bool,
+}
+
 fn main() -> Result<()> {
     let args = parse_args()?;
     let base_dir = ensure_app_dir()?;
@@ -133,11 +143,25 @@ fn main() -> Result<()> {
             } else {
                 HashSet::new()
             };
+            let mut counts = ProcessingCounts {
+                frames_done: 0,
+                frames_total: 0,
+                ocr_done: 0,
+                ocr_total: 0,
+                audio_done: false,
+                transcribe_done: false,
+            };
+            let session_key = segment
+                .session_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
             for event in events {
                 if !event_type_allowed(&event.event_type, &args.event_types) {
                     continue;
                 }
+                counts.frames_total += 1;
                 if event_frames_exist(&conn, event.id)? {
+                    counts.frames_done += 1;
                     continue;
                 }
                 let offset_ms = offset_before_ms
@@ -164,24 +188,37 @@ fn main() -> Result<()> {
                     args.quiet_ffmpeg,
                 )? {
                     insert_event_frame(&conn, event.id, &frame_path, event.ts_wall_ms)?;
+                    counts.frames_done += 1;
                     if event.event_type == "key_down"
                         && (args.ocr_keydown_mode == OcrKeydownMode::All
                             || keydown_heads.contains(&event.id))
-                        && !ocr_exists_for_frame(&conn, &frame_path)?
                     {
-                        log_line(args.verbose, &format!("Running OCR for event {}", event.id));
-                        if let Some(ocr_text) = run_ocr_script(
-                            &scripts_dir,
-                            &frame_path,
-                            &args.ocr_lang,
-                            args.verbose,
-                        )? {
-                            insert_event_ocr(&conn, event.id, &frame_path, &ocr_text, "tesseract")?;
-                            log_line(args.verbose, &format!("OCR stored for event {}", event.id));
+                        counts.ocr_total += 1;
+                        if ocr_exists_for_frame(&conn, &frame_path)? {
+                            counts.ocr_done += 1;
+                        } else {
+                            log_line(args.verbose, &format!("Running OCR for event {}", event.id));
+                            if let Some(ocr_text) = run_ocr_script(
+                                &scripts_dir,
+                                &frame_path,
+                                &args.ocr_lang,
+                                args.verbose,
+                            )? {
+                                insert_event_ocr(&conn, event.id, &frame_path, &ocr_text, "tesseract")?;
+                                counts.ocr_done += 1;
+                                log_line(args.verbose, &format!("OCR stored for event {}", event.id));
+                            }
                         }
                     }
                 }
             }
+            update_processing_status(
+                &conn,
+                &session_key,
+                segment.id,
+                "frames",
+                &build_processing_summary(&counts),
+            )?;
             let audio_path = if let Some(path) = fetch_segment_audio_path(&conn, segment.id)? {
                 if path.exists() {
                     Some(path)
@@ -232,6 +269,14 @@ fn main() -> Result<()> {
                 extracted
             };
             if let Some(audio_path) = audio_path {
+                counts.audio_done = true;
+                update_processing_status(
+                    &conn,
+                    &session_key,
+                    segment.id,
+                    "audio",
+                    &build_processing_summary(&counts),
+                )?;
                 if !segment_transcriptions_exist(&conn, segment.id)? {
                     log_line(args.verbose, &format!("Transcribing audio for segment {}", segment.id));
                     let segments = run_transcribe_script(
@@ -242,6 +287,7 @@ fn main() -> Result<()> {
                     )?;
                     if !segments.is_empty() {
                         insert_segment_transcripts(&conn, segment.id, segment.start_wall_ms, &segments)?;
+                        counts.transcribe_done = true;
                         log_line(
                             args.verbose,
                             &format!("Saved {} transcript segments for {}", segments.len(), segment.id),
@@ -249,7 +295,21 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            update_processing_status(
+                &conn,
+                &session_key,
+                segment.id,
+                "transcribe",
+                &build_processing_summary(&counts),
+            )?;
             mark_segment_processed(&conn, segment.id)?;
+            update_processing_status(
+                &conn,
+                &session_key,
+                segment.id,
+                "done",
+                &build_processing_summary(&counts),
+            )?;
         }
         std::thread::sleep(Duration::from_millis(args.poll_ms));
     }
@@ -425,7 +485,56 @@ fn init_db(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_event_ocr_event ON event_ocr(event_id);
         CREATE INDEX IF NOT EXISTS idx_event_ocr_frame ON event_ocr(frame_path);
+        CREATE TABLE IF NOT EXISTS processing_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            segment_id INTEGER,
+            stage TEXT,
+            summary TEXT,
+            updated_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_processing_status_session ON processing_status(session_id, updated_ms);
+        CREATE INDEX IF NOT EXISTS idx_processing_status_updated ON processing_status(updated_ms);
         "
+    )?;
+    Ok(())
+}
+
+fn build_processing_summary(counts: &ProcessingCounts) -> String {
+    let mut parts = Vec::new();
+    if counts.frames_total > 0 {
+        parts.push(format!("frames {}/{}", counts.frames_done, counts.frames_total));
+    }
+    if counts.ocr_total > 0 {
+        parts.push(format!("ocr {}/{}", counts.ocr_done, counts.ocr_total));
+    }
+    if counts.audio_done {
+        parts.push("audio ok".to_string());
+    }
+    if counts.transcribe_done {
+        parts.push("tx ok".to_string());
+    }
+    if parts.is_empty() {
+        "idle".to_string()
+    } else {
+        parts.join(" | ")
+    }
+}
+
+fn update_processing_status(
+    conn: &Connection,
+    session_id: &str,
+    segment_id: i64,
+    stage: &str,
+    summary: &str,
+) -> Result<()> {
+    let updated_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    conn.execute(
+        "INSERT INTO processing_status (session_id, segment_id, stage, summary, updated_ms) VALUES (?, ?, ?, ?, ?)",
+        params![session_id, segment_id, stage, summary, updated_ms],
     )?;
     Ok(())
 }

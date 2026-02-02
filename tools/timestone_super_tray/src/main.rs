@@ -529,6 +529,17 @@ fn update_tray_icon() -> Result<()> {
     } else {
         format!("{} ({}, {})", state.tooltip, status, mode)
     };
+    let tooltip = if matches!(state.status, RecorderStatus::Paused | RecorderStatus::Stopped) {
+        let session_id = read_lock_session_id(&state.data_dir.join("recorder.lock"));
+        if let Some(summary) = get_latest_processing_summary(&state.db_path, session_id.as_deref()) {
+            format!("{} | {}", tooltip, summary)
+        } else {
+            tooltip
+        }
+    } else {
+        tooltip
+    };
+    let tooltip = truncate_tooltip(&tooltip, 127);
     let mut data = tray_data(state.hwnd, icon, &tooltip);
     let ok = unsafe { Shell_NotifyIconW(NIM_MODIFY, &mut data) };
     if ok.as_bool() {
@@ -617,6 +628,35 @@ fn tray_data(hwnd: HWND, icon: HICON, tooltip: &str) -> NOTIFYICONDATAW {
         hIcon: icon,
         szTip: tip,
         ..Default::default()
+    }
+}
+
+fn truncate_tooltip(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        return value.to_string();
+    }
+    let mut out = value.chars().take(max_len.saturating_sub(1)).collect::<String>();
+    out.push('…');
+    out
+}
+
+fn get_latest_processing_summary(db_path: &Path, session_id: Option<&str>) -> Option<String> {
+    let conn = Connection::open(db_path).ok()?;
+    let mut stmt = if session_id.is_some() {
+        conn.prepare(
+            "SELECT summary FROM processing_status WHERE session_id = ? ORDER BY updated_ms DESC LIMIT 1",
+        )
+        .ok()?
+    } else {
+        conn.prepare("SELECT summary FROM processing_status ORDER BY updated_ms DESC LIMIT 1")
+            .ok()?
+    };
+    if let Some(session_id) = session_id {
+        stmt.query_row(params![session_id], |row| row.get::<_, String>(0))
+            .ok()
+    } else {
+        stmt.query_row(params![], |row| row.get::<_, String>(0))
+            .ok()
     }
 }
 
