@@ -20,12 +20,16 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_SHIFT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetMessageW, LoadIconW, LoadImageW, MessageBoxW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
     TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HICON, HMENU, IMAGE_ICON, IDYES, LR_DEFAULTSIZE, LR_LOADFROMFILE,
     MB_OK, MB_YESNO, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_TOPALIGN, WM_COMMAND,
-    WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_NULL, WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    WM_DESTROY, WM_HOTKEY,
+    WM_LBUTTONUP, WM_RBUTTONUP, WM_NULL, WM_TIMER, WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 const APP_DIR: &str = "data\\timestone";
@@ -50,6 +54,16 @@ const CMD_EXIT: u16 = 1006;
 const CMD_MODE_FULL: u16 = 2001;
 const CMD_MODE_MID: u16 = 2002;
 const CMD_MODE_LOW: u16 = 2003;
+
+const HOTKEY_F13: i32 = 1;
+const HOTKEY_SHIFT_F13: i32 = 2;
+const HOTKEY_ALT_F13: i32 = 3;
+const HOTKEY_F14: i32 = 4;
+const HOTKEY_SHIFT_F14: i32 = 5;
+const HOTKEY_ALT_F14: i32 = 6;
+
+const VK_F13: u32 = 0x7C;
+const VK_F14: u32 = 0x7D;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -80,6 +94,9 @@ struct TrayConfig {
     obs_port: Option<u16>,
     obs_password: Option<String>,
     last_mode: Mode,
+    file_tapper_event_types: Option<Vec<String>>,
+    file_tapper_ocr_keydown_mode: Option<String>,
+    file_tapper_frame_offset_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +109,7 @@ enum RecorderStatus {
 #[derive(Clone, Copy)]
 enum TrayAction {
     Start,
+    StartInMode(Mode),
     Stop,
     Pause,
     Resume,
@@ -125,6 +143,9 @@ struct AppState {
     obs_ws_child: Option<Child>,
     file_tapper_child: Option<Child>,
     obs_started: bool,
+    file_tapper_event_types: Option<Vec<String>>,
+    file_tapper_ocr_keydown_mode: Option<String>,
+    file_tapper_frame_offset_ms: Option<i64>,
 }
 
 static STATE: OnceLock<Arc<Mutex<AppState>>> = OnceLock::new();
@@ -176,6 +197,9 @@ fn main() -> Result<()> {
     let obs_port = config.obs_port.unwrap_or(DEFAULT_OBS_PORT);
     let obs_password = config.obs_password.clone().or_else(|| env::var("OBS_WS_PASSWORD").ok());
     let mode = config.last_mode;
+    let file_tapper_event_types = config.file_tapper_event_types.clone();
+    let file_tapper_ocr_keydown_mode = config.file_tapper_ocr_keydown_mode.clone();
+    let file_tapper_frame_offset_ms = config.file_tapper_frame_offset_ms;
     let data_dir = base_dir.clone();
     let tooltip = config
         .tooltip
@@ -232,10 +256,14 @@ fn main() -> Result<()> {
             obs_ws_child: None,
             file_tapper_child: None,
             obs_started: false,
+            file_tapper_event_types,
+            file_tapper_ocr_keydown_mode,
+            file_tapper_frame_offset_ms,
         };
         let shared = Arc::new(Mutex::new(state));
         let _ = STATE.set(shared);
         log_line(&base_dir, &format!("Tray started. status={status:?}"));
+        register_hotkeys(hwnd);
         update_tray_icon()?;
         let _ = SetTimer(hwnd, TIMER_ID, TIMER_MS, None);
         if status == RecorderStatus::Stopped {
@@ -249,6 +277,7 @@ fn main() -> Result<()> {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        unregister_hotkeys(hwnd);
         cleanup_tray_icon();
         let _ = DestroyWindow(hwnd);
     }
@@ -449,6 +478,29 @@ fn cleanup_tray_icon() {
     }
 }
 
+fn register_hotkeys(hwnd: HWND) {
+    unsafe {
+        let none = HOT_KEY_MODIFIERS(0);
+        let _ = RegisterHotKey(hwnd, HOTKEY_F13, none, VK_F13);
+        let _ = RegisterHotKey(hwnd, HOTKEY_SHIFT_F13, MOD_SHIFT, VK_F13);
+        let _ = RegisterHotKey(hwnd, HOTKEY_ALT_F13, MOD_ALT, VK_F13);
+        let _ = RegisterHotKey(hwnd, HOTKEY_F14, none, VK_F14);
+        let _ = RegisterHotKey(hwnd, HOTKEY_SHIFT_F14, MOD_SHIFT, VK_F14);
+        let _ = RegisterHotKey(hwnd, HOTKEY_ALT_F14, MOD_ALT, VK_F14);
+    }
+}
+
+fn unregister_hotkeys(hwnd: HWND) {
+    unsafe {
+        let _ = UnregisterHotKey(hwnd, HOTKEY_F13);
+        let _ = UnregisterHotKey(hwnd, HOTKEY_SHIFT_F13);
+        let _ = UnregisterHotKey(hwnd, HOTKEY_ALT_F13);
+        let _ = UnregisterHotKey(hwnd, HOTKEY_F14);
+        let _ = UnregisterHotKey(hwnd, HOTKEY_SHIFT_F14);
+        let _ = UnregisterHotKey(hwnd, HOTKEY_ALT_F14);
+    }
+}
+
 fn tray_data(hwnd: HWND, icon: HICON, tooltip: &str) -> NOTIFYICONDATAW {
     let mut tip = [0u16; 128];
     let wide = to_wide(tooltip);
@@ -565,6 +617,19 @@ fn start_file_tapper(state: &mut AppState) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if let Some(types) = &state.file_tapper_event_types {
+        if !types.is_empty() {
+            cmd.arg("--event-types").arg(types.join(","));
+        }
+    }
+    if let Some(mode) = &state.file_tapper_ocr_keydown_mode {
+        if !mode.trim().is_empty() {
+            cmd.arg("--ocr-keydown-mode").arg(mode);
+        }
+    }
+    if let Some(offset) = state.file_tapper_frame_offset_ms {
+        cmd.arg("--frame-offset-ms").arg(offset.to_string());
+    }
     let child = cmd.spawn().context("Failed to start file tapper")?;
     state.file_tapper_child = Some(child);
     Ok(())
@@ -835,6 +900,11 @@ fn dispatch_action(action: TrayAction, show_dialog: bool, exit_after: bool) {
             let dir = state.data_dir.clone();
             let result = match action {
                 TrayAction::Start => start_session(&mut state),
+                TrayAction::StartInMode(mode) => {
+                    state.mode = mode;
+                    save_last_mode(&state.data_dir, mode);
+                    start_session(&mut state)
+                }
                 TrayAction::Pause => pause_session(&mut state),
                 TrayAction::Resume => resume_session(&mut state),
                 TrayAction::Stop => stop_session(&mut state),
@@ -901,6 +971,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             handle_menu_command(cmd);
             LRESULT(0)
         }
+        WM_HOTKEY => {
+            handle_hotkey(wparam.0 as i32);
+            LRESULT(0)
+        }
         WM_TIMER => {
             update_status();
             LRESULT(0)
@@ -926,6 +1000,55 @@ fn handle_left_click() {
         }
     } else {
         return;
+    };
+    dispatch_action(action, false, false);
+}
+
+fn action_for_mode_hotkey(state: &AppState, target_mode: Mode) -> TrayAction {
+    match state.status {
+        RecorderStatus::Stopped => TrayAction::StartInMode(target_mode),
+        RecorderStatus::Running => {
+            if state.mode == target_mode {
+                TrayAction::Pause
+            } else {
+                TrayAction::SetMode(target_mode)
+            }
+        }
+        RecorderStatus::Paused => {
+            if state.mode == target_mode {
+                TrayAction::Resume
+            } else {
+                TrayAction::SetMode(target_mode)
+            }
+        }
+    }
+}
+
+fn action_for_start_hotkey(state: &AppState, target_mode: Mode) -> TrayAction {
+    match state.status {
+        RecorderStatus::Stopped => TrayAction::StartInMode(target_mode),
+        _ => TrayAction::Stop,
+    }
+}
+
+fn handle_hotkey(id: i32) {
+    let Some(state) = STATE.get() else {
+        return;
+    };
+    let action = {
+        let state = state.lock().unwrap();
+        if state.busy {
+            return;
+        }
+        match id {
+            HOTKEY_F13 => action_for_mode_hotkey(&state, Mode::Full),
+            HOTKEY_SHIFT_F13 => action_for_mode_hotkey(&state, Mode::Low),
+            HOTKEY_ALT_F13 => action_for_mode_hotkey(&state, Mode::Mid),
+            HOTKEY_F14 => action_for_start_hotkey(&state, Mode::Full),
+            HOTKEY_SHIFT_F14 => action_for_start_hotkey(&state, Mode::Low),
+            HOTKEY_ALT_F14 => action_for_start_hotkey(&state, Mode::Mid),
+            _ => return,
+        }
     };
     dispatch_action(action, false, false);
 }
