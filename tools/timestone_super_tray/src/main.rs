@@ -644,19 +644,27 @@ fn get_latest_processing_summary(db_path: &Path, session_id: Option<&str>) -> Op
     let conn = Connection::open(db_path).ok()?;
     let mut stmt = if session_id.is_some() {
         conn.prepare(
-            "SELECT summary FROM processing_status WHERE session_id = ? ORDER BY updated_ms DESC LIMIT 1",
+            "SELECT summary, segment_id FROM processing_status WHERE session_id = ? ORDER BY updated_ms DESC LIMIT 1",
         )
         .ok()?
     } else {
-        conn.prepare("SELECT summary FROM processing_status ORDER BY updated_ms DESC LIMIT 1")
+        conn.prepare("SELECT summary, segment_id FROM processing_status ORDER BY updated_ms DESC LIMIT 1")
             .ok()?
     };
     if let Some(session_id) = session_id {
-        stmt.query_row(params![session_id], |row| row.get::<_, String>(0))
-            .ok()
+        stmt.query_row(params![session_id], |row| {
+            let summary: String = row.get(0)?;
+            let segment_id: i64 = row.get(1)?;
+            Ok(format!("{summary} | seg {segment_id}"))
+        })
+        .ok()
     } else {
-        stmt.query_row(params![], |row| row.get::<_, String>(0))
-            .ok()
+        stmt.query_row(params![], |row| {
+            let summary: String = row.get(0)?;
+            let segment_id: i64 = row.get(1)?;
+            Ok(format!("{summary} | seg {segment_id}"))
+        })
+        .ok()
     }
 }
 
@@ -1086,6 +1094,12 @@ fn dispatch_action(action: TrayAction, show_dialog: bool, exit_after: bool) {
             cleanup_tray_icon();
         } else {
             let _ = update_tray_icon();
+        }
+        if !exit_after && matches!(status, RecorderStatus::Paused | RecorderStatus::Stopped) {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(750));
+                let _ = update_tray_icon();
+            });
         }
         if show_dialog {
             let hwnd = STATE

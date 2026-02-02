@@ -94,6 +94,7 @@ struct ProcessingCounts {
     frames_total: i64,
     ocr_done: i64,
     ocr_total: i64,
+    ocr_empty: i64,
     audio_done: bool,
     transcribe_done: bool,
 }
@@ -161,6 +162,7 @@ fn main() -> Result<()> {
                 frames_total: 0,
                 ocr_done: 0,
                 ocr_total: 0,
+                ocr_empty: 0,
                 audio_done: false,
                 transcribe_done: false,
             };
@@ -239,6 +241,9 @@ fn main() -> Result<()> {
                     if args.delete_frames_after_ocr {
                         let _ = fs::remove_file(&frame_path);
                     }
+                } else {
+                    counts.ocr_empty += 1;
+                    log_line(args.verbose, &format!("OCR empty for event {}", event.id));
                 }
             }
             update_processing_status(
@@ -339,6 +344,14 @@ fn main() -> Result<()> {
                 "done",
                 &build_processing_summary(&counts),
             )?;
+            log_line(
+                args.verbose,
+                &format!(
+                    "Processing completed for segment {} ({})",
+                    segment.id,
+                    build_processing_summary(&counts)
+                ),
+            );
         }
         std::thread::sleep(Duration::from_millis(args.poll_ms));
     }
@@ -568,6 +581,9 @@ fn build_processing_summary(counts: &ProcessingCounts) -> String {
     }
     if counts.ocr_total > 0 {
         parts.push(format!("ocr {}/{}", counts.ocr_done, counts.ocr_total));
+    }
+    if counts.ocr_empty > 0 {
+        parts.push(format!("ocr empty {}", counts.ocr_empty));
     }
     if counts.audio_done {
         parts.push("audio ok".to_string());
