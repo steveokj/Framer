@@ -85,6 +85,12 @@ struct TrayConfig {
     icon_running: Option<String>,
     icon_paused: Option<String>,
     icon_stopped: Option<String>,
+    icon_running_full: Option<String>,
+    icon_running_mid: Option<String>,
+    icon_running_low: Option<String>,
+    icon_paused_full: Option<String>,
+    icon_paused_mid: Option<String>,
+    icon_paused_low: Option<String>,
     tooltip: Option<String>,
     recorder_exe: Option<String>,
     recorder_args: Option<Vec<String>>,
@@ -128,9 +134,13 @@ struct AppState {
     tooltip: String,
     command: RecorderCommand,
     data_dir: PathBuf,
-    icon_running: HICON,
-    icon_paused: HICON,
     icon_stopped: HICON,
+    icon_running_full: HICON,
+    icon_running_mid: HICON,
+    icon_running_low: HICON,
+    icon_paused_full: HICON,
+    icon_paused_mid: HICON,
+    icon_paused_low: HICON,
     status: RecorderStatus,
     busy: bool,
     mode: Mode,
@@ -209,6 +219,36 @@ fn main() -> Result<()> {
     let icon_running = load_icon(&base_dir, config.icon_running.as_deref())?;
     let icon_paused = load_icon(&base_dir, config.icon_paused.as_deref())?;
     let icon_stopped = load_icon(&base_dir, config.icon_stopped.as_deref())?;
+    let icon_running_full = load_icon_with_fallback(
+        &base_dir,
+        config.icon_running_full.as_deref(),
+        icon_running,
+    )?;
+    let icon_running_mid = load_icon_with_fallback(
+        &base_dir,
+        config.icon_running_mid.as_deref(),
+        icon_running,
+    )?;
+    let icon_running_low = load_icon_with_fallback(
+        &base_dir,
+        config.icon_running_low.as_deref(),
+        icon_running,
+    )?;
+    let icon_paused_full = load_icon_with_fallback(
+        &base_dir,
+        config.icon_paused_full.as_deref(),
+        icon_paused,
+    )?;
+    let icon_paused_mid = load_icon_with_fallback(
+        &base_dir,
+        config.icon_paused_mid.as_deref(),
+        icon_paused,
+    )?;
+    let icon_paused_low = load_icon_with_fallback(
+        &base_dir,
+        config.icon_paused_low.as_deref(),
+        icon_paused,
+    )?;
     let db_path = data_dir.join("timestone_events.sqlite3");
 
     unsafe {
@@ -241,9 +281,13 @@ fn main() -> Result<()> {
             tooltip,
             command,
             data_dir,
-            icon_running,
-            icon_paused,
             icon_stopped,
+            icon_running_full,
+            icon_running_mid,
+            icon_running_low,
+            icon_paused_full,
+            icon_paused_mid,
+            icon_paused_low,
             status,
             busy: false,
             mode,
@@ -399,6 +443,29 @@ fn load_icon(base_dir: &Path, icon_input: Option<&str>) -> Result<HICON> {
     Ok(fallback)
 }
 
+fn load_icon_with_fallback(base_dir: &Path, icon_input: Option<&str>, fallback: HICON) -> Result<HICON> {
+    if let Some(input) = icon_input {
+        if let Some(path) = resolve_icon_path(base_dir, input)? {
+            let wide = to_wide(path.to_string_lossy().as_ref());
+            if let Ok(icon) = unsafe {
+                LoadImageW(
+                    None,
+                    PCWSTR(wide.as_ptr()),
+                    IMAGE_ICON,
+                    0,
+                    0,
+                    LR_LOADFROMFILE | LR_DEFAULTSIZE,
+                )
+            } {
+                if !icon.is_invalid() {
+                    return Ok(HICON(icon.0));
+                }
+            }
+        }
+    }
+    Ok(fallback)
+}
+
 fn resolve_icon_path(base_dir: &Path, input: &str) -> Result<Option<PathBuf>> {
     if input.starts_with("http://") || input.starts_with("https://") {
         return Ok(download_icon(base_dir, input));
@@ -435,8 +502,16 @@ fn download_icon(base_dir: &Path, url: &str) -> Option<PathBuf> {
 fn update_tray_icon() -> Result<()> {
     let state = STATE.get().context("State not initialized")?.lock().unwrap();
     let icon = match state.status {
-        RecorderStatus::Running => state.icon_running,
-        RecorderStatus::Paused => state.icon_paused,
+        RecorderStatus::Running => match state.mode {
+            Mode::Full => state.icon_running_full,
+            Mode::Mid => state.icon_running_mid,
+            Mode::Low => state.icon_running_low,
+        },
+        RecorderStatus::Paused => match state.mode {
+            Mode::Full => state.icon_paused_full,
+            Mode::Mid => state.icon_paused_mid,
+            Mode::Low => state.icon_paused_low,
+        },
         RecorderStatus::Stopped => state.icon_stopped,
     };
     let status = match state.status {
