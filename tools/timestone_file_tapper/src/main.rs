@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ const DEFAULT_SCALE_WIDTH: u32 = 1280;
 const DEFAULT_JPEG_QUALITY: u8 = 4;
 const DEFAULT_POLL_MS: u64 = 1500;
 const DEFAULT_GRACE_MS: i64 = 2000;
+const DEFAULT_FRAME_OFFSET_MS: i64 = 200;
 const DEFAULT_TRANSCRIBE_MODEL: &str = "medium";
 const DEFAULT_OCR_LANG: &str = "eng";
 const AUDIO_RETRY_COUNT: usize = 3;
@@ -27,8 +29,11 @@ struct Args {
     jpeg_quality: u8,
     poll_ms: u64,
     grace_ms: i64,
+    frame_offset_ms: i64,
     transcribe_model: String,
     ocr_lang: String,
+    event_types: Option<HashSet<String>>,
+    ocr_keydown_mode: OcrKeydownMode,
     quiet_ffmpeg: bool,
     verbose: bool,
 }
@@ -46,6 +51,20 @@ struct RecordSegment {
 struct EventInfo {
     id: i64,
     ts_wall_ms: i64,
+    event_type: String,
+    window_key: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OcrKeydownMode {
+    GroupHead,
+    All,
+}
+
+impl Default for OcrKeydownMode {
+    fn default() -> Self {
+        OcrKeydownMode::GroupHead
+    }
 }
 
 #[derive(Clone)]
@@ -109,11 +128,21 @@ fn main() -> Result<()> {
                 continue;
             }
             let events = fetch_events_for_segment(&conn, &segment)?;
+            let keydown_heads = if args.ocr_keydown_mode == OcrKeydownMode::GroupHead {
+                keydown_group_heads(&events)
+            } else {
+                HashSet::new()
+            };
             for event in events {
+                if !event_type_allowed(&event.event_type, &args.event_types) {
+                    continue;
+                }
                 if event_frames_exist(&conn, event.id)? {
                     continue;
                 }
-                let offset_ms = offset_before_ms + event.ts_wall_ms.saturating_sub(segment.start_wall_ms);
+                let offset_ms = offset_before_ms
+                    + event.ts_wall_ms.saturating_sub(segment.start_wall_ms)
+                    + args.frame_offset_ms;
                 if offset_ms < 0 {
                     continue;
                 }
@@ -135,7 +164,11 @@ fn main() -> Result<()> {
                     args.quiet_ffmpeg,
                 )? {
                     insert_event_frame(&conn, event.id, &frame_path, event.ts_wall_ms)?;
-                    if !ocr_exists_for_frame(&conn, &frame_path)? {
+                    if event.event_type == "key_down"
+                        && (args.ocr_keydown_mode == OcrKeydownMode::All
+                            || keydown_heads.contains(&event.id))
+                        && !ocr_exists_for_frame(&conn, &frame_path)?
+                    {
                         log_line(args.verbose, &format!("Running OCR for event {}", event.id));
                         if let Some(ocr_text) = run_ocr_script(
                             &scripts_dir,
@@ -232,8 +265,11 @@ fn parse_args() -> Result<Args> {
         jpeg_quality: DEFAULT_JPEG_QUALITY,
         poll_ms: DEFAULT_POLL_MS,
         grace_ms: DEFAULT_GRACE_MS,
+        frame_offset_ms: DEFAULT_FRAME_OFFSET_MS,
         transcribe_model: DEFAULT_TRANSCRIBE_MODEL.to_string(),
         ocr_lang: DEFAULT_OCR_LANG.to_string(),
+        event_types: None,
+        ocr_keydown_mode: OcrKeydownMode::GroupHead,
         quiet_ffmpeg: false,
         verbose: false,
     };
@@ -278,6 +314,11 @@ fn parse_args() -> Result<Args> {
                     args.grace_ms = value.parse().unwrap_or(DEFAULT_GRACE_MS);
                 }
             }
+            "--frame-offset-ms" => {
+                if let Some(value) = iter.next() {
+                    args.frame_offset_ms = value.parse().unwrap_or(DEFAULT_FRAME_OFFSET_MS);
+                }
+            }
             "--transcribe-model" => {
                 if let Some(value) = iter.next() {
                     if !value.trim().is_empty() {
@@ -292,6 +333,19 @@ fn parse_args() -> Result<Args> {
                     }
                 }
             }
+            "--event-types" => {
+                if let Some(value) = iter.next() {
+                    let types = parse_event_types(&value);
+                    if !types.is_empty() {
+                        args.event_types = Some(types);
+                    }
+                }
+            }
+            "--ocr-keydown-mode" => {
+                if let Some(value) = iter.next() {
+                    args.ocr_keydown_mode = parse_ocr_keydown_mode(&value);
+                }
+            }
             "--quiet-ffmpeg" => {
                 args.quiet_ffmpeg = true;
             }
@@ -302,6 +356,21 @@ fn parse_args() -> Result<Args> {
         }
     }
     Ok(args)
+}
+
+fn parse_event_types(value: &str) -> HashSet<String> {
+    value
+        .split(',')
+        .map(|item| item.trim().to_lowercase())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn parse_ocr_keydown_mode(value: &str) -> OcrKeydownMode {
+    match value.trim().to_lowercase().as_str() {
+        "all" => OcrKeydownMode::All,
+        _ => OcrKeydownMode::GroupHead,
+    }
 }
 
 fn ensure_app_dir() -> Result<PathBuf> {
@@ -417,12 +486,20 @@ fn fetch_events_for_segment(conn: &Connection, segment: &RecordSegment) -> Resul
     let (start, end) = (segment.start_wall_ms, segment.end_wall_ms);
     if let Some(session_id) = segment.session_id.as_deref() {
         let mut stmt = conn.prepare(
-            "SELECT id, ts_wall_ms FROM events WHERE session_id = ? AND ts_wall_ms BETWEEN ? AND ? ORDER BY ts_wall_ms",
+            "SELECT id, ts_wall_ms, event_type, process_name, window_title, window_class
+             FROM events
+             WHERE session_id = ? AND ts_wall_ms BETWEEN ? AND ?
+             ORDER BY ts_wall_ms",
         )?;
         let rows = stmt.query_map(params![session_id, start, end], |row| {
+            let process_name: Option<String> = row.get(3)?;
+            let window_title: Option<String> = row.get(4)?;
+            let window_class: Option<String> = row.get(5)?;
             Ok(EventInfo {
                 id: row.get(0)?,
                 ts_wall_ms: row.get(1)?,
+                event_type: row.get(2)?,
+                window_key: build_window_key(process_name, window_title, window_class),
             })
         })?;
         for row in rows {
@@ -430,12 +507,20 @@ fn fetch_events_for_segment(conn: &Connection, segment: &RecordSegment) -> Resul
         }
     } else {
         let mut stmt = conn.prepare(
-            "SELECT id, ts_wall_ms FROM events WHERE ts_wall_ms BETWEEN ? AND ? ORDER BY ts_wall_ms",
+            "SELECT id, ts_wall_ms, event_type, process_name, window_title, window_class
+             FROM events
+             WHERE ts_wall_ms BETWEEN ? AND ?
+             ORDER BY ts_wall_ms",
         )?;
         let rows = stmt.query_map(params![start, end], |row| {
+            let process_name: Option<String> = row.get(3)?;
+            let window_title: Option<String> = row.get(4)?;
+            let window_class: Option<String> = row.get(5)?;
             Ok(EventInfo {
                 id: row.get(0)?,
                 ts_wall_ms: row.get(1)?,
+                event_type: row.get(2)?,
+                window_key: build_window_key(process_name, window_title, window_class),
             })
         })?;
         for row in rows {
@@ -443,6 +528,44 @@ fn fetch_events_for_segment(conn: &Connection, segment: &RecordSegment) -> Resul
         }
     }
     Ok(events)
+}
+
+fn build_window_key(
+    process_name: Option<String>,
+    window_title: Option<String>,
+    window_class: Option<String>,
+) -> String {
+    let process = process_name.unwrap_or_default();
+    let title = window_title.unwrap_or_default();
+    let class = window_class.unwrap_or_default();
+    format!("{process}|{title}|{class}")
+}
+
+fn keydown_group_heads(events: &[EventInfo]) -> HashSet<i64> {
+    let mut heads = HashSet::new();
+    for (idx, event) in events.iter().enumerate() {
+        if event.event_type != "key_down" {
+            continue;
+        }
+        let next = events.get(idx + 1);
+        let is_end = match next {
+            None => true,
+            Some(next_event) => {
+                next_event.event_type != "key_down" || next_event.window_key != event.window_key
+            }
+        };
+        if is_end {
+            heads.insert(event.id);
+        }
+    }
+    heads
+}
+
+fn event_type_allowed(event_type: &str, filter: &Option<HashSet<String>>) -> bool {
+    match filter {
+        None => true,
+        Some(set) => set.contains(&event_type.to_lowercase()),
+    }
 }
 
 fn event_frames_exist(conn: &Connection, event_id: i64) -> Result<bool> {
