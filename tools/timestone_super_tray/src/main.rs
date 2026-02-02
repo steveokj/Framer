@@ -1043,6 +1043,7 @@ fn dispatch_action(action: TrayAction, show_dialog: bool, exit_after: bool) {
     let Some(state) = STATE.get() else {
         return;
     };
+    let skip_tray_update = matches!(action, TrayAction::Exit);
     {
         let mut state = state.lock().unwrap();
         if state.busy {
@@ -1051,7 +1052,9 @@ fn dispatch_action(action: TrayAction, show_dialog: bool, exit_after: bool) {
         }
         state.busy = true;
     }
-    let _ = update_tray_icon();
+    if !skip_tray_update {
+        let _ = update_tray_icon();
+    }
     let state = state.clone();
     std::thread::spawn(move || {
         let mut status = RecorderStatus::Stopped;
@@ -1079,7 +1082,11 @@ fn dispatch_action(action: TrayAction, show_dialog: bool, exit_after: bool) {
             state.busy = false;
             log_line(&data_dir, &format!("status updated: {status:?}"));
         }
-        let _ = update_tray_icon();
+        if exit_after {
+            cleanup_tray_icon();
+        } else {
+            let _ = update_tray_icon();
+        }
         if show_dialog {
             let hwnd = STATE
                 .get()
@@ -1262,7 +1269,6 @@ fn handle_menu_command(cmd: u16) {
                     return;
                 }
             }
-            cleanup_tray_icon();
             dispatch_action(TrayAction::Exit, false, true);
         }
         _ => {}
