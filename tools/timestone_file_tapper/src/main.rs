@@ -14,6 +14,7 @@ const DEFAULT_JPEG_QUALITY: u8 = 4;
 const DEFAULT_POLL_MS: u64 = 1500;
 const DEFAULT_GRACE_MS: i64 = 2000;
 const DEFAULT_FRAME_OFFSET_MS: i64 = 200;
+const DEFAULT_FFMPEG_TIMEOUT_SEC: u64 = 10;
 const DEFAULT_TRANSCRIBE_MODEL: &str = "medium";
 const DEFAULT_OCR_LANG: &str = "eng";
 const AUDIO_RETRY_COUNT: usize = 3;
@@ -30,6 +31,8 @@ struct Args {
     poll_ms: u64,
     grace_ms: i64,
     frame_offset_ms: i64,
+    ffmpeg_timeout_sec: u64,
+    fast_seek: bool,
     transcribe_model: String,
     ocr_lang: String,
     event_types: Option<HashSet<String>>,
@@ -184,6 +187,8 @@ fn main() -> Result<()> {
                     &frame_path,
                     args.scale_width,
                     args.jpeg_quality,
+                    args.ffmpeg_timeout_sec,
+                    args.fast_seek,
                     args.verbose,
                     args.quiet_ffmpeg,
                 )? {
@@ -326,6 +331,8 @@ fn parse_args() -> Result<Args> {
         poll_ms: DEFAULT_POLL_MS,
         grace_ms: DEFAULT_GRACE_MS,
         frame_offset_ms: DEFAULT_FRAME_OFFSET_MS,
+        ffmpeg_timeout_sec: DEFAULT_FFMPEG_TIMEOUT_SEC,
+        fast_seek: true,
         transcribe_model: DEFAULT_TRANSCRIBE_MODEL.to_string(),
         ocr_lang: DEFAULT_OCR_LANG.to_string(),
         event_types: None,
@@ -378,6 +385,14 @@ fn parse_args() -> Result<Args> {
                 if let Some(value) = iter.next() {
                     args.frame_offset_ms = value.parse().unwrap_or(DEFAULT_FRAME_OFFSET_MS);
                 }
+            }
+            "--ffmpeg-timeout" => {
+                if let Some(value) = iter.next() {
+                    args.ffmpeg_timeout_sec = value.parse().unwrap_or(DEFAULT_FFMPEG_TIMEOUT_SEC);
+                }
+            }
+            "--no-fast-seek" => {
+                args.fast_seek = false;
             }
             "--transcribe-model" => {
                 if let Some(value) = iter.next() {
@@ -695,6 +710,8 @@ fn extract_frame(
     dest_path: &Path,
     scale_width: u32,
     quality: u8,
+    timeout_sec: u64,
+    fast_seek: bool,
     verbose: bool,
     quiet_ffmpeg: bool,
 ) -> Result<bool> {
@@ -709,14 +726,13 @@ fn extract_frame(
     } else {
         "error"
     };
-    cmd.arg("-hide_banner")
-        .arg("-loglevel")
-        .arg(log_level)
-        .arg("-i")
-        .arg(obs_path)
-        .arg("-ss")
-        .arg(offset_arg)
-        .arg("-update")
+    cmd.arg("-hide_banner").arg("-loglevel").arg(log_level);
+    if fast_seek {
+        cmd.arg("-ss").arg(&offset_arg).arg("-i").arg(obs_path);
+    } else {
+        cmd.arg("-i").arg(obs_path).arg("-ss").arg(&offset_arg);
+    }
+    cmd.arg("-update")
         .arg("1")
         .arg("-frames:v")
         .arg("1")
@@ -732,8 +748,20 @@ fn extract_frame(
         } else {
             Stdio::null()
         });
-    let status = cmd.status().context("Failed to run ffmpeg for frame")?;
-    Ok(status.success())
+    let mut child = cmd.spawn().context("Failed to run ffmpeg for frame")?;
+    let timeout = Duration::from_secs(timeout_sec.max(1));
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().context("Failed to poll ffmpeg")? {
+            return Ok(status.success());
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn insert_event_frame(conn: &Connection, event_id: i64, frame_path: &Path, frame_wall_ms: i64) -> Result<()> {
