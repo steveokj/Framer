@@ -3,6 +3,8 @@ use rusqlite::{params, Connection};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,6 +19,7 @@ const DEFAULT_FRAME_OFFSET_MS: i64 = 200;
 const DEFAULT_FFMPEG_TIMEOUT_SEC: u64 = 10;
 const DEFAULT_TRANSCRIBE_MODEL: &str = "medium";
 const DEFAULT_OCR_LANG: &str = "eng";
+const FILE_TAPPER_LOG_FILE: &str = "file_tapper.log";
 const AUDIO_RETRY_COUNT: usize = 3;
 const AUDIO_RETRY_DELAY_MS: u64 = 800;
 
@@ -1061,8 +1064,27 @@ fn log_line(verbose: bool, message: &str) {
     if verbose {
         println!("[timestone_file_tapper] {message}");
     }
+    write_log_line(message);
 }
 
 fn log_error(message: &str) {
     eprintln!("[timestone_file_tapper] {message}");
+    write_log_line(message);
+}
+
+fn write_log_line(message: &str) {
+    let base_dir = match ensure_app_dir() {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+    let log_dir = base_dir.join("logs");
+    let path = log_dir.join(FILE_TAPPER_LOG_FILE);
+    let _ = fs::create_dir_all(&log_dir);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let _ = writeln!(file, "[{}] {}", ts, message);
+    }
 }
