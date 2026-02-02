@@ -21,7 +21,7 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_SHIFT,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_NOREPEAT, MOD_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
@@ -554,14 +554,41 @@ fn cleanup_tray_icon() {
 }
 
 fn register_hotkeys(hwnd: HWND) {
-    unsafe {
-        let none = HOT_KEY_MODIFIERS(0);
-        let _ = RegisterHotKey(hwnd, HOTKEY_F13, none, VK_F13);
-        let _ = RegisterHotKey(hwnd, HOTKEY_SHIFT_F13, MOD_SHIFT, VK_F13);
-        let _ = RegisterHotKey(hwnd, HOTKEY_ALT_F13, MOD_ALT, VK_F13);
-        let _ = RegisterHotKey(hwnd, HOTKEY_F14, none, VK_F14);
-        let _ = RegisterHotKey(hwnd, HOTKEY_SHIFT_F14, MOD_SHIFT, VK_F14);
-        let _ = RegisterHotKey(hwnd, HOTKEY_ALT_F14, MOD_ALT, VK_F14);
+    let none = MOD_NOREPEAT;
+    let with_shift = MOD_NOREPEAT | MOD_SHIFT;
+    let with_alt = MOD_NOREPEAT | MOD_ALT;
+    register_hotkey(hwnd, HOTKEY_F13, none, VK_F13, "F13");
+    register_hotkey(hwnd, HOTKEY_SHIFT_F13, with_shift, VK_F13, "Shift+F13");
+    register_hotkey(hwnd, HOTKEY_ALT_F13, with_alt, VK_F13, "Alt+F13");
+    register_hotkey(hwnd, HOTKEY_F14, none, VK_F14, "F14");
+    register_hotkey(hwnd, HOTKEY_SHIFT_F14, with_shift, VK_F14, "Shift+F14");
+    register_hotkey(hwnd, HOTKEY_ALT_F14, with_alt, VK_F14, "Alt+F14");
+}
+
+fn register_hotkey(hwnd: HWND, id: i32, mods: HOT_KEY_MODIFIERS, vk: u32, label: &str) {
+    let result = unsafe { RegisterHotKey(hwnd, id, mods, vk) };
+    let Some(state) = STATE.get() else {
+        return;
+    };
+    let data_dir = state.lock().unwrap().data_dir.clone();
+    match result {
+        Ok(_) => {
+            log_line(
+                &data_dir,
+                &format!("hotkey registered: {label} mods={} vk={}", mods.0, vk),
+            );
+        }
+        Err(err) => {
+            log_line(
+                &data_dir,
+                &format!(
+                    "hotkey failed: {label} mods={} vk={} err={}",
+                    mods.0,
+                    vk,
+                    err.code().0
+                ),
+            );
+        }
     }
 }
 
@@ -622,7 +649,7 @@ fn run_command_async(command: &RecorderCommand, action: &str) -> Result<()> {
     Ok(())
 }
 
-fn send_obs_command(state: &AppState, action: &str) -> Result<()> {
+fn send_obs_command(state: &AppState, action: &str) -> Result<bool> {
     let mut cmd = Command::new(&state.obs_ws_exe);
     cmd.arg("--host")
         .arg(&state.obs_host)
@@ -636,9 +663,21 @@ fn send_obs_command(state: &AppState, action: &str) -> Result<()> {
         .stderr(Stdio::null());
     if let Some(pass) = &state.obs_password {
         cmd.env("OBS_WS_PASSWORD", pass);
+    } else {
+        log_line(
+            &state.data_dir,
+            &format!("OBS password not set. Sending {action} without password."),
+        );
     }
-    let _ = cmd.status();
-    Ok(())
+    let status = cmd.status().context("Failed to run obs_ws command")?;
+    if !status.success() {
+        log_line(
+            &state.data_dir,
+            &format!("OBS command {action} failed with status {status}"),
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn start_obs_listener(state: &mut AppState) -> Result<()> {
@@ -866,9 +905,12 @@ fn start_session(state: &mut AppState) -> Result<()> {
     }
     if state.mode == Mode::Full {
         start_obs_listener(state)?;
-        let _ = send_obs_command(state, "start");
-        state.obs_started = true;
-        let _ = start_file_tapper(state);
+        if let Ok(started) = send_obs_command(state, "start") {
+            state.obs_started = started;
+            if started {
+                let _ = start_file_tapper(state);
+            }
+        }
     }
     state.status = RecorderStatus::Running;
     Ok(())
@@ -928,10 +970,13 @@ fn set_mode(state: &mut AppState, mode: Mode) -> Result<()> {
             if state.obs_started {
                 let _ = send_obs_command(state, "resume");
             } else {
-                let _ = send_obs_command(state, "start");
-                state.obs_started = true;
+                if let Ok(started) = send_obs_command(state, "start") {
+                    state.obs_started = started;
+                }
             }
-            let _ = start_file_tapper(state);
+            if state.obs_started {
+                let _ = start_file_tapper(state);
+            }
         }
         Mode::Mid | Mode::Low => {
             if state.obs_started {
@@ -1177,6 +1222,7 @@ fn handle_menu_command(cmd: u16) {
                     return;
                 }
             }
+            cleanup_tray_icon();
             dispatch_action(TrayAction::Exit, false, true);
         }
         _ => {}
