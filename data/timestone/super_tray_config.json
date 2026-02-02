@@ -1,0 +1,23 @@
+{
+  "icon_running": null,
+  "icon_paused": null,
+  "icon_stopped": null,
+  "icon_running_full": null,
+  "icon_running_mid": null,
+  "icon_running_low": null,
+  "icon_paused_full": null,
+  "icon_paused_mid": null,
+  "icon_paused_low": null,
+  "tooltip": null,
+  "recorder_exe": null,
+  "recorder_args": null,
+  "obs_ws_exe": null,
+  "file_tapper_exe": null,
+  "obs_host": "192.168.2.34",
+  "obs_port": 4455,
+  "obs_password": "eY6lvul6LBavdTtS",
+  "last_mode": "full",
+  "file_tapper_event_types": null,
+  "file_tapper_ocr_keydown_mode": "group_head",
+  "file_tapper_frame_offset_ms": 200
+}
