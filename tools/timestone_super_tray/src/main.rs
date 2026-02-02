@@ -1039,9 +1039,12 @@ fn update_status() {
     if let Some(state) = STATE.get() {
         let mut state = state.lock().unwrap();
         let status = get_status_from_files(&state.data_dir);
-        if status != state.status {
+        let changed = status != state.status;
+        if changed {
             state.status = status;
             log_line(&state.data_dir, &format!("status poll changed: {status:?}"));
+        }
+        if changed || matches!(status, RecorderStatus::Paused | RecorderStatus::Stopped) {
             let _ = update_tray_icon();
         }
     }
