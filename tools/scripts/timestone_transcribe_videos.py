@@ -98,7 +98,12 @@ def ffprobe_duration(path: str) -> Optional[float]:
         path,
     ]
     try:
-        out = subprocess.run(args, capture_output=True, text=True, check=False)
+        if os.name == "nt":
+            out = subprocess.run(
+                args, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        else:
+            out = subprocess.run(args, capture_output=True, text=True, check=False)
     except Exception:
         return None
     if out.returncode != 0:
