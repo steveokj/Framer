@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional
 
 
@@ -42,6 +43,22 @@ def ensure_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE transcription_runs ADD COLUMN last_update_ms INTEGER")
         conn.commit()
 
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def mark_stale_runs(conn: sqlite3.Connection, stale_ms: int) -> None:
+    cutoff = now_ms() - stale_ms
+    conn.execute(
+        """
+        UPDATE transcription_runs
+        SET status = 'error', error = 'stale run (no updates)', ended_ms = ?, last_update_ms = ?
+        WHERE status = 'running' AND last_update_ms IS NOT NULL AND last_update_ms < ?
+        """,
+        (now_ms(), now_ms(), cutoff),
+    )
+    conn.commit()
+
 
 def latest_run_id(conn: sqlite3.Connection, video_path: str, model: Optional[str]) -> Optional[int]:
     if model:
@@ -68,6 +85,7 @@ def latest_run_id(conn: sqlite3.Connection, video_path: str, model: Optional[str
 
 
 def status_for_videos(conn: sqlite3.Connection, videos: List[str], model: Optional[str]) -> List[Dict[str, Any]]:
+    mark_stale_runs(conn, 10 * 60 * 1000)
     results = []
     for path in videos:
         run_id = latest_run_id(conn, path, model)

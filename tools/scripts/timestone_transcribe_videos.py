@@ -3,8 +3,25 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import time
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
+
+
+def add_dll_search_paths() -> None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+    for candidate in [repo_root, os.environ.get("CUDA_PATH"), os.environ.get("CUDNN_PATH")]:
+        if not candidate:
+            continue
+        try:
+            if os.path.isdir(candidate):
+                os.add_dll_directory(candidate)
+        except Exception:
+            continue
+
+
+add_dll_search_paths()
 
 from faster_whisper import WhisperModel
 
@@ -12,6 +29,13 @@ from faster_whisper import WhisperModel
 def now_ms() -> int:
     return int(time.time() * 1000)
 
+def hard_exit(code: int) -> None:
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(code)
 
 def ensure_db(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -157,7 +181,7 @@ def insert_segment(
 
 
 def transcribe_video(
-    model: WhisperModel,
+    model: Any,
     conn: sqlite3.Connection,
     video_path: str,
     model_name: str,
@@ -225,7 +249,7 @@ def main() -> int:
         results.append({"video": video_path, "run_id": run_id, "segments": segments_saved})
 
     print(json.dumps({"ok": True, "results": results}))
-    return 0
+    hard_exit(0)
 
 
 if __name__ == "__main__":
