@@ -76,16 +76,16 @@ async function writeCache(cache: CacheFile): Promise<void> {
 
 function resolvePython(repoRoot: string): string {
   const pythonw = process.env.PYTHONW;
+  const venvPythonw = path.join(repoRoot, ".venv", "Scripts", "pythonw.exe");
+  if (fsSync.existsSync(venvPythonw)) {
+    return venvPythonw;
+  }
   if (pythonw && pythonw.trim().length > 0) {
     return pythonw.trim();
   }
   const python = process.env.PYTHON;
   if (python && python.trim().length > 0) {
     return python.trim();
-  }
-  const venvPythonw = path.join(repoRoot, ".venv", "Scripts", "pythonw.exe");
-  if (fsSync.existsSync(venvPythonw)) {
-    return venvPythonw;
   }
   const venvPython = path.join(repoRoot, ".venv", "Scripts", "python.exe");
   if (fsSync.existsSync(venvPython)) {
