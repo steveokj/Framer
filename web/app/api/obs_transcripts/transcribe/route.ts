@@ -74,7 +74,11 @@ export async function POST(req: NextRequest) {
   const logStream = fsSync.createWriteStream(logPath, { flags: "a" });
   logStream.write(`[transcripts] ${new Date().toISOString()} starting ${videos.length} video(s)\n`);
 
-  const child = spawn(py, args, { stdio: ["ignore", "pipe", "pipe"], detached: true });
+  const child = spawn(py, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+    windowsHide: true,
+  });
   child.stdout.on("data", (d) => logStream.write(d));
   child.stderr.on("data", (d) => logStream.write(d));
   child.on("close", (code) => {

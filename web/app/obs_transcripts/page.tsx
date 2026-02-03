@@ -22,6 +22,7 @@ type TranscriptStatus = {
   started_ms?: number | null;
   ended_ms?: number | null;
   error?: string | null;
+  last_update_ms?: number | null;
 };
 
 const DEFAULT_OBS_FOLDER = "C:\\Users\\steve\\Desktop\\Desktop II\\OBS";
@@ -62,6 +63,10 @@ export default function ObsTranscriptsPage() {
   const [lastChecked, setLastChecked] = useState<number | null>(null);
   const [model, setModel] = useState("medium");
   const [runningCount, setRunningCount] = useState(0);
+  const [missingDurations, setMissingDurations] = useState(0);
+  const [logOpen, setLogOpen] = useState(false);
+  const [logText, setLogText] = useState("");
+  const [logLoading, setLogLoading] = useState(false);
   const pickerRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -95,7 +100,7 @@ export default function ObsTranscriptsPage() {
       const res = await fetch("/api/obs_videos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folderPath: obsFolder }),
+        body: JSON.stringify({ folderPath: obsFolder, fastScan: true, hydrate: true }),
       });
       if (!res.ok) {
         const payload = await res.json().catch(() => ({}));
@@ -103,6 +108,7 @@ export default function ObsTranscriptsPage() {
       }
       const data = await res.json();
       const list = Array.isArray(data?.videos) ? (data.videos as ObsVideo[]) : [];
+      setMissingDurations(Number(data?.missing_durations) || 0);
       list.sort((a, b) => (b.start_ms || 0) - (a.start_ms || 0));
       setVideos(list);
     } catch (err) {
@@ -158,14 +164,17 @@ export default function ObsTranscriptsPage() {
   }, [loadStatus]);
 
   useEffect(() => {
-    if (runningCount <= 0) {
-      return;
-    }
-    const id = window.setInterval(() => {
-      loadStatus();
-    }, 5000);
-    return () => window.clearInterval(id);
-  }, [runningCount, loadStatus]);
+    const source = new EventSource("/api/obs_transcripts/stream");
+    const onDb = () => loadStatus();
+    const onCache = () => loadVideos();
+    source.addEventListener("db", onDb);
+    source.addEventListener("cache", onCache);
+    return () => {
+      source.removeEventListener("db", onDb);
+      source.removeEventListener("cache", onCache);
+      source.close();
+    };
+  }, [loadStatus, loadVideos]);
 
   const selectedList = useMemo(() => Array.from(selected), [selected]);
 
@@ -227,6 +236,23 @@ export default function ObsTranscriptsPage() {
     }
   }, [selectedList, model, loadStatus]);
 
+  const fetchLog = useCallback(async () => {
+    setLogLoading(true);
+    try {
+      const res = await fetch("/api/obs_transcripts/log");
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to load log (${res.status})`);
+      }
+      const data = await res.json();
+      setLogText(typeof data?.log === "string" ? data.log : "");
+    } catch (err) {
+      setLogText(err instanceof Error ? err.message : "Failed to load log");
+    } finally {
+      setLogLoading(false);
+    }
+  }, []);
+
   const untranscribedCount = useMemo(() => {
     let count = 0;
     videos.forEach((video) => {
@@ -249,23 +275,34 @@ export default function ObsTranscriptsPage() {
       }}
     >
       <div style={{ maxWidth: 1400, margin: "0 auto", display: "grid", gap: 24 }}>
-        <header style={{ display: "grid", gap: 8 }}>
-          <h1 style={{ fontSize: 32, margin: 0 }}>OBS Transcript Manager</h1>
-          <p style={{ margin: 0, color: "#94a3b8" }}>
-            Select OBS recordings to transcribe, track progress, and jump into the transcript player.
-          </p>
-        </header>
-
-        <section
+        <div
           style={{
-            background: "rgba(15, 23, 42, 0.7)",
-            borderRadius: 14,
-            padding: 20,
-            display: "grid",
-            gap: 16,
-            border: "1px solid rgba(30, 41, 59, 0.8)",
+            position: "sticky",
+            top: 0,
+            zIndex: 20,
+            paddingBottom: 12,
+            background: "linear-gradient(180deg, rgba(7, 11, 22, 0.98) 0%, rgba(7, 11, 22, 0.9) 100%)",
+            borderBottom: "1px solid rgba(30, 41, 59, 0.8)",
           }}
         >
+          <header style={{ display: "grid", gap: 8, paddingTop: 12 }}>
+            <h1 style={{ fontSize: 32, margin: 0 }}>OBS Transcript Manager</h1>
+            <p style={{ margin: 0, color: "#94a3b8" }}>
+              Select OBS recordings to transcribe, track progress, and jump into the transcript player.
+            </p>
+          </header>
+
+          <section
+            style={{
+              marginTop: 16,
+              background: "rgba(15, 23, 42, 0.7)",
+              borderRadius: 14,
+              padding: 20,
+              display: "grid",
+              gap: 16,
+              border: "1px solid rgba(30, 41, 59, 0.8)",
+            }}
+          >
           <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
             <label style={{ flex: "1 1 320px", display: "grid", gap: 6 }}>
               <span style={{ color: "#cbd5f5" }}>OBS folder</span>
@@ -368,6 +405,7 @@ export default function ObsTranscriptsPage() {
             <span>Selected: {selected.size}</span>
             <span>Untranscribed: {untranscribedCount}</span>
             {runningCount > 0 ? <span>Running: {runningCount}</span> : null}
+            {missingDurations > 0 ? <span>Durations pending: {missingDurations}</span> : null}
             <button
               type="button"
               onClick={loadStatus}
@@ -382,9 +420,27 @@ export default function ObsTranscriptsPage() {
             >
               Refresh status
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                setLogOpen(true);
+                fetchLog();
+              }}
+              style={{
+                padding: "4px 10px",
+                borderRadius: 999,
+                border: "1px solid #1e293b",
+                background: "#0f172a",
+                color: "#cbd5f5",
+                cursor: "pointer",
+              }}
+            >
+              View log
+            </button>
           </div>
           {error ? <div style={{ color: "#fca5a5" }}>{error}</div> : null}
         </section>
+        </div>
 
         <section style={{ display: "grid", gap: 12 }}>
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
@@ -414,6 +470,8 @@ export default function ObsTranscriptsPage() {
                 const isChecked = selected.has(video.path);
                 const isRunning = status?.status === "running";
                 const progress = Math.min(Math.max(status?.progress || 0, 0), 1);
+                const lastUpdate = status?.last_update_ms || null;
+                const isStuck = isRunning && lastUpdate ? Date.now() - lastUpdate > 5 * 60 * 1000 : false;
                 return (
                   <div
                     key={video.path}
@@ -462,6 +520,8 @@ export default function ObsTranscriptsPage() {
                       <span>Duration: {formatDuration(video.duration_s)}</span>
                       <span>Status: {status?.status || "idle"}</span>
                       {status?.model ? <span>Model: {status.model}</span> : null}
+                      {lastUpdate ? <span>Last update: {formatDate(lastUpdate)}</span> : null}
+                      {isStuck ? <span style={{ color: "#fca5a5" }}>Stuck?</span> : null}
                     </div>
                     {isRunning ? (
                       <div style={{ display: "grid", gap: 6 }}>
@@ -492,6 +552,84 @@ export default function ObsTranscriptsPage() {
             )}
           </div>
         </section>
+
+        {logOpen ? (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(2, 6, 23, 0.75)",
+              display: "grid",
+              placeItems: "center",
+              zIndex: 50,
+            }}
+            onClick={() => setLogOpen(false)}
+          >
+            <div
+              style={{
+                width: "min(1000px, 92vw)",
+                maxHeight: "80vh",
+                background: "#0b1120",
+                borderRadius: 16,
+                border: "1px solid rgba(30, 41, 59, 0.9)",
+                padding: 16,
+                display: "grid",
+                gap: 12,
+              }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <strong>Transcription log</strong>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={fetchLog}
+                    style={{
+                      padding: "6px 10px",
+                      borderRadius: 8,
+                      border: "1px solid #1e293b",
+                      background: "#0f172a",
+                      color: "#e2e8f0",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLogOpen(false)}
+                    style={{
+                      padding: "6px 10px",
+                      borderRadius: 8,
+                      border: "1px solid #1e293b",
+                      background: "#0f172a",
+                      color: "#e2e8f0",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+              <div
+                style={{
+                  background: "#020617",
+                  borderRadius: 12,
+                  border: "1px solid rgba(30, 41, 59, 0.8)",
+                  padding: 12,
+                  fontFamily: "Consolas, 'SFMono-Regular', Menlo, monospace",
+                  fontSize: 12,
+                  color: "#e2e8f0",
+                  whiteSpace: "pre-wrap",
+                  overflow: "auto",
+                  maxHeight: "60vh",
+                }}
+              >
+                {logLoading ? "Loading..." : logText || "No log output."}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

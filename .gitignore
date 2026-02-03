@@ -111,3 +111,4 @@ tools/timestone_file_tapper/target/
 
 # Local recorder config
 data/timestone/config.json
+data/timestone/obs_video_cache.json

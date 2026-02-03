@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { spawn } from "child_process";
 import path from "path";
 import fs from "fs/promises";
+import fsSync from "fs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,6 +19,20 @@ type VideoEntry = {
 };
 
 const VIDEO_EXTS = new Set([".mkv", ".mp4", ".mov", ".webm"]);
+const CACHE_PATH = path.join(process.cwd(), "..", "data", "timestone", "obs_video_cache.json");
+const CACHE_VERSION = 1;
+
+type CacheEntry = {
+  size: number;
+  mtime_ms: number;
+  duration_s: number | null;
+  updated_ms: number;
+};
+
+type CacheFile = {
+  version: number;
+  items: Record<string, CacheEntry>;
+};
 
 function resolveFfprobe(): string {
   if (process.env.FFPROBE && process.env.FFPROBE.trim().length > 0) {
@@ -35,6 +50,27 @@ function parseObsStartMsFromName(name: string): number | null {
   const iso = `${match[1]}T${match[2]}:${match[3]}:${match[4]}`;
   const parsed = Date.parse(iso);
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+function readCache(): CacheFile {
+  try {
+    if (!fsSync.existsSync(CACHE_PATH)) {
+      return { version: CACHE_VERSION, items: {} };
+    }
+    const raw = fsSync.readFileSync(CACHE_PATH, "utf8");
+    const parsed = JSON.parse(raw) as CacheFile;
+    if (!parsed || parsed.version !== CACHE_VERSION || !parsed.items) {
+      return { version: CACHE_VERSION, items: {} };
+    }
+    return parsed;
+  } catch {
+    return { version: CACHE_VERSION, items: {} };
+  }
+}
+
+async function writeCache(cache: CacheFile): Promise<void> {
+  await fs.mkdir(path.dirname(CACHE_PATH), { recursive: true });
+  await fs.writeFile(CACHE_PATH, JSON.stringify(cache));
 }
 
 async function ffprobeDuration(filePath: string): Promise<number | null> {
@@ -91,6 +127,8 @@ export async function POST(req: NextRequest) {
   const maxFiles = Number.isFinite(maxFilesRaw) ? Math.max(1, Math.floor(maxFilesRaw)) : null;
   const rangeStartMs = Number.isFinite(body?.startMs) ? Number(body.startMs) : null;
   const rangeEndMs = Number.isFinite(body?.endMs) ? Number(body.endMs) : null;
+  const fastScan = body?.fastScan === true;
+  const hydrate = body?.hydrate === true;
 
   if (!folderPath) {
     return new Response(JSON.stringify({ error: "folderPath is required" }), {
@@ -117,6 +155,9 @@ export async function POST(req: NextRequest) {
   const totalCount = files.length;
   const limited = maxFiles ? files.slice(0, maxFiles) : files;
   const results: VideoEntry[] = [];
+  const cache = readCache();
+  let cacheDirty = false;
+  let missingDurations = 0;
 
   for (const name of limited) {
     const fullPath = path.join(folderPath, name);
@@ -143,7 +184,24 @@ export async function POST(req: NextRequest) {
         continue;
       }
     }
-    const duration = await ffprobeDuration(fullPath);
+    const statSize = stat ? stat.size : 0;
+    const statMtime = stat ? stat.mtimeMs : 0;
+    const cached = cache.items[fullPath];
+    let duration: number | null = null;
+    if (cached && cached.size === statSize && cached.mtime_ms === statMtime) {
+      duration = cached.duration_s;
+    } else if (!fastScan) {
+      duration = await ffprobeDuration(fullPath);
+      cache.items[fullPath] = {
+        size: statSize,
+        mtime_ms: statMtime,
+        duration_s: duration,
+        updated_ms: Date.now(),
+      };
+      cacheDirty = true;
+    } else {
+      missingDurations += 1;
+    }
     const fileEndMs = fileStartMs && duration ? fileStartMs + duration * 1000 : null;
     if (rangeStartMs != null && fileEndMs != null && fileEndMs < rangeStartMs) {
       continue;
@@ -169,8 +227,27 @@ export async function POST(req: NextRequest) {
     return aStart - bStart;
   });
 
+  if (cacheDirty) {
+    await writeCache(cache);
+  }
+
+  if (hydrate && fastScan && missingDurations > 0) {
+    const repoRoot = path.join(process.cwd(), "..");
+    const scriptPath = path.join(repoRoot, "tools", "scripts", "obs_video_probe.py");
+    const py = process.env.PYTHON || "python";
+    const args = [scriptPath, "--folder", folderPath, "--cache", CACHE_PATH];
+    const child = spawn(py, args, { detached: true, stdio: "ignore", windowsHide: true });
+    child.unref();
+  }
+
   return new Response(
-    JSON.stringify({ videos: results, folder: folderPath, total_count: totalCount, filtered_count: results.length }),
+    JSON.stringify({
+      videos: results,
+      folder: folderPath,
+      total_count: totalCount,
+      filtered_count: results.length,
+      missing_durations: missingDurations,
+    }),
     {
       headers: { "Content-Type": "application/json" },
     },

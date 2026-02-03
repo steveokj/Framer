@@ -17,7 +17,8 @@ def ensure_db(conn: sqlite3.Connection) -> None:
             duration_s REAL,
             started_ms INTEGER,
             ended_ms INTEGER,
-            error TEXT
+            error TEXT,
+            last_update_ms INTEGER
         )
         """
     )
@@ -36,6 +37,10 @@ def ensure_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(transcription_runs)").fetchall()]
+    if "last_update_ms" not in cols:
+        conn.execute("ALTER TABLE transcription_runs ADD COLUMN last_update_ms INTEGER")
+        conn.commit()
 
 
 def latest_run_id(conn: sqlite3.Connection, video_path: str, model: Optional[str]) -> Optional[int]:
@@ -79,7 +84,7 @@ def status_for_videos(conn: sqlite3.Connection, videos: List[str], model: Option
             continue
         row = conn.execute(
             """
-            SELECT id, model, status, progress, started_ms, ended_ms, error
+            SELECT id, model, status, progress, started_ms, ended_ms, error, last_update_ms
             FROM transcription_runs
             WHERE id = ?
             """,
@@ -96,6 +101,7 @@ def status_for_videos(conn: sqlite3.Connection, videos: List[str], model: Option
                     "started_ms": row[4],
                     "ended_ms": row[5],
                     "error": row[6],
+                    "last_update_ms": row[7],
                 }
             )
         else:

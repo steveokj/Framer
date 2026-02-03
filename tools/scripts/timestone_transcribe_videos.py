@@ -25,7 +25,8 @@ def ensure_db(conn: sqlite3.Connection) -> None:
             duration_s REAL,
             started_ms INTEGER,
             ended_ms INTEGER,
-            error TEXT
+            error TEXT,
+            last_update_ms INTEGER
         )
         """
     )
@@ -52,6 +53,9 @@ def ensure_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_runs_video ON transcription_runs(video_path)"
     )
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(transcription_runs)").fetchall()]
+    if "last_update_ms" not in cols:
+        conn.execute("ALTER TABLE transcription_runs ADD COLUMN last_update_ms INTEGER")
     conn.commit()
 
 
@@ -85,10 +89,10 @@ def ffprobe_duration(path: str) -> Optional[float]:
 def insert_run(conn: sqlite3.Connection, video_path: str, model: str, duration_s: Optional[float]) -> int:
     cur = conn.execute(
         """
-        INSERT INTO transcription_runs (video_path, model, status, progress, duration_s, started_ms)
-        VALUES (?, ?, 'running', 0, ?, ?)
+        INSERT INTO transcription_runs (video_path, model, status, progress, duration_s, started_ms, last_update_ms)
+        VALUES (?, ?, 'running', 0, ?, ?, ?)
         """,
-        (video_path, model, duration_s, now_ms()),
+        (video_path, model, duration_s, now_ms(), now_ms()),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -113,6 +117,8 @@ def update_run(
     if error is not None:
         fields.append("error = ?")
         params.append(error)
+    fields.append("last_update_ms = ?")
+    params.append(now_ms())
     if not fields:
         return
     params.append(run_id)
@@ -124,10 +130,10 @@ def finalize_run(conn: sqlite3.Connection, run_id: int, status: str, error: Opti
     conn.execute(
         """
         UPDATE transcription_runs
-        SET status = ?, ended_ms = ?, progress = ?, error = ?
+        SET status = ?, ended_ms = ?, progress = ?, error = ?, last_update_ms = ?
         WHERE id = ?
         """,
-        (status, now_ms(), 1.0 if status == "done" else 0.0, error, run_id),
+        (status, now_ms(), 1.0 if status == "done" else 0.0, error, now_ms(), run_id),
     )
     conn.commit()
 
