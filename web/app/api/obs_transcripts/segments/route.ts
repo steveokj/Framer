@@ -40,7 +40,7 @@ async function resolveDbPath(input?: string): Promise<string> {
 
 function runPython(args: string[]) {
   return new Promise<{ stdout: string; stderr: string; code: number }>((resolve) => {
-    const py = process.env.PYTHON || "python";
+    const py = process.env.PYTHONW || process.env.PYTHON || "python";
     const child = spawn(py, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";

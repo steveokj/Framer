@@ -100,7 +100,7 @@ export default function ObsTranscriptsPage() {
       const res = await fetch("/api/obs_videos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folderPath: obsFolder, fastScan: true, hydrate: true }),
+        body: JSON.stringify({ folderPath: obsFolder, fastScan: true, hydrate: false }),
       });
       if (!res.ok) {
         const payload = await res.json().catch(() => ({}));
@@ -151,6 +151,21 @@ export default function ObsTranscriptsPage() {
       setError(err instanceof Error ? err.message : "Failed to load transcript status");
     }
   }, [videos, model]);
+
+  const hydrateDurations = useCallback(async () => {
+    if (!obsFolder.trim()) {
+      return;
+    }
+    try {
+      await fetch("/api/obs_videos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folderPath: obsFolder, fastScan: true, hydrate: true }),
+      });
+    } catch {
+      // ignore
+    }
+  }, [obsFolder]);
 
   useEffect(() => {
     if (!obsFolder.trim()) {
@@ -419,6 +434,21 @@ export default function ObsTranscriptsPage() {
               }}
             >
               Refresh status
+            </button>
+            <button
+              type="button"
+              onClick={hydrateDurations}
+              disabled={missingDurations === 0}
+              style={{
+                padding: "4px 10px",
+                borderRadius: 999,
+                border: "1px solid #1e293b",
+                background: missingDurations ? "rgba(56, 189, 248, 0.18)" : "rgba(15, 23, 42, 0.6)",
+                color: missingDurations ? "#e0f2fe" : "#64748b",
+                cursor: missingDurations ? "pointer" : "not-allowed",
+              }}
+            >
+              Compute durations
             </button>
             <button
               type="button"

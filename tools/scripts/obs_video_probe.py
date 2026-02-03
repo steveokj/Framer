@@ -58,11 +58,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Hydrate OBS video duration cache.")
     parser.add_argument("--folder", required=True, help="OBS folder to scan")
     parser.add_argument("--cache", required=True, help="Cache path")
+    parser.add_argument("--lock", default="", help="Optional lock file path")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    lock_path = args.lock or ""
     cache = read_cache(args.cache)
     items = cache.get("items", {})
     for name in os.listdir(args.folder):
@@ -91,6 +93,11 @@ def main() -> int:
     cache["items"] = items
     cache["version"] = cache.get("version") or 1
     write_cache(args.cache, cache)
+    if lock_path:
+        try:
+            os.remove(lock_path)
+        except Exception:
+            pass
     return 0
 
 

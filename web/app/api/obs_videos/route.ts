@@ -20,6 +20,7 @@ type VideoEntry = {
 
 const VIDEO_EXTS = new Set([".mkv", ".mp4", ".mov", ".webm"]);
 const CACHE_PATH = path.join(process.cwd(), "..", "data", "timestone", "obs_video_cache.json");
+const CACHE_LOCK_PATH = path.join(process.cwd(), "..", "data", "timestone", "obs_video_probe.lock");
 const CACHE_VERSION = 1;
 
 type CacheEntry = {
@@ -71,6 +72,26 @@ function readCache(): CacheFile {
 async function writeCache(cache: CacheFile): Promise<void> {
   await fs.mkdir(path.dirname(CACHE_PATH), { recursive: true });
   await fs.writeFile(CACHE_PATH, JSON.stringify(cache));
+}
+
+async function tryAcquireProbeLock(): Promise<boolean> {
+  try {
+    await fs.mkdir(path.dirname(CACHE_LOCK_PATH), { recursive: true });
+    await fs.writeFile(CACHE_LOCK_PATH, `${Date.now()}`, { flag: "wx" });
+    return true;
+  } catch {
+    try {
+      const stat = await fs.stat(CACHE_LOCK_PATH);
+      if (Date.now() - stat.mtimeMs > 10 * 60 * 1000) {
+        await fs.unlink(CACHE_LOCK_PATH);
+        await fs.writeFile(CACHE_LOCK_PATH, `${Date.now()}`, { flag: "wx" });
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+    return false;
+  }
 }
 
 async function ffprobeDuration(filePath: string): Promise<number | null> {
@@ -234,10 +255,12 @@ export async function POST(req: NextRequest) {
   if (hydrate && fastScan && missingDurations > 0) {
     const repoRoot = path.join(process.cwd(), "..");
     const scriptPath = path.join(repoRoot, "tools", "scripts", "obs_video_probe.py");
-    const py = process.env.PYTHON || "python";
-    const args = [scriptPath, "--folder", folderPath, "--cache", CACHE_PATH];
-    const child = spawn(py, args, { detached: true, stdio: "ignore", windowsHide: true });
-    child.unref();
+    const py = process.env.PYTHONW || process.env.PYTHON || "python";
+    const args = [scriptPath, "--folder", folderPath, "--cache", CACHE_PATH, "--lock", CACHE_LOCK_PATH];
+    if (await tryAcquireProbeLock()) {
+      const child = spawn(py, args, { detached: true, stdio: "ignore", windowsHide: true });
+      child.unref();
+    }
   }
 
   return new Response(

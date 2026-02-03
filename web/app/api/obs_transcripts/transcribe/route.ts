@@ -67,7 +67,7 @@ export async function POST(req: NextRequest) {
     args.push("--video", video);
   }
 
-  const py = process.env.PYTHON || "python";
+  const py = process.env.PYTHONW || process.env.PYTHON || "python";
   const logsDir = path.join(root, "data", "timestone", "logs");
   await fs.mkdir(logsDir, { recursive: true });
   const logPath = path.join(logsDir, "transcripts.log");
