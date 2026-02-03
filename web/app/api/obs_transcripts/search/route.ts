@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import path from "path";
 import fs from "fs/promises";
+import fsSync from "fs";
 import { spawn } from "child_process";
 
 export const runtime = "nodejs";
@@ -38,9 +39,30 @@ async function resolveDbPath(input?: string): Promise<string> {
   return path.join(root, "data", "timestone", "timestone_transcripts.sqlite3");
 }
 
+function resolvePython(root: string): string {
+  const pythonw = process.env.PYTHONW;
+  if (pythonw && pythonw.trim().length > 0) {
+    return pythonw.trim();
+  }
+  const python = process.env.PYTHON;
+  if (python && python.trim().length > 0) {
+    return python.trim();
+  }
+  const venvPythonw = path.join(root, ".venv", "Scripts", "pythonw.exe");
+  if (fsSync.existsSync(venvPythonw)) {
+    return venvPythonw;
+  }
+  const venvPython = path.join(root, ".venv", "Scripts", "python.exe");
+  if (fsSync.existsSync(venvPython)) {
+    return venvPython;
+  }
+  return "python";
+}
+
 function runPython(args: string[]) {
   return new Promise<{ stdout: string; stderr: string; code: number }>((resolve) => {
-    const py = process.env.PYTHONW || process.env.PYTHON || "python";
+    const root = path.join(process.cwd(), "..");
+    const py = resolvePython(root);
     const child = spawn(py, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";

@@ -39,6 +39,26 @@ async function resolveDbPath(input?: string): Promise<string> {
   return path.join(root, "data", "timestone", "timestone_transcripts.sqlite3");
 }
 
+function resolvePython(root: string): string {
+  const pythonw = process.env.PYTHONW;
+  if (pythonw && pythonw.trim().length > 0) {
+    return pythonw.trim();
+  }
+  const python = process.env.PYTHON;
+  if (python && python.trim().length > 0) {
+    return python.trim();
+  }
+  const venvPythonw = path.join(root, ".venv", "Scripts", "pythonw.exe");
+  if (fsSync.existsSync(venvPythonw)) {
+    return venvPythonw;
+  }
+  const venvPython = path.join(root, ".venv", "Scripts", "python.exe");
+  if (fsSync.existsSync(venvPython)) {
+    return venvPython;
+  }
+  return "python";
+}
+
 export async function POST(req: NextRequest) {
   let body: any = null;
   try {
@@ -67,7 +87,7 @@ export async function POST(req: NextRequest) {
     args.push("--video", video);
   }
 
-  const py = process.env.PYTHONW || process.env.PYTHON || "python";
+  const py = resolvePython(root);
   const logsDir = path.join(root, "data", "timestone", "logs");
   await fs.mkdir(logsDir, { recursive: true });
   const logPath = path.join(logsDir, "transcripts.log");

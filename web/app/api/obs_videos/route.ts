@@ -74,6 +74,26 @@ async function writeCache(cache: CacheFile): Promise<void> {
   await fs.writeFile(CACHE_PATH, JSON.stringify(cache));
 }
 
+function resolvePython(repoRoot: string): string {
+  const pythonw = process.env.PYTHONW;
+  if (pythonw && pythonw.trim().length > 0) {
+    return pythonw.trim();
+  }
+  const python = process.env.PYTHON;
+  if (python && python.trim().length > 0) {
+    return python.trim();
+  }
+  const venvPythonw = path.join(repoRoot, ".venv", "Scripts", "pythonw.exe");
+  if (fsSync.existsSync(venvPythonw)) {
+    return venvPythonw;
+  }
+  const venvPython = path.join(repoRoot, ".venv", "Scripts", "python.exe");
+  if (fsSync.existsSync(venvPython)) {
+    return venvPython;
+  }
+  return "python";
+}
+
 async function tryAcquireProbeLock(): Promise<boolean> {
   try {
     await fs.mkdir(path.dirname(CACHE_LOCK_PATH), { recursive: true });
@@ -255,7 +275,7 @@ export async function POST(req: NextRequest) {
   if (hydrate && fastScan && missingDurations > 0) {
     const repoRoot = path.join(process.cwd(), "..");
     const scriptPath = path.join(repoRoot, "tools", "scripts", "obs_video_probe.py");
-    const py = process.env.PYTHONW || process.env.PYTHON || "python";
+    const py = resolvePython(repoRoot);
     const args = [scriptPath, "--folder", folderPath, "--cache", CACHE_PATH, "--lock", CACHE_LOCK_PATH];
     if (await tryAcquireProbeLock()) {
       const child = spawn(py, args, { detached: true, stdio: "ignore", windowsHide: true });
