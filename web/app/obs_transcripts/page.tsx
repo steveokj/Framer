@@ -239,7 +239,7 @@ export default function ObsTranscriptsPage() {
   const fetchLog = useCallback(async () => {
     setLogLoading(true);
     try {
-      const res = await fetch("/api/obs_transcripts/log");
+      const res = await fetch("/api/obs_transcripts/log", { cache: "no-store" });
       if (!res.ok) {
         const payload = await res.json().catch(() => ({}));
         throw new Error(payload.error || `Failed to load log (${res.status})`);

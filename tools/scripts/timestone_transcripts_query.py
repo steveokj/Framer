@@ -53,9 +53,13 @@ def mark_stale_runs(conn: sqlite3.Connection, stale_ms: int) -> None:
         """
         UPDATE transcription_runs
         SET status = 'error', error = 'stale run (no updates)', ended_ms = ?, last_update_ms = ?
-        WHERE status = 'running' AND last_update_ms IS NOT NULL AND last_update_ms < ?
+        WHERE status = 'running'
+          AND (
+            (last_update_ms IS NOT NULL AND last_update_ms < ?)
+            OR (last_update_ms IS NULL AND started_ms IS NOT NULL AND started_ms < ?)
+          )
         """,
-        (now_ms(), now_ms(), cutoff),
+        (now_ms(), now_ms(), cutoff, cutoff),
     )
     conn.commit()
 

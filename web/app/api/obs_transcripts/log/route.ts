@@ -10,7 +10,10 @@ export async function GET() {
   try {
     const text = await fs.readFile(logPath, "utf8");
     return new Response(JSON.stringify({ log: text }), {
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      },
     });
   } catch (err) {
     return new Response(JSON.stringify({ error: String(err) }), {
