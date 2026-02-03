@@ -1,4 +1,5 @@
 import argparse
+import ctypes
 import json
 import os
 import sqlite3
@@ -38,6 +39,30 @@ def add_dll_search_paths() -> None:
 
 
 add_dll_search_paths()
+
+def log_env_context(repo_root: str) -> None:
+    sys.stderr.write(f"[transcripts] python={sys.executable}\n")
+    sys.stderr.write(f"[transcripts] cwd={os.getcwd()}\n")
+    sys.stderr.write(f"[transcripts] repo_root={repo_root}\n")
+    sys.stderr.flush()
+
+
+def preflight_cuda(repo_root: str) -> Optional[str]:
+    if os.name != "nt":
+        return None
+    dll_name = "cudnn_ops64_9.dll"
+    candidates = [
+        os.path.join(repo_root, dll_name),
+        os.path.join(os.environ.get("CUDNN_PATH", ""), "bin", dll_name),
+    ]
+    if not any(path for path in candidates if path and os.path.exists(path)):
+        return f"{dll_name} not found in repo_root or CUDNN_PATH\\bin"
+    try:
+        ctypes.WinDLL(dll_name)
+    except Exception as exc:
+        return f"Failed to load {dll_name}: {exc}"
+    return None
+
 
 from faster_whisper import WhisperModel
 
@@ -256,6 +281,20 @@ def main() -> int:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path)
     ensure_db(conn)
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+    log_env_context(repo_root)
+    cuda_error = preflight_cuda(repo_root)
+    if cuda_error:
+        sys.stderr.write(f"[transcripts] preflight_error={cuda_error}\n")
+        sys.stderr.flush()
+        for video_path in args.video:
+            if not os.path.isfile(video_path):
+                continue
+            run_id = insert_run(conn, video_path, args.model, ffprobe_duration(video_path))
+            finalize_run(conn, run_id, "error", cuda_error)
+        hard_exit(1)
 
     language = args.language.strip() or None
     model_name = args.model

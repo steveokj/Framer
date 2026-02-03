@@ -59,6 +59,24 @@ function resolvePython(root: string): string {
   return "python";
 }
 
+function buildPythonEnv(root: string): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  const sep = process.platform === "win32" ? ";" : ":";
+  const extra: string[] = [];
+  extra.push(root);
+  const cuda = process.env.CUDA_PATH;
+  if (cuda) {
+    extra.push(path.join(cuda, "bin"));
+  }
+  const cudnn = process.env.CUDNN_PATH;
+  if (cudnn) {
+    extra.push(path.join(cudnn, "bin"));
+  }
+  const existing = env.PATH || "";
+  env.PATH = extra.concat(existing.split(sep).filter(Boolean)).join(sep);
+  return env;
+}
+
 export async function POST(req: NextRequest) {
   let body: any = null;
   try {
@@ -93,11 +111,13 @@ export async function POST(req: NextRequest) {
   const logPath = path.join(logsDir, "transcripts.log");
   const logStream = fsSync.createWriteStream(logPath, { flags: "a" });
   logStream.write(`[transcripts] ${new Date().toISOString()} starting ${videos.length} video(s)\n`);
+  logStream.write(`[transcripts] python=${py}\n`);
 
   const child = spawn(py, args, {
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
     windowsHide: true,
+    env: buildPythonEnv(root),
   });
   child.stdout.on("data", (d) => logStream.write(d));
   child.stderr.on("data", (d) => logStream.write(d));
