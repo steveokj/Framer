@@ -13,10 +13,27 @@ def add_dll_search_paths() -> None:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
     missing = []
+    cuda_env = os.environ.get("CUDA_PATH")
+    cudnn_env = os.environ.get("CUDNN_PATH")
+    cuda_default = None
+    if not cuda_env and os.name == "nt":
+        cuda_base = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "NVIDIA GPU Computing Toolkit", "CUDA")
+        if os.path.isdir(cuda_base):
+            try:
+                versions = [d for d in os.listdir(cuda_base) if d.lower().startswith("v")]
+                versions.sort(reverse=True)
+                if versions:
+                    cuda_default = os.path.join(cuda_base, versions[0])
+                    cuda_env = cuda_default
+            except Exception:
+                cuda_default = None
+    if not cudnn_env and cuda_env and os.name == "nt":
+        cudnn_candidate = cuda_env
+        cudnn_env = cudnn_candidate
     candidates = [
         ("repo_root", repo_root),
-        ("CUDA_PATH", os.environ.get("CUDA_PATH")),
-        ("CUDNN_PATH", os.environ.get("CUDNN_PATH")),
+        ("CUDA_PATH", cuda_env),
+        ("CUDNN_PATH", cudnn_env),
     ]
     for label, candidate in candidates:
         if not candidate:
@@ -36,6 +53,9 @@ def add_dll_search_paths() -> None:
             + ", ".join(missing)
             + "\n"
         )
+    if cuda_default:
+        sys.stderr.write(f"[transcripts] CUDA_PATH defaulted to {cuda_default}\n")
+        sys.stderr.flush()
 
 
 add_dll_search_paths()
