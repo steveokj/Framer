@@ -300,7 +300,18 @@ def main() -> int:
 
     language = args.language.strip() or None
     model_name = args.model
-    model = WhisperModel(model_name)
+    try:
+        model = WhisperModel(model_name, device="cuda")
+    except Exception as exc:
+        err = f"GPU init failed: {exc}"
+        sys.stderr.write(f"[transcripts] gpu_error={err}\n")
+        sys.stderr.flush()
+        for video_path in args.video:
+            if not os.path.isfile(video_path):
+                continue
+            run_id = insert_run(conn, video_path, model_name, ffprobe_duration(video_path))
+            finalize_run(conn, run_id, "error", err)
+        hard_exit(1)
 
     results = []
     for video_path in args.video:
