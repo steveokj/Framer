@@ -12,16 +12,22 @@ def add_dll_search_paths() -> None:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
     missing = []
-    for candidate in [repo_root, os.environ.get("CUDA_PATH"), os.environ.get("CUDNN_PATH")]:
+    candidates = [
+        ("repo_root", repo_root),
+        ("CUDA_PATH", os.environ.get("CUDA_PATH")),
+        ("CUDNN_PATH", os.environ.get("CUDNN_PATH")),
+    ]
+    for label, candidate in candidates:
         if not candidate:
+            missing.append(f"{label}=<unset>")
             continue
         try:
             if os.path.isdir(candidate):
                 os.add_dll_directory(candidate)
             else:
-                missing.append(candidate)
+                missing.append(f"{label}={candidate}")
         except Exception:
-            missing.append(candidate)
+            missing.append(f"{label}={candidate}")
             continue
     if missing:
         sys.stderr.write(
