@@ -11,14 +11,24 @@ from typing import Any, Iterable, List, Optional, Tuple
 def add_dll_search_paths() -> None:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+    missing = []
     for candidate in [repo_root, os.environ.get("CUDA_PATH"), os.environ.get("CUDNN_PATH")]:
         if not candidate:
             continue
         try:
             if os.path.isdir(candidate):
                 os.add_dll_directory(candidate)
+            else:
+                missing.append(candidate)
         except Exception:
+            missing.append(candidate)
             continue
+    if missing:
+        sys.stderr.write(
+            "Warning: DLL search paths missing or invalid: "
+            + ", ".join(missing)
+            + "\n"
+        )
 
 
 add_dll_search_paths()
