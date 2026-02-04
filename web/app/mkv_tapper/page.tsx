@@ -402,6 +402,8 @@ export default function MkvTapperPage() {
   const [ocrSaving, setOcrSaving] = useState(false);
   const [ocrSaveError, setOcrSaveError] = useState<string | null>(null);
   const [ocrSaveSuccess, setOcrSaveSuccess] = useState<string | null>(null);
+  const [showOcrBoxes, setShowOcrBoxes] = useState(true);
+  const [minOcrConf, setMinOcrConf] = useState(50);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const settingsRef = useRef<HTMLDivElement | null>(null);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
@@ -470,6 +472,8 @@ export default function MkvTapperPage() {
     setOcrSaving(false);
     setOcrSaveError(null);
     setOcrSaveSuccess(null);
+    setShowOcrBoxes(true);
+    setMinOcrConf(50);
   }, []);
 
   useEffect(() => {
@@ -1532,6 +1536,48 @@ export default function MkvTapperPage() {
                     >
                       {ocrSaving ? "Saving..." : "Save OCR"}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowOcrBoxes((prev) => !prev)}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 8,
+                        border: "1px solid #1e293b",
+                        background: showOcrBoxes ? "rgba(56, 189, 248, 0.18)" : "#0f172a",
+                        color: showOcrBoxes ? "#e0f2fe" : "#94a3b8",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                      }}
+                      title={showOcrBoxes ? "Hide boxes" : "Show boxes"}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                        <rect
+                          x="4"
+                          y="4"
+                          width="16"
+                          height="16"
+                          rx="2.5"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                        />
+                      </svg>
+                      Boxes
+                    </button>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ color: "#94a3b8", fontSize: 12 }}>Min conf</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={minOcrConf}
+                        onChange={(event) => setMinOcrConf(Number(event.target.value))}
+                        style={{ width: 90 }}
+                      />
+                      <span style={{ color: "#cbd5f5", fontSize: 12, minWidth: 28 }}>{minOcrConf}%</span>
+                    </div>
                     <span style={{ color: "#64748b" }}>{ocrPreset.description}</span>
                     {ocrLoading ? <span style={{ color: "#94a3b8" }}>Running OCR...</span> : null}
                     {ocrError ? <span style={{ color: "#fca5a5" }}>{ocrError}</span> : null}
@@ -1571,17 +1617,23 @@ export default function MkvTapperPage() {
                           <div style={{ color: "#94a3b8" }}>Loading frame...</div>
                         </div>
                       ) : null}
-                      {ocrBoxes.length && ocrImageSize ? (
+                      {showOcrBoxes && ocrBoxes.length && ocrImageSize ? (
                         <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
                           {ocrBoxes.map((box, idx) => {
+                            const confValue = Number.isFinite(box.conf) ? box.conf : -1;
+                            if (confValue >= 0 && confValue < minOcrConf) {
+                              return null;
+                            }
                             const left = (box.left / ocrImageSize.width) * 100;
                             const top = (box.top / ocrImageSize.height) * 100;
                             const width = (box.width / ocrImageSize.width) * 100;
                             const height = (box.height / ocrImageSize.height) * 100;
+                            const labelAbove = top > 3;
+                            const labelTop = labelAbove ? top - 3 : top + 1;
                             return (
                               <div
                                 key={`${box.text}-${idx}`}
-                                title={`${box.text} (${Math.round(box.conf)})`}
+                                title={`${box.text} (${Math.round(confValue)})`}
                                 style={{
                                   position: "absolute",
                                   left: `${left}%`,
@@ -1592,7 +1644,28 @@ export default function MkvTapperPage() {
                                   boxShadow: "0 0 0 1px rgba(14, 116, 144, 0.35) inset",
                                   background: "rgba(56, 189, 248, 0.08)",
                                 }}
-                              />
+                              >
+                                <div
+                                  style={{
+                                    position: "absolute",
+                                    left: 0,
+                                    top: `${labelTop}%`,
+                                    transform: labelAbove ? "translateY(-100%)" : "none",
+                                    background: "rgba(15, 23, 42, 0.88)",
+                                    color: "#e2e8f0",
+                                    border: "1px solid rgba(56, 189, 248, 0.6)",
+                                    borderRadius: 6,
+                                    padding: "1px 6px",
+                                    fontSize: 10,
+                                    whiteSpace: "nowrap",
+                                    maxWidth: "220px",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                  }}
+                                >
+                                  {box.text} ({Math.round(confValue)}%)
+                                </div>
+                              </div>
                             );
                           })}
                         </div>
