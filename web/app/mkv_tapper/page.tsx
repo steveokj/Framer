@@ -1800,7 +1800,7 @@ export default function MkvTapperPage() {
                             const width = (box.width / ocrImageSize.width) * 100;
                             const height = (box.height / ocrImageSize.height) * 100;
                             const labelAbove = top > 3;
-                            const labelTop = labelAbove ? top - 3 : top + 1;
+                            const labelTop = labelAbove ? top - 5 : top + 1;
                             return (
                               <div
                                 key={`${box.text}-${idx}`}
@@ -1822,16 +1822,13 @@ export default function MkvTapperPage() {
                                     left: 0,
                                     top: `${labelTop}%`,
                                     transform: labelAbove ? "translateY(-100%)" : "none",
-                                    background: "rgba(15, 23, 42, 0.88)",
+                                    background: "transparent",
                                     color: "#e2e8f0",
                                     border: "1px solid rgba(56, 189, 248, 0.6)",
                                     borderRadius: 6,
                                     padding: "1px 6px",
-                                    fontSize: 10,
+                                    fontSize: 12,
                                     whiteSpace: "nowrap",
-                                    maxWidth: "220px",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
                                   }}
                                 >
                                   {box.text} ({Math.round(confValue)}%)
