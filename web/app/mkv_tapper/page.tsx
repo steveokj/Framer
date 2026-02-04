@@ -1093,6 +1093,11 @@ export default function MkvTapperPage() {
     if (!src) {
       return;
     }
+    console.log("[mkv_tapper] auto-seek to selected event", {
+      eventId: selectedEvent.id,
+      offsetMs: info.offsetMs,
+      path: info.path,
+    });
     setVideoSrc(src);
     setPendingSeekMs(info.offsetMs);
   }, [buildFileUrl, resolveVideoInfo, segments, selectedEvent, videoSrc]);
@@ -1116,6 +1121,10 @@ export default function MkvTapperPage() {
     for (const pin of ordered) {
       const event = eventsById.get(pin.event_id);
       if (event) {
+        console.log("[mkv_tapper] auto-select pinned event", {
+          eventId: event.id,
+          pinnedAt: pin.pinned_at,
+        });
         selectEvent(event);
         setInitialPinnedEventApplied(true);
         return;
