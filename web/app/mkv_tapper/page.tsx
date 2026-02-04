@@ -1909,28 +1909,27 @@ export default function MkvTapperPage() {
                             const width = (box.width / ocrImageSize.width) * 100;
                             const height = (box.height / ocrImageSize.height) * 100;
                             const labelAbove = top > 3;
-                            const labelTop = labelAbove ? top - 5 : top + 1;
                             return (
-                              <div
-                                key={`${box.text}-${idx}`}
-                                title={`${box.text} (${Math.round(confValue)})`}
-                                style={{
-                                  position: "absolute",
-                                  left: `${left}%`,
-                                  top: `${top}%`,
-                                  width: `${width}%`,
-                                  height: `${height}%`,
-                                  border: "1px solid rgba(56, 189, 248, 0.8)",
-                                  boxShadow: "0 0 0 1px rgba(14, 116, 144, 0.35) inset",
-                                  background: "rgba(56, 189, 248, 0.08)",
-                                }}
-                              >
+                              <div key={`${box.text}-${idx}`} style={{ position: "absolute", inset: 0 }}>
+                                <div
+                                  title={`${box.text} (${Math.round(confValue)})`}
+                                  style={{
+                                    position: "absolute",
+                                    left: `${left}%`,
+                                    top: `${top}%`,
+                                    width: `${width}%`,
+                                    height: `${height}%`,
+                                    border: "1px solid rgba(56, 189, 248, 0.8)",
+                                    boxShadow: "0 0 0 1px rgba(14, 116, 144, 0.35) inset",
+                                    background: "rgba(56, 189, 248, 0.08)",
+                                  }}
+                                />
                                 <div
                                   style={{
                                     position: "absolute",
-                                    left: 0,
-                                    top: `${labelTop}%`,
-                                    transform: labelAbove ? "translateY(-100%)" : "none",
+                                    left: `${left}%`,
+                                    top: `${top}%`,
+                                    transform: labelAbove ? "translateY(-110%)" : "translateY(0)",
                                     background: "rgba(15, 23, 42, 0.35)",
                                     color: "#f87171",
                                     border: "1px solid rgba(56, 189, 248, 0.6)",
