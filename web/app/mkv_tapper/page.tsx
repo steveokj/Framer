@@ -348,6 +348,7 @@ export default function MkvTapperPage() {
   const [sessionId, setSessionId] = useState("");
   const [segments, setSegments] = useState<RecordSegment[]>([]);
   const [events, setEvents] = useState<EventView[]>([]);
+  const [eventsLoaded, setEventsLoaded] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<EventView | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [eventVisibility, setEventVisibility] = useState<Record<string, boolean>>({
@@ -540,6 +541,7 @@ export default function MkvTapperPage() {
   useEffect(() => {
     setInitialPinnedEventApplied(false);
     setPinnedEventsLoaded(false);
+    setEventsLoaded(false);
   }, [sessionId]);
 
   const filteredEvents = useMemo(() => {
@@ -965,9 +967,11 @@ export default function MkvTapperPage() {
   const fetchEvents = useCallback(async () => {
     if (!sessionId) {
       setEvents([]);
+      setEventsLoaded(false);
       return;
     }
     setStatus("Loading events...");
+    setEventsLoaded(false);
     try {
       const res = await fetch("/api/timestone_events", {
         method: "POST",
@@ -992,6 +996,8 @@ export default function MkvTapperPage() {
       setEvents([]);
       setStatus("Error");
       setError(err instanceof Error ? err.message : "Failed to load events");
+    } finally {
+      setEventsLoaded(true);
     }
   }, [sessionId]);
 
@@ -1106,7 +1112,7 @@ export default function MkvTapperPage() {
     if (initialPinnedEventApplied || !sessionId) {
       return;
     }
-    if (!pinnedEventsLoaded || pinnedEventsLoading) {
+    if (!pinnedEventsLoaded || pinnedEventsLoading || !eventsLoaded) {
       return;
     }
     if (selectedEvent) {
@@ -1133,6 +1139,7 @@ export default function MkvTapperPage() {
     setInitialPinnedEventApplied(true);
   }, [
     eventsById,
+    eventsLoaded,
     initialPinnedEventApplied,
     pinnedEvents,
     pinnedEventsLoaded,
