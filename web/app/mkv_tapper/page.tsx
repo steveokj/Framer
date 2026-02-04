@@ -415,7 +415,7 @@ export default function MkvTapperPage() {
   const [pinsError, setPinsError] = useState<string | null>(null);
   const [pinsLoaded, setPinsLoaded] = useState(false);
   const [initialPinApplied, setInitialPinApplied] = useState(false);
-  const [ocrMode, setOcrMode] = useState(false);
+  const [ocrMode, setOcrMode] = useState(true);
   const [ocrPresetId, setOcrPresetId] = useState(DEFAULT_OCR_PRESET_ID);
   const [ocrLoading, setOcrLoading] = useState(false);
   const [ocrError, setOcrError] = useState<string | null>(null);
@@ -744,6 +744,7 @@ export default function MkvTapperPage() {
       setOcrSaveError(null);
       setOcrSaveSuccess(null);
       setOcrLoading(true);
+      setOcrSaving(true);
       setOcrError(null);
       setOcrText(null);
       setOcrBoxes([]);
@@ -754,16 +755,18 @@ export default function MkvTapperPage() {
       setOcrFrameLoading(true);
       setOcrFrameError(null);
       try {
-        const res = await fetch("/api/mkv_ocr", {
+        const res = await fetch("/api/mkv_ocr_save", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            eventId: event.id,
             filePath: info.path,
             offsetMs: info.offsetMs,
             preprocess: ocrPreset.preprocess,
             psm: ocrPreset.psm,
             oem: ocrPreset.oem,
             scale: ocrPreset.scale,
+            engine: "tesseract",
           }),
         });
         if (!res.ok) {
@@ -771,19 +774,23 @@ export default function MkvTapperPage() {
           throw new Error(payload.error || `OCR failed (${res.status})`);
         }
         const payload = await res.json();
-        const text = typeof payload?.text === "string" ? payload.text : "";
-        const boxes = Array.isArray(payload?.boxes) ? payload.boxes : [];
-        const width = Number(payload?.width);
-        const height = Number(payload?.height);
+        const ocrPayload = payload?.ocr || payload || {};
+        const text = typeof ocrPayload?.text === "string" ? ocrPayload.text : "";
+        const boxes = Array.isArray(ocrPayload?.boxes) ? ocrPayload.boxes : [];
+        const width = Number(ocrPayload?.width);
+        const height = Number(ocrPayload?.height);
         setOcrText(text ? text : null);
         setOcrBoxes(boxes as OcrBox[]);
         if (Number.isFinite(width) && Number.isFinite(height)) {
           setOcrImageSize({ width, height });
         }
+        const savedPath = typeof payload?.framePath === "string" ? payload.framePath : "";
+        setOcrSaveSuccess(savedPath ? `Saved: ${savedPath}` : "Saved OCR.");
       } catch (err) {
         setOcrError(err instanceof Error ? err.message : "OCR failed");
       } finally {
         setOcrLoading(false);
+        setOcrSaving(false);
       }
     },
     [buildMkvFrameUrl, ocrPreset, resolveVideoInfo, selectEvent],
@@ -1073,6 +1080,22 @@ export default function MkvTapperPage() {
     fetchSegments();
     fetchEventFrameIndex();
   }, [fetchEvents, fetchSegments, fetchEventFrameIndex]);
+
+  useEffect(() => {
+    if (!selectedEvent || videoSrc || !segments.length) {
+      return;
+    }
+    const info = resolveVideoInfo(selectedEvent);
+    if (!info?.path) {
+      return;
+    }
+    const src = buildFileUrl(info.path);
+    if (!src) {
+      return;
+    }
+    setVideoSrc(src);
+    setPendingSeekMs(info.offsetMs);
+  }, [buildFileUrl, resolveVideoInfo, segments, selectedEvent, videoSrc]);
 
   useEffect(() => {
     if (initialPinnedEventApplied || !sessionId) {
