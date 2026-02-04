@@ -48,6 +48,12 @@ type PinnedSession = {
   pinned_at: number;
 };
 
+type PinnedEvent = {
+  event_id: number;
+  pinned_at: number;
+  session_id: string;
+};
+
 type OcrBox = {
   text: string;
   conf: number;
@@ -90,6 +96,7 @@ const API_BASE = (
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
 const LAST_SESSION_STORAGE_KEY = "timestone:lastSessionId:mkv_tapper";
 const PINNED_ONLY_STORAGE_KEY = "timestone:pinnedOnly:mkv_tapper";
+const PINNED_EVENTS_ONLY_STORAGE_KEY = "timestone:pinnedEventsOnly:mkv_tapper";
 const DEFAULT_OCR_PRESET_ID = "clean-ui";
 
 const OCR_PRESETS: OcrPreset[] = [
@@ -383,6 +390,23 @@ export default function MkvTapperPage() {
       return false;
     }
   });
+  const [pinnedEvents, setPinnedEvents] = useState<PinnedEvent[]>([]);
+  const [pinnedEventsOnly, setPinnedEventsOnly] = useState(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+    try {
+      const saved = localStorage.getItem(PINNED_EVENTS_ONLY_STORAGE_KEY);
+      if (!saved) {
+        return true;
+      }
+      return saved === "1" || saved.toLowerCase() === "true";
+    } catch {
+      return true;
+    }
+  });
+  const [pinnedEventsLoading, setPinnedEventsLoading] = useState(false);
+  const [pinnedEventsError, setPinnedEventsError] = useState<string | null>(null);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [pinsLoading, setPinsLoading] = useState(false);
   const [pinsError, setPinsError] = useState<string | null>(null);
@@ -427,6 +451,10 @@ export default function MkvTapperPage() {
     localStorage.setItem(PINNED_ONLY_STORAGE_KEY, pinnedOnly ? "1" : "0");
   }, [pinnedOnly]);
 
+  useEffect(() => {
+    localStorage.setItem(PINNED_EVENTS_ONLY_STORAGE_KEY, pinnedEventsOnly ? "1" : "0");
+  }, [pinnedEventsOnly]);
+
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === sessionId) || null,
     [sessions, sessionId]
@@ -434,6 +462,9 @@ export default function MkvTapperPage() {
   const pinnedSessionSet = useMemo(() => {
     return new Set(pinnedSessions.map((pin) => pin.session_id));
   }, [pinnedSessions]);
+  const pinnedEventSet = useMemo(() => {
+    return new Set(pinnedEvents.map((pin) => pin.event_id));
+  }, [pinnedEvents]);
   const ocrPreset = useMemo(
     () => OCR_PRESETS.find((preset) => preset.id === ocrPresetId) || OCR_PRESETS[0],
     [ocrPresetId]
@@ -509,8 +540,11 @@ export default function MkvTapperPage() {
       list = list.filter((event) => eventSearchBlob(event).includes(q));
     }
     list = list.filter((event) => eventVisibility[event.event_type] !== false);
+    if (pinnedEventsOnly) {
+      list = list.filter((event) => pinnedEventSet.has(event.id));
+    }
     return list;
-  }, [events, eventVisibility, searchQuery, framesOnly, eventFrameIds]);
+  }, [events, eventVisibility, searchQuery, framesOnly, eventFrameIds, pinnedEventsOnly, pinnedEventSet]);
 
   const sessionSegments = useMemo(() => {
     if (!sessionId) {
@@ -804,6 +838,59 @@ export default function MkvTapperPage() {
     }
   }, []);
 
+  const fetchPinnedEvents = useCallback(async (sessionIdValue: string) => {
+    if (!sessionIdValue) {
+      setPinnedEvents([]);
+      return;
+    }
+    setPinnedEvents([]);
+    setPinnedEventsLoading(true);
+    setPinnedEventsError(null);
+    try {
+      const res = await fetch("/api/mkv_event_pins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "list", sessionId: sessionIdValue }),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to load pinned events (${res.status})`);
+      }
+      const data = await res.json();
+      const list = Array.isArray(data?.pins) ? data.pins : [];
+      setPinnedEvents(list);
+    } catch (err) {
+      setPinnedEvents([]);
+      setPinnedEventsError(err instanceof Error ? err.message : "Failed to load pinned events");
+    } finally {
+      setPinnedEventsLoading(false);
+    }
+  }, []);
+
+  const updatePinnedEvent = useCallback(async (eventId: number, shouldPin: boolean) => {
+    if (!sessionId) {
+      return;
+    }
+    setPinnedEventsLoading(true);
+    setPinnedEventsError(null);
+    try {
+      const res = await fetch("/api/mkv_event_pins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventId, sessionId, pinned: shouldPin }),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to update pinned event (${res.status})`);
+      }
+      await fetchPinnedEvents(sessionId);
+    } catch (err) {
+      setPinnedEventsError(err instanceof Error ? err.message : "Failed to update pinned event");
+    } finally {
+      setPinnedEventsLoading(false);
+    }
+  }, [fetchPinnedEvents, sessionId]);
+
   const updatePinnedSession = useCallback(async (sessionIdToUpdate: string, shouldPin: boolean) => {
     if (!sessionIdToUpdate) {
       return;
@@ -936,6 +1023,14 @@ export default function MkvTapperPage() {
   useEffect(() => {
     refreshSessions();
   }, [refreshSessions]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setPinnedEvents([]);
+      return;
+    }
+    fetchPinnedEvents(sessionId);
+  }, [fetchPinnedEvents, sessionId]);
 
   useEffect(() => {
     if (initialPinApplied || !pinsLoaded || sessions.length === 0) {
@@ -1874,6 +1969,29 @@ export default function MkvTapperPage() {
                         Frames only
                       </button>
 
+                      <button
+                        type="button"
+                        onClick={() => setPinnedEventsOnly((prev) => !prev)}
+                        style={{
+                          padding: "8px 12px",
+                          borderRadius: 8,
+                          border: "1px solid",
+                          borderColor: pinnedEventsOnly ? "#f59e0b" : "#1e293b",
+                          background: pinnedEventsOnly ? "rgba(251, 191, 36, 0.18)" : "transparent",
+                          color: pinnedEventsOnly ? "#fde68a" : "#94a3b8",
+                          fontSize: 13,
+                          cursor: "pointer",
+                          textAlign: "left",
+                        }}
+                      >
+                        Pinned only
+                      </button>
+
+                      {pinnedEventsLoading ? (
+                        <div style={{ color: "#94a3b8", fontSize: 12 }}>Loading pinned events...</div>
+                      ) : null}
+                      {pinnedEventsError ? <div style={{ color: "#fca5a5", fontSize: 12 }}>{pinnedEventsError}</div> : null}
+
                       <label style={{ display: "grid", gap: 6, fontSize: 12, color: "#cbd5f5" }}>
                         <span>Manual offset (sec)</span>
                         <input
@@ -1997,6 +2115,8 @@ export default function MkvTapperPage() {
                                 ? formatDurationMs(row.events[0].ts_wall_ms - activeSession.start_wall_ms)
                                 : formatDurationMs(row.events[0].ts_mono_ms);
                               const groupIcon = resolveIconSrc(EVENT_ICON_MAP[row.event_type]);
+                              const groupSelected = selectedEvent?.id === row.events[0].id;
+                              const groupPinned = pinnedEventSet.has(row.events[0].id);
 
                               return (
                                 <div
@@ -2064,7 +2184,7 @@ export default function MkvTapperPage() {
                                     </span>
 
                                     <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-                                      {ocrMode ? (
+                                      {groupSelected && ocrMode ? (
                                         <button
                                           type="button"
                                           onClick={(e) => {
@@ -2083,6 +2203,39 @@ export default function MkvTapperPage() {
                                           title="Run OCR on this event"
                                         >
                                           OCR
+                                        </button>
+                                      ) : null}
+                                      {groupSelected ? (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            updatePinnedEvent(row.events[0].id, !groupPinned);
+                                          }}
+                                          style={{
+                                            padding: "4px 8px",
+                                            borderRadius: 8,
+                                            border: "1px solid rgba(30, 41, 59, 0.8)",
+                                            background: groupPinned ? "rgba(251, 191, 36, 0.2)" : "transparent",
+                                            color: groupPinned ? "#facc15" : "#94a3b8",
+                                            cursor: "pointer",
+                                            fontSize: 12,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 6,
+                                          }}
+                                          title={groupPinned ? "Unpin event" : "Pin event"}
+                                        >
+                                          {groupPinned ? (
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                                              <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                                            </svg>
+                                          ) : (
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                                              <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                                            </svg>
+                                          )}
+                                          Pin
                                         </button>
                                       ) : null}
                                       {/* Event count badge */}
@@ -2109,6 +2262,8 @@ export default function MkvTapperPage() {
                                       {row.events.map((event) => {
                                         const eventPayload = event.payloadData || {};
                                         const eventMouse = event.mouseData || {};
+                                        const isSelected = selectedEvent?.id === event.id;
+                                        const isPinned = pinnedEventSet.has(event.id);
                                         const eventText = eventPayload?.final_text
                                           ? String(eventPayload.final_text)
                                           : eventPayload?.text
@@ -2142,27 +2297,61 @@ export default function MkvTapperPage() {
                                               <span style={{ color: "#94a3b8", fontSize: 12 }}>
                                                 {event.event_type.replace(/_/g, " ")}
                                               </span>
-                                              {ocrMode ? (
-                                                <button
-                                                  type="button"
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    runOcrForEvent(event);
-                                                  }}
-                                                  style={{
-                                                    marginLeft: "auto",
-                                                    padding: "4px 8px",
-                                                    borderRadius: 8,
-                                                    border: "1px solid rgba(30, 41, 59, 0.8)",
-                                                    background: "rgba(56, 189, 248, 0.18)",
-                                                    color: "#e0f2fe",
-                                                    cursor: "pointer",
-                                                    fontSize: 12,
-                                                  }}
-                                                  title="Run OCR on this event"
-                                                >
-                                                  OCR
-                                                </button>
+                                              {isSelected ? (
+                                                <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                                                  {ocrMode ? (
+                                                    <button
+                                                      type="button"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        runOcrForEvent(event);
+                                                      }}
+                                                      style={{
+                                                        padding: "4px 8px",
+                                                        borderRadius: 8,
+                                                        border: "1px solid rgba(30, 41, 59, 0.8)",
+                                                        background: "rgba(56, 189, 248, 0.18)",
+                                                        color: "#e0f2fe",
+                                                        cursor: "pointer",
+                                                        fontSize: 12,
+                                                      }}
+                                                      title="Run OCR on this event"
+                                                    >
+                                                      OCR
+                                                    </button>
+                                                  ) : null}
+                                                  <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      updatePinnedEvent(event.id, !isPinned);
+                                                    }}
+                                                    style={{
+                                                      padding: "4px 8px",
+                                                      borderRadius: 8,
+                                                      border: "1px solid rgba(30, 41, 59, 0.8)",
+                                                      background: isPinned ? "rgba(251, 191, 36, 0.2)" : "transparent",
+                                                      color: isPinned ? "#facc15" : "#94a3b8",
+                                                      cursor: "pointer",
+                                                      fontSize: 12,
+                                                      display: "flex",
+                                                      alignItems: "center",
+                                                      gap: 6,
+                                                    }}
+                                                    title={isPinned ? "Unpin event" : "Pin event"}
+                                                  >
+                                                    {isPinned ? (
+                                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                                                        <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                                                      </svg>
+                                                    ) : (
+                                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                                                        <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                                                      </svg>
+                                                    )}
+                                                    Pin
+                                                  </button>
+                                                </div>
                                               ) : null}
                                             </div>
                                             {event.event_type === "key_down" && eventPayload?.key ? (
@@ -2202,6 +2391,8 @@ export default function MkvTapperPage() {
                           const windowInitial = eventWindowName ? eventWindowName.slice(0, 1).toUpperCase() : "?";
                           const eventIcon = resolveIconSrc(EVENT_ICON_MAP[event.event_type]);
                           const isActiveWindow = event.event_type === "active_window_changed";
+                          const isSelected = selectedEvent?.id === event.id;
+                          const isPinned = pinnedEventSet.has(event.id);
                           const appIcon = resolveIconSrc(
                             isActiveWindow
                               ? (event.payloadData?.app_icon_path as string | undefined) ||
@@ -2276,27 +2467,61 @@ export default function MkvTapperPage() {
                                         <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
                                         <span style={{ color: "#64748b" }}>+{monoTime}</span>
                                       </div>
-                                      {ocrMode ? (
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            runOcrForEvent(event);
-                                          }}
-                                          style={{
-                                            marginLeft: "auto",
-                                            padding: "4px 8px",
-                                            borderRadius: 8,
-                                            border: "1px solid rgba(30, 41, 59, 0.8)",
-                                            background: "rgba(56, 189, 248, 0.18)",
-                                            color: "#e0f2fe",
-                                            cursor: "pointer",
-                                            fontSize: 12,
-                                          }}
-                                          title="Run OCR on this event"
-                                        >
-                                          OCR
-                                        </button>
+                                      {isSelected ? (
+                                        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                                          {ocrMode ? (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                runOcrForEvent(event);
+                                              }}
+                                              style={{
+                                                padding: "4px 8px",
+                                                borderRadius: 8,
+                                                border: "1px solid rgba(30, 41, 59, 0.8)",
+                                                background: "rgba(56, 189, 248, 0.18)",
+                                                color: "#e0f2fe",
+                                                cursor: "pointer",
+                                                fontSize: 12,
+                                              }}
+                                              title="Run OCR on this event"
+                                            >
+                                              OCR
+                                            </button>
+                                          ) : null}
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              updatePinnedEvent(event.id, !isPinned);
+                                            }}
+                                            style={{
+                                              padding: "4px 8px",
+                                              borderRadius: 8,
+                                              border: "1px solid rgba(30, 41, 59, 0.8)",
+                                              background: isPinned ? "rgba(251, 191, 36, 0.2)" : "transparent",
+                                              color: isPinned ? "#facc15" : "#94a3b8",
+                                              cursor: "pointer",
+                                              fontSize: 12,
+                                              display: "flex",
+                                              alignItems: "center",
+                                              gap: 6,
+                                            }}
+                                            title={isPinned ? "Unpin event" : "Pin event"}
+                                          >
+                                            {isPinned ? (
+                                              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                                                <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                                              </svg>
+                                            ) : (
+                                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                                                <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                                              </svg>
+                                            )}
+                                            Pin
+                                          </button>
+                                        </div>
                                       ) : null}
                                     </div>
                                     {eventWindowName ? (
@@ -2320,27 +2545,61 @@ export default function MkvTapperPage() {
                                     </strong>
                                     <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
                                     <span style={{ color: "#64748b" }}>+{monoTime}</span>
-                                    {ocrMode ? (
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          runOcrForEvent(event);
-                                        }}
-                                        style={{
-                                          marginLeft: "auto",
-                                          padding: "4px 8px",
-                                          borderRadius: 8,
-                                          border: "1px solid rgba(30, 41, 59, 0.8)",
-                                          background: "rgba(56, 189, 248, 0.18)",
-                                          color: "#e0f2fe",
-                                          cursor: "pointer",
-                                          fontSize: 12,
-                                        }}
-                                        title="Run OCR on this event"
-                                      >
-                                        OCR
-                                      </button>
+                                    {isSelected ? (
+                                      <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                                        {ocrMode ? (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              runOcrForEvent(event);
+                                            }}
+                                            style={{
+                                              padding: "4px 8px",
+                                              borderRadius: 8,
+                                              border: "1px solid rgba(30, 41, 59, 0.8)",
+                                              background: "rgba(56, 189, 248, 0.18)",
+                                              color: "#e0f2fe",
+                                              cursor: "pointer",
+                                              fontSize: 12,
+                                            }}
+                                            title="Run OCR on this event"
+                                          >
+                                            OCR
+                                          </button>
+                                        ) : null}
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            updatePinnedEvent(event.id, !isPinned);
+                                          }}
+                                          style={{
+                                            padding: "4px 8px",
+                                            borderRadius: 8,
+                                            border: "1px solid rgba(30, 41, 59, 0.8)",
+                                            background: isPinned ? "rgba(251, 191, 36, 0.2)" : "transparent",
+                                            color: isPinned ? "#facc15" : "#94a3b8",
+                                            cursor: "pointer",
+                                            fontSize: 12,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 6,
+                                          }}
+                                          title={isPinned ? "Unpin event" : "Pin event"}
+                                        >
+                                          {isPinned ? (
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                                              <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                                            </svg>
+                                          ) : (
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                                              <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                                            </svg>
+                                          )}
+                                          Pin
+                                        </button>
+                                      </div>
                                     ) : null}
                                   </div>
                                   {eventWindowName ? (
