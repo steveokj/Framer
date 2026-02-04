@@ -20,12 +20,14 @@ def main() -> int:
 
     if args.frame_path:
         cur.execute(
-            "SELECT event_id, frame_path, ocr_text, ocr_engine FROM event_ocr WHERE frame_path = ?",
+            "SELECT event_id, frame_path, ocr_text, ocr_engine, ocr_boxes_json, created_ms "
+            "FROM event_ocr WHERE frame_path = ? ORDER BY created_ms DESC",
             (args.frame_path,),
         )
     else:
         cur.execute(
-            "SELECT event_id, frame_path, ocr_text, ocr_engine FROM event_ocr WHERE event_id = ?",
+            "SELECT event_id, frame_path, ocr_text, ocr_engine, ocr_boxes_json, created_ms "
+            "FROM event_ocr WHERE event_id = ? ORDER BY created_ms DESC",
             (args.event_id,),
         )
 

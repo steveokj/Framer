@@ -430,6 +430,7 @@ export default function MkvTapperPage() {
   const [ocrSaving, setOcrSaving] = useState(false);
   const [ocrSaveError, setOcrSaveError] = useState<string | null>(null);
   const [ocrSaveSuccess, setOcrSaveSuccess] = useState<string | null>(null);
+  const [ocrLoadedEventId, setOcrLoadedEventId] = useState<number | null>(null);
   const [showOcrBoxes, setShowOcrBoxes] = useState(true);
   const [minOcrConf, setMinOcrConf] = useState(50);
   const [settingsMenuPos, setSettingsMenuPos] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
@@ -512,6 +513,7 @@ export default function MkvTapperPage() {
     setOcrSaving(false);
     setOcrSaveError(null);
     setOcrSaveSuccess(null);
+    setOcrLoadedEventId(null);
     setShowOcrBoxes(true);
     setMinOcrConf(50);
   }, []);
@@ -531,7 +533,9 @@ export default function MkvTapperPage() {
   useEffect(() => {
     if (!ocrMode) {
       resetOcrState();
+      return;
     }
+    setShowOcrBoxes(true);
   }, [ocrMode, resetOcrState]);
 
   useEffect(() => {
@@ -747,6 +751,7 @@ export default function MkvTapperPage() {
       setOcrSaveSuccess(null);
       setOcrLoading(true);
       setOcrSaving(true);
+      setShowOcrBoxes(true);
       setOcrError(null);
       setOcrText(null);
       setOcrBoxes([]);
@@ -788,6 +793,7 @@ export default function MkvTapperPage() {
         }
         const savedPath = typeof payload?.framePath === "string" ? payload.framePath : "";
         setOcrSaveSuccess(savedPath ? `Saved: ${savedPath}` : "Saved OCR.");
+        setOcrLoadedEventId(event.id);
       } catch (err) {
         setOcrError(err instanceof Error ? err.message : "OCR failed");
       } finally {
@@ -1060,6 +1066,70 @@ export default function MkvTapperPage() {
     }
     fetchPinnedEvents(sessionId);
   }, [fetchPinnedEvents, sessionId]);
+
+  useEffect(() => {
+    if (!ocrMode || !selectedEvent) {
+      return;
+    }
+    if (ocrLoadedEventId === selectedEvent.id) {
+      return;
+    }
+    setOcrLoadedEventId(selectedEvent.id);
+    setOcrSaveError(null);
+    setOcrSaveSuccess(null);
+    setOcrError(null);
+    setOcrLoading(true);
+    setShowOcrBoxes(true);
+    setOcrFrameLoading(true);
+    setOcrFrameError(null);
+    const run = async () => {
+      try {
+        const res = await fetch("/api/timestone_event_ocr", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ eventId: selectedEvent.id }),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || `Failed to load OCR (${res.status})`);
+        }
+        const data = await res.json();
+        const rows = Array.isArray(data?.ocr) ? data.ocr : [];
+        if (!rows.length) {
+          setOcrText(null);
+          setOcrBoxes([]);
+          setOcrFrameUrl(null);
+          setOcrImageSize(null);
+          setOcrContext(null);
+          setOcrFrameLoading(false);
+          return;
+        }
+        const row = rows[0];
+        const text = typeof row?.ocr_text === "string" ? row.ocr_text : "";
+        const framePath = typeof row?.frame_path === "string" ? row.frame_path : "";
+        let boxes: OcrBox[] = [];
+        if (row?.ocr_boxes_json) {
+          try {
+            const parsed = JSON.parse(row.ocr_boxes_json);
+            if (Array.isArray(parsed)) {
+              boxes = parsed as OcrBox[];
+            }
+          } catch {
+            boxes = [];
+          }
+        }
+        setOcrText(text ? text : null);
+        setOcrBoxes(boxes);
+        setOcrFrameUrl(framePath ? buildFileUrl(framePath) : null);
+      } catch (err) {
+        setOcrError(err instanceof Error ? err.message : "Failed to load OCR");
+        setOcrFrameLoading(false);
+      } finally {
+        setOcrLoading(false);
+      }
+    };
+    run();
+  }, [buildFileUrl, ocrLoadedEventId, ocrMode, selectedEvent]);
 
   useEffect(() => {
     if (initialPinApplied || !pinsLoaded || sessions.length === 0) {
@@ -1861,8 +1931,8 @@ export default function MkvTapperPage() {
                                     left: 0,
                                     top: `${labelTop}%`,
                                     transform: labelAbove ? "translateY(-100%)" : "none",
-                                    background: "transparent",
-                                    color: "#e2e8f0",
+                                    background: "rgba(15, 23, 42, 0.35)",
+                                    color: "#f87171",
                                     border: "1px solid rgba(56, 189, 248, 0.6)",
                                     borderRadius: 6,
                                     padding: "1px 6px",
