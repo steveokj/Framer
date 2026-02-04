@@ -119,7 +119,8 @@ def main() -> int:
     except Exception:
         boxes = []
 
-    payload = {"text": text.strip(), "boxes": boxes, "width": img.size[0], "height": img.size[1]}
+    meta = {"scale": float(args.scale or 1.0), "width": img.size[0], "height": img.size[1]}
+    payload = {"text": text.strip(), "boxes": boxes, "width": img.size[0], "height": img.size[1], "meta": meta}
 
     if args.save_db and args.db and args.event_id is not None:
         try:
@@ -141,6 +142,7 @@ def main() -> int:
             if "ocr_boxes_json" not in columns:
                 conn.execute("ALTER TABLE event_ocr ADD COLUMN ocr_boxes_json TEXT")
             created_ms = int(time.time() * 1000)
+            boxes_payload = {"boxes": boxes, "meta": meta}
             conn.execute(
                 "INSERT INTO event_ocr (event_id, frame_path, ocr_text, ocr_engine, ocr_boxes_json, created_ms) VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -148,7 +150,7 @@ def main() -> int:
                     image_path,
                     payload["text"],
                     args.engine or "tesseract",
-                    json.dumps(boxes),
+                    json.dumps(boxes_payload),
                     created_ms,
                 ),
             )

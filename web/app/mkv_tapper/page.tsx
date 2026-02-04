@@ -431,6 +431,7 @@ export default function MkvTapperPage() {
   const [ocrSaveError, setOcrSaveError] = useState<string | null>(null);
   const [ocrSaveSuccess, setOcrSaveSuccess] = useState<string | null>(null);
   const [ocrLoadedEventId, setOcrLoadedEventId] = useState<number | null>(null);
+  const [ocrBoxScale, setOcrBoxScale] = useState(1);
   const [showOcrBoxes, setShowOcrBoxes] = useState(true);
   const [minOcrConf, setMinOcrConf] = useState(50);
   const [settingsMenuPos, setSettingsMenuPos] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
@@ -514,6 +515,7 @@ export default function MkvTapperPage() {
     setOcrSaveError(null);
     setOcrSaveSuccess(null);
     setOcrLoadedEventId(null);
+    setOcrBoxScale(1);
     setShowOcrBoxes(true);
     setMinOcrConf(50);
   }, []);
@@ -752,6 +754,7 @@ export default function MkvTapperPage() {
       setOcrLoading(true);
       setOcrSaving(true);
       setShowOcrBoxes(true);
+      setOcrBoxScale(Number.isFinite(ocrPreset.scale) ? Number(ocrPreset.scale) : 1);
       setOcrError(null);
       setOcrText(null);
       setOcrBoxes([]);
@@ -1108,11 +1111,20 @@ export default function MkvTapperPage() {
         const text = typeof row?.ocr_text === "string" ? row.ocr_text : "";
         const framePath = typeof row?.frame_path === "string" ? row.frame_path : "";
         let boxes: OcrBox[] = [];
+        let scale = 1;
         if (row?.ocr_boxes_json) {
           try {
             const parsed = JSON.parse(row.ocr_boxes_json);
             if (Array.isArray(parsed)) {
               boxes = parsed as OcrBox[];
+            } else if (parsed && typeof parsed === "object") {
+              if (Array.isArray(parsed.boxes)) {
+                boxes = parsed.boxes as OcrBox[];
+              }
+              const metaScale = Number(parsed?.meta?.scale);
+              if (Number.isFinite(metaScale) && metaScale > 0) {
+                scale = metaScale;
+              }
             }
           } catch {
             boxes = [];
@@ -1120,6 +1132,7 @@ export default function MkvTapperPage() {
         }
         setOcrText(text ? text : null);
         setOcrBoxes(boxes);
+        setOcrBoxScale(scale);
         setOcrFrameUrl(framePath ? buildFileUrl(framePath) : null);
       } catch (err) {
         setOcrError(err instanceof Error ? err.message : "Failed to load OCR");
@@ -1904,10 +1917,11 @@ export default function MkvTapperPage() {
                             if (confValue >= 0 && confValue < minOcrConf) {
                               return null;
                             }
-                            const left = (box.left / ocrImageSize.width) * 100;
-                            const top = (box.top / ocrImageSize.height) * 100;
-                            const width = (box.width / ocrImageSize.width) * 100;
-                            const height = (box.height / ocrImageSize.height) * 100;
+                            const scale = Number.isFinite(ocrBoxScale) && ocrBoxScale > 0 ? ocrBoxScale : 1;
+                            const left = (box.left / scale / ocrImageSize.width) * 100;
+                            const top = (box.top / scale / ocrImageSize.height) * 100;
+                            const width = (box.width / scale / ocrImageSize.width) * 100;
+                            const height = (box.height / scale / ocrImageSize.height) * 100;
                             const labelAbove = top > 3;
                             return (
                               <div key={`${box.text}-${idx}`} style={{ position: "absolute", inset: 0 }}>
