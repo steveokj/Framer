@@ -43,6 +43,25 @@ type EventFrame = {
   frame_wall_ms: number | null;
 };
 
+type OcrBox = {
+  text: string;
+  conf: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+type OcrPreset = {
+  id: string;
+  label: string;
+  description: string;
+  psm: number;
+  preprocess: string;
+  scale?: number;
+  oem?: number;
+};
+
 type VideoInfo = {
   path: string;
   offsetMs: number;
@@ -65,6 +84,42 @@ const API_BASE = (
 
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
 const LAST_SESSION_STORAGE_KEY = "timestone:lastSessionId:mkv_tapper";
+const DEFAULT_OCR_PRESET_ID = "clean-ui";
+
+const OCR_PRESETS: OcrPreset[] = [
+  {
+    id: "clean-ui",
+    label: "Clean UI",
+    description: "Gray + autocontrast + 2x up + PSM 11",
+    psm: 11,
+    preprocess: "gray_autocontrast",
+    scale: 2,
+  },
+  {
+    id: "dense-ui",
+    label: "Dense UI",
+    description: "Gray + autocontrast + PSM 6",
+    psm: 6,
+    preprocess: "gray_autocontrast",
+    scale: 1,
+  },
+  {
+    id: "high-contrast",
+    label: "High Contrast",
+    description: "Gray + adaptive threshold + PSM 11",
+    psm: 11,
+    preprocess: "gray_autocontrast_adaptive",
+    scale: 1,
+  },
+  {
+    id: "raw",
+    label: "Raw Baseline",
+    description: "No preprocess + PSM 11",
+    psm: 11,
+    preprocess: "none",
+    scale: 1,
+  },
+];
 
 // Icon maps for event types and applications
 const EVENT_ICON_MAP: Record<string, string | undefined> = {
@@ -307,6 +362,20 @@ export default function MkvTapperPage() {
   const [expandAll, setExpandAll] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [manualOffsetSec, setManualOffsetSec] = useState(0.2);
+  const [ocrMode, setOcrMode] = useState(false);
+  const [ocrPresetId, setOcrPresetId] = useState(DEFAULT_OCR_PRESET_ID);
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const [ocrText, setOcrText] = useState<string | null>(null);
+  const [ocrBoxes, setOcrBoxes] = useState<OcrBox[]>([]);
+  const [ocrFrameUrl, setOcrFrameUrl] = useState<string | null>(null);
+  const [ocrFrameLoading, setOcrFrameLoading] = useState(false);
+  const [ocrFrameError, setOcrFrameError] = useState<string | null>(null);
+  const [ocrImageSize, setOcrImageSize] = useState<{ width: number; height: number } | null>(null);
+  const [ocrContext, setOcrContext] = useState<{ eventId: number; filePath: string; offsetMs: number } | null>(null);
+  const [ocrSaving, setOcrSaving] = useState(false);
+  const [ocrSaveError, setOcrSaveError] = useState<string | null>(null);
+  const [ocrSaveSuccess, setOcrSaveSuccess] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const settingsRef = useRef<HTMLDivElement | null>(null);
 
@@ -329,12 +398,31 @@ export default function MkvTapperPage() {
     () => sessions.find((session) => session.session_id === sessionId) || null,
     [sessions, sessionId]
   );
+  const ocrPreset = useMemo(
+    () => OCR_PRESETS.find((preset) => preset.id === ocrPresetId) || OCR_PRESETS[0],
+    [ocrPresetId]
+  );
 
   const eventTypes = useMemo(() => {
     const types = new Set<string>();
     events.forEach((event) => types.add(event.event_type));
     return Array.from(types).sort();
   }, [events]);
+
+  const resetOcrState = useCallback(() => {
+    setOcrLoading(false);
+    setOcrError(null);
+    setOcrText(null);
+    setOcrBoxes([]);
+    setOcrFrameUrl(null);
+    setOcrFrameLoading(false);
+    setOcrFrameError(null);
+    setOcrImageSize(null);
+    setOcrContext(null);
+    setOcrSaving(false);
+    setOcrSaveError(null);
+    setOcrSaveSuccess(null);
+  }, []);
 
   useEffect(() => {
     setEventVisibility((prev) => {
@@ -347,6 +435,16 @@ export default function MkvTapperPage() {
       return next;
     });
   }, [eventTypes]);
+
+  useEffect(() => {
+    if (!ocrMode) {
+      resetOcrState();
+    }
+  }, [ocrMode, resetOcrState]);
+
+  useEffect(() => {
+    resetOcrState();
+  }, [sessionId, resetOcrState]);
 
   const filteredEvents = useMemo(() => {
     let list = events;
@@ -527,6 +625,107 @@ export default function MkvTapperPage() {
     },
     [loadEventFrames, resolveVideoInfo],
   );
+
+  const buildMkvFrameUrl = useCallback((filePath: string, offsetMs: number) => {
+    const params = new URLSearchParams();
+    params.set("file_path", filePath);
+    params.set("offset_ms", String(Math.round(offsetMs)));
+    params.set("t", String(Date.now()));
+    return `/api/mkv_frame?${params.toString()}`;
+  }, []);
+
+  const runOcrForEvent = useCallback(
+    async (event: EventView) => {
+      const info = resolveVideoInfo(event);
+      if (!info?.path) {
+        setOcrError("No video path available for OCR.");
+        return;
+      }
+      selectEvent(event);
+      setOcrSaveError(null);
+      setOcrSaveSuccess(null);
+      setOcrLoading(true);
+      setOcrError(null);
+      setOcrText(null);
+      setOcrBoxes([]);
+      setOcrImageSize(null);
+      setOcrContext({ eventId: event.id, filePath: info.path, offsetMs: info.offsetMs });
+      const nextFrameUrl = buildMkvFrameUrl(info.path, info.offsetMs);
+      setOcrFrameUrl(nextFrameUrl);
+      setOcrFrameLoading(true);
+      setOcrFrameError(null);
+      try {
+        const res = await fetch("/api/mkv_ocr", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            filePath: info.path,
+            offsetMs: info.offsetMs,
+            preprocess: ocrPreset.preprocess,
+            psm: ocrPreset.psm,
+            oem: ocrPreset.oem,
+            scale: ocrPreset.scale,
+          }),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || `OCR failed (${res.status})`);
+        }
+        const payload = await res.json();
+        const text = typeof payload?.text === "string" ? payload.text : "";
+        const boxes = Array.isArray(payload?.boxes) ? payload.boxes : [];
+        const width = Number(payload?.width);
+        const height = Number(payload?.height);
+        setOcrText(text ? text : null);
+        setOcrBoxes(boxes as OcrBox[]);
+        if (Number.isFinite(width) && Number.isFinite(height)) {
+          setOcrImageSize({ width, height });
+        }
+      } catch (err) {
+        setOcrError(err instanceof Error ? err.message : "OCR failed");
+      } finally {
+        setOcrLoading(false);
+      }
+    },
+    [buildMkvFrameUrl, ocrPreset, resolveVideoInfo, selectEvent],
+  );
+
+  const saveOcr = useCallback(async () => {
+    if (!ocrContext) {
+      setOcrSaveError("Run OCR before saving.");
+      return;
+    }
+    setOcrSaving(true);
+    setOcrSaveError(null);
+    setOcrSaveSuccess(null);
+    try {
+      const res = await fetch("/api/mkv_ocr_save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eventId: ocrContext.eventId,
+          filePath: ocrContext.filePath,
+          offsetMs: ocrContext.offsetMs,
+          preprocess: ocrPreset.preprocess,
+          psm: ocrPreset.psm,
+          oem: ocrPreset.oem,
+          scale: ocrPreset.scale,
+          engine: "tesseract",
+        }),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Save failed (${res.status})`);
+      }
+      const payload = await res.json().catch(() => ({}));
+      const savedPath = typeof payload?.framePath === "string" ? payload.framePath : "";
+      setOcrSaveSuccess(savedPath ? `Saved: ${savedPath}` : "Saved OCR.");
+    } catch (err) {
+      setOcrSaveError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setOcrSaving(false);
+    }
+  }, [ocrContext, ocrPreset]);
 
   const refreshSessions = useCallback(async () => {
     setError(null);
@@ -872,6 +1071,20 @@ export default function MkvTapperPage() {
           >
             Refresh sessions
           </button>
+          <button
+            type="button"
+            onClick={() => setOcrMode((prev) => !prev)}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #1e293b",
+              background: ocrMode ? "rgba(56, 189, 248, 0.18)" : "#0f172a",
+              color: ocrMode ? "#e0f2fe" : "#94a3b8",
+              cursor: "pointer",
+            }}
+          >
+            OCR mode {ocrMode ? "On" : "Off"}
+          </button>
           <div style={{ color: "#94a3b8" }}>{status}</div>
           {error ? <div style={{ color: "#fca5a5" }}>{error}</div> : null}
         </section>
@@ -982,13 +1195,127 @@ export default function MkvTapperPage() {
                 gap: 12,
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <strong>Event frame</strong>
-                {frameLoading ? <span style={{ color: "#94a3b8" }}>Loading...</span> : null}
-                {frameError ? <span style={{ color: "#fca5a5" }}>{frameError}</span> : null}
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <strong>{ocrMode ? "OCR frame" : "Event frame"}</strong>
+                {ocrMode ? (
+                  <>
+                    <select
+                      value={ocrPresetId}
+                      onChange={(event) => setOcrPresetId(event.target.value)}
+                      style={{
+                        padding: "6px 8px",
+                        borderRadius: 8,
+                        border: "1px solid #1e293b",
+                        background: "#0f172a",
+                        color: "#e2e8f0",
+                      }}
+                    >
+                      {OCR_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => selectedEvent && runOcrForEvent(selectedEvent)}
+                      disabled={!selectedEvent || ocrLoading}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 8,
+                        border: "1px solid #1e293b",
+                        background: "#0f172a",
+                        color: "#e2e8f0",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Run OCR
+                    </button>
+                    <button
+                      type="button"
+                      onClick={saveOcr}
+                      disabled={!ocrText || ocrSaving}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 8,
+                        border: "1px solid #1e293b",
+                        background: "rgba(34, 197, 94, 0.18)",
+                        color: "#bbf7d0",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {ocrSaving ? "Saving..." : "Save OCR"}
+                    </button>
+                    <span style={{ color: "#64748b" }}>{ocrPreset.description}</span>
+                    {ocrLoading ? <span style={{ color: "#94a3b8" }}>Running OCR...</span> : null}
+                    {ocrError ? <span style={{ color: "#fca5a5" }}>{ocrError}</span> : null}
+                    {ocrFrameError ? <span style={{ color: "#fca5a5" }}>{ocrFrameError}</span> : null}
+                    {ocrSaveError ? <span style={{ color: "#fca5a5" }}>{ocrSaveError}</span> : null}
+                    {ocrSaveSuccess ? <span style={{ color: "#86efac" }}>{ocrSaveSuccess}</span> : null}
+                  </>
+                ) : (
+                  <>
+                    {frameLoading ? <span style={{ color: "#94a3b8" }}>Loading...</span> : null}
+                    {frameError ? <span style={{ color: "#fca5a5" }}>{frameError}</span> : null}
+                  </>
+                )}
               </div>
               <div style={{ position: "relative", width: "100%", minHeight: 260 }}>
-                {currentFrameUrl ? (
+                {ocrMode ? (
+                  ocrFrameUrl ? (
+                    <div style={{ position: "relative", width: "100%" }}>
+                      <img
+                        src={ocrFrameUrl}
+                        alt="OCR frame"
+                        onLoad={(event) => {
+                          setOcrFrameLoading(false);
+                          const target = event.currentTarget;
+                          if (target?.naturalWidth && target?.naturalHeight) {
+                            setOcrImageSize({ width: target.naturalWidth, height: target.naturalHeight });
+                          }
+                        }}
+                        onError={() => {
+                          setOcrFrameLoading(false);
+                          setOcrFrameError("Failed to load OCR frame.");
+                        }}
+                        style={{ width: "100%", height: "auto", borderRadius: 12, border: "1px solid #1e293b" }}
+                      />
+                      {ocrFrameLoading ? (
+                        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center" }}>
+                          <div style={{ color: "#94a3b8" }}>Loading frame...</div>
+                        </div>
+                      ) : null}
+                      {ocrBoxes.length && ocrImageSize ? (
+                        <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+                          {ocrBoxes.map((box, idx) => {
+                            const left = (box.left / ocrImageSize.width) * 100;
+                            const top = (box.top / ocrImageSize.height) * 100;
+                            const width = (box.width / ocrImageSize.width) * 100;
+                            const height = (box.height / ocrImageSize.height) * 100;
+                            return (
+                              <div
+                                key={`${box.text}-${idx}`}
+                                title={`${box.text} (${Math.round(box.conf)})`}
+                                style={{
+                                  position: "absolute",
+                                  left: `${left}%`,
+                                  top: `${top}%`,
+                                  width: `${width}%`,
+                                  height: `${height}%`,
+                                  border: "1px solid rgba(56, 189, 248, 0.8)",
+                                  boxShadow: "0 0 0 1px rgba(14, 116, 144, 0.35) inset",
+                                  background: "rgba(56, 189, 248, 0.08)",
+                                }}
+                              />
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div style={{ color: "#64748b" }}>Click OCR on an event to extract a frame.</div>
+                  )
+                ) : currentFrameUrl ? (
                   <img
                     src={currentFrameUrl}
                     alt="Event frame"
@@ -998,41 +1325,54 @@ export default function MkvTapperPage() {
                   <div style={{ color: "#64748b" }}>No frame loaded.</div>
                 )}
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <button
-                  type="button"
-                  onClick={() => setFrameIndex((idx) => Math.max(0, idx - 1))}
-                  disabled={frameIndex === 0}
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: 8,
-                    border: "1px solid #1e293b",
-                    background: "#0f172a",
-                    color: "#e2e8f0",
-                    cursor: "pointer",
-                  }}
-                >
-                  Prev
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFrameIndex((idx) => Math.min(eventFrames.length - 1, idx + 1))}
-                  disabled={frameIndex >= eventFrames.length - 1}
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: 8,
-                    border: "1px solid #1e293b",
-                    background: "#0f172a",
-                    color: "#e2e8f0",
-                    cursor: "pointer",
-                  }}
-                >
-                  Next
-                </button>
-                <span style={{ color: "#94a3b8" }}>
-                  {eventFrames.length ? `${frameIndex + 1} / ${eventFrames.length}` : "0 / 0"}
-                </span>
-              </div>
+              {ocrMode ? (
+                <div style={{ display: "grid", gap: 8 }}>
+                  <strong>OCR text</strong>
+                  {ocrLoading ? (
+                    <div style={{ color: "#94a3b8" }}>Running OCR...</div>
+                  ) : ocrText ? (
+                    <div style={{ color: "#cbd5f5", whiteSpace: "pre-wrap" }}>{ocrText}</div>
+                  ) : (
+                    <div style={{ color: "#64748b" }}>No OCR text yet.</div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <button
+                    type="button"
+                    onClick={() => setFrameIndex((idx) => Math.max(0, idx - 1))}
+                    disabled={frameIndex === 0}
+                    style={{
+                      padding: "6px 10px",
+                      borderRadius: 8,
+                      border: "1px solid #1e293b",
+                      background: "#0f172a",
+                      color: "#e2e8f0",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFrameIndex((idx) => Math.min(eventFrames.length - 1, idx + 1))}
+                    disabled={frameIndex >= eventFrames.length - 1}
+                    style={{
+                      padding: "6px 10px",
+                      borderRadius: 8,
+                      border: "1px solid #1e293b",
+                      background: "#0f172a",
+                      color: "#e2e8f0",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Next
+                  </button>
+                  <span style={{ color: "#94a3b8" }}>
+                    {eventFrames.length ? `${frameIndex + 1} / ${eventFrames.length}` : "0 / 0"}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1364,19 +1704,42 @@ export default function MkvTapperPage() {
                                       +{groupMonoTime}
                                     </span>
 
-                                    {/* Event count badge */}
-                                    <span
-                                      style={{
-                                        color: "#0f172a",
-                                        background: "rgba(56, 189, 248, 0.9)",
-                                        borderRadius: 999,
-                                        padding: "2px 8px",
-                                        fontSize: 12,
-                                        fontWeight: 600,
-                                      }}
-                                    >
-                                      {row.events.length}x
-                                    </span>
+                                    <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                                      {ocrMode ? (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            runOcrForEvent(row.events[0]);
+                                          }}
+                                          style={{
+                                            padding: "4px 8px",
+                                            borderRadius: 8,
+                                            border: "1px solid rgba(30, 41, 59, 0.8)",
+                                            background: "rgba(56, 189, 248, 0.18)",
+                                            color: "#e0f2fe",
+                                            cursor: "pointer",
+                                            fontSize: 12,
+                                          }}
+                                          title="Run OCR on this event"
+                                        >
+                                          OCR
+                                        </button>
+                                      ) : null}
+                                      {/* Event count badge */}
+                                      <span
+                                        style={{
+                                          color: "#0f172a",
+                                          background: "rgba(56, 189, 248, 0.9)",
+                                          borderRadius: 999,
+                                          padding: "2px 8px",
+                                          fontSize: 12,
+                                          fontWeight: 600,
+                                        }}
+                                      >
+                                        {row.events.length}x
+                                      </span>
+                                    </div>
                                   </div>
 
                                   {renderEventDetails(row.events[0])}
@@ -1420,6 +1783,28 @@ export default function MkvTapperPage() {
                                               <span style={{ color: "#94a3b8", fontSize: 12 }}>
                                                 {event.event_type.replace(/_/g, " ")}
                                               </span>
+                                              {ocrMode ? (
+                                                <button
+                                                  type="button"
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    runOcrForEvent(event);
+                                                  }}
+                                                  style={{
+                                                    marginLeft: "auto",
+                                                    padding: "4px 8px",
+                                                    borderRadius: 8,
+                                                    border: "1px solid rgba(30, 41, 59, 0.8)",
+                                                    background: "rgba(56, 189, 248, 0.18)",
+                                                    color: "#e0f2fe",
+                                                    cursor: "pointer",
+                                                    fontSize: 12,
+                                                  }}
+                                                  title="Run OCR on this event"
+                                                >
+                                                  OCR
+                                                </button>
+                                              ) : null}
                                             </div>
                                             {event.event_type === "key_down" && eventPayload?.key ? (
                                               <div style={{ color: "#cbd5f5" }}>Key: {eventPayload.key}</div>
@@ -1532,6 +1917,28 @@ export default function MkvTapperPage() {
                                         <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
                                         <span style={{ color: "#64748b" }}>+{monoTime}</span>
                                       </div>
+                                      {ocrMode ? (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            runOcrForEvent(event);
+                                          }}
+                                          style={{
+                                            marginLeft: "auto",
+                                            padding: "4px 8px",
+                                            borderRadius: 8,
+                                            border: "1px solid rgba(30, 41, 59, 0.8)",
+                                            background: "rgba(56, 189, 248, 0.18)",
+                                            color: "#e0f2fe",
+                                            cursor: "pointer",
+                                            fontSize: 12,
+                                          }}
+                                          title="Run OCR on this event"
+                                        >
+                                          OCR
+                                        </button>
+                                      ) : null}
                                     </div>
                                     {eventWindowName ? (
                                       <div style={{ color: "#cbd5f5", overflowWrap: "anywhere" }}>{eventWindowName}</div>
@@ -1554,6 +1961,28 @@ export default function MkvTapperPage() {
                                     </strong>
                                     <span style={{ color: "#cbd5f5" }}>{wallTime}</span>
                                     <span style={{ color: "#64748b" }}>+{monoTime}</span>
+                                    {ocrMode ? (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          runOcrForEvent(event);
+                                        }}
+                                        style={{
+                                          marginLeft: "auto",
+                                          padding: "4px 8px",
+                                          borderRadius: 8,
+                                          border: "1px solid rgba(30, 41, 59, 0.8)",
+                                          background: "rgba(56, 189, 248, 0.18)",
+                                          color: "#e0f2fe",
+                                          cursor: "pointer",
+                                          fontSize: 12,
+                                        }}
+                                        title="Run OCR on this event"
+                                      >
+                                        OCR
+                                      </button>
+                                    ) : null}
                                   </div>
                                   {eventWindowName ? (
                                     <div style={{ color: "#94a3b8", overflowWrap: "anywhere" }}>{eventWindowName}</div>
