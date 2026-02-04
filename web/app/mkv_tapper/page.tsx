@@ -110,6 +110,8 @@ const LAST_SESSION_STORAGE_KEY = "timestone:lastSessionId:mkv_tapper";
 const PINNED_ONLY_STORAGE_KEY = "timestone:pinnedOnly:mkv_tapper";
 const PINNED_EVENTS_ONLY_STORAGE_KEY = "timestone:pinnedEventsOnly:mkv_tapper";
 const DEFAULT_OCR_PRESET_ID = "clean-ui";
+const SSE_POLL_MS = 500;
+const SSE_HEARTBEAT_MS = 15000;
 
 const OCR_PRESETS: OcrPreset[] = [
   {
@@ -382,6 +384,9 @@ export default function MkvTapperPage() {
   const [pendingSeekMs, setPendingSeekMs] = useState<number | null>(null);
   const [status, setStatus] = useState("Idle");
   const [error, setError] = useState<string | null>(null);
+  const [liveManualPaused, setLiveManualPaused] = useState(false);
+  const [pauseWhenInactive, setPauseWhenInactive] = useState(true);
+  const [pageActive, setPageActive] = useState(true);
   const [theaterMode, setTheaterMode] = useState(true);
   const [framesOnly, setFramesOnly] = useState(true);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -455,6 +460,9 @@ export default function MkvTapperPage() {
   const settingsRef = useRef<HTMLDivElement | null>(null);
   const settingsPanelRef = useRef<HTMLDivElement | null>(null);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
+  const seenIdsRef = useRef<Set<number>>(new Set());
+  const lastWallMsRef = useRef<number | null>(null);
+  const segmentRefreshInFlightRef = useRef(false);
 
   useEffect(() => {
     const saved = localStorage.getItem(LAST_SESSION_STORAGE_KEY);
@@ -479,6 +487,25 @@ export default function MkvTapperPage() {
     localStorage.setItem(PINNED_EVENTS_ONLY_STORAGE_KEY, pinnedEventsOnly ? "1" : "0");
   }, [pinnedEventsOnly]);
 
+  useEffect(() => {
+    if (!pauseWhenInactive) {
+      setPageActive(true);
+      return;
+    }
+    const update = () => {
+      setPageActive(!document.hidden && document.hasFocus());
+    };
+    update();
+    document.addEventListener("visibilitychange", update);
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    return () => {
+      document.removeEventListener("visibilitychange", update);
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+    };
+  }, [pauseWhenInactive]);
+
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === sessionId) || null,
     [sessions, sessionId]
@@ -496,6 +523,28 @@ export default function MkvTapperPage() {
     () => OCR_PRESETS.find((preset) => preset.id === ocrPresetId) || OCR_PRESETS[0],
     [ocrPresetId]
   );
+  const liveDetected = useMemo(() => {
+    if (!sessionId) {
+      return false;
+    }
+    return segments.some((segment) => segment.session_id === sessionId && segment.end_wall_ms == null);
+  }, [segments, sessionId]);
+  const liveEnabled = liveDetected && !liveManualPaused;
+  const lastSegmentEndMs = useMemo(() => {
+    let maxEnd: number | null = null;
+    for (const segment of segments) {
+      if (segment.session_id !== sessionId) {
+        continue;
+      }
+      if (segment.end_wall_ms == null) {
+        continue;
+      }
+      if (maxEnd == null || segment.end_wall_ms > maxEnd) {
+        maxEnd = segment.end_wall_ms;
+      }
+    }
+    return maxEnd;
+  }, [segments, sessionId]);
   const ocrSearchTokens = useMemo(() => {
     if (!ocrSearchHighlight) {
       return [];
@@ -1025,6 +1074,13 @@ export default function MkvTapperPage() {
       }));
       normalized.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
       setEvents(normalized);
+      seenIdsRef.current = new Set(normalized.map((event) => event.id));
+      if (normalized.length) {
+        const newestWall = normalized.reduce((max, event) => Math.max(max, event.ts_wall_ms), normalized[0].ts_wall_ms);
+        lastWallMsRef.current = newestWall;
+      } else {
+        lastWallMsRef.current = null;
+      }
       setStatus("Ready");
     } catch (err) {
       setEvents([]);
@@ -1082,6 +1138,61 @@ export default function MkvTapperPage() {
       setError(err instanceof Error ? err.message : "Failed to load frame index");
     }
   }, [sessionId]);
+
+  const ingestEvents = useCallback(
+    (incoming: TimestoneEvent[]) => {
+      if (!incoming.length) {
+        return;
+      }
+      const next = incoming.filter((event) => {
+        if (seenIdsRef.current.has(event.id)) {
+          return false;
+        }
+        seenIdsRef.current.add(event.id);
+        return true;
+      });
+      if (!next.length) {
+        return;
+      }
+      const newestWall = next.reduce((max, event) => Math.max(max, event.ts_wall_ms), next[0].ts_wall_ms);
+      lastWallMsRef.current = Math.max(lastWallMsRef.current || 0, newestWall);
+      const normalized: EventView[] = next.map((event) => ({
+        ...event,
+        payloadData: safeJsonParse(event.payload),
+        mouseData: safeJsonParse(event.mouse),
+      }));
+      normalized.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
+      setEvents((prev) => [...normalized, ...prev]);
+      if (!liveDetected && lastSegmentEndMs != null && newestWall > lastSegmentEndMs) {
+        if (!segmentRefreshInFlightRef.current) {
+          segmentRefreshInFlightRef.current = true;
+          fetchSegments()
+            .catch(() => {})
+            .finally(() => {
+              segmentRefreshInFlightRef.current = false;
+            });
+        }
+      }
+    },
+    [fetchSegments, lastSegmentEndMs, liveDetected],
+  );
+
+  const buildStreamUrl = useCallback(() => {
+    if (!sessionId) {
+      return null;
+    }
+    const startMs =
+      lastWallMsRef.current !== null
+        ? Math.max(0, lastWallMsRef.current - 1)
+        : activeSession?.start_wall_ms;
+    const params = new URLSearchParams({ sessionId });
+    if (startMs != null && Number.isFinite(startMs)) {
+      params.set("startMs", String(startMs));
+    }
+    params.set("pollMs", String(SSE_POLL_MS));
+    params.set("heartbeatMs", String(SSE_HEARTBEAT_MS));
+    return `/api/timestone_events?${params.toString()}`;
+  }, [activeSession?.start_wall_ms, sessionId]);
 
   const runOcrSearch = useCallback(
     async (nextQuery?: string) => {
@@ -1237,6 +1348,52 @@ export default function MkvTapperPage() {
   }, [fetchEvents, fetchSegments, fetchEventFrameIndex]);
 
   useEffect(() => {
+    setError(null);
+    if (!sessionId) {
+      return;
+    }
+    if (pauseWhenInactive && !pageActive) {
+      setStatus("Paused (inactive)");
+      return;
+    }
+    let cancelled = false;
+    let source: EventSource | null = null;
+    const connect = () => {
+      const url = buildStreamUrl();
+      if (!url || cancelled) {
+        return;
+      }
+      setStatus("Live");
+      source = new EventSource(url);
+      source.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          ingestEvents(Array.isArray(payload.events) ? payload.events : []);
+        } catch {
+          setError("Failed to parse live event stream.");
+        }
+      };
+      source.onerror = () => {
+        source?.close();
+        source = null;
+        if (!cancelled) {
+          setStatus("Reconnecting...");
+          setTimeout(connect, 1500);
+        }
+      };
+    };
+    if (liveEnabled) {
+      connect();
+    } else {
+      setStatus(liveDetected ? "Paused" : "Idle");
+    }
+    return () => {
+      cancelled = true;
+      source?.close();
+    };
+  }, [buildStreamUrl, ingestEvents, liveDetected, liveEnabled, pageActive, pauseWhenInactive, sessionId]);
+
+  useEffect(() => {
     if (!selectedEvent || videoSrc || !segments.length) {
       return;
     }
@@ -1313,7 +1470,17 @@ export default function MkvTapperPage() {
     setOcrSearchError(null);
     setOcrSearchHighlight(null);
     setOcrSearchQuery("");
+    setLiveManualPaused(false);
+    seenIdsRef.current = new Set();
+    lastWallMsRef.current = null;
+    segmentRefreshInFlightRef.current = false;
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!liveDetected && liveManualPaused) {
+      setLiveManualPaused(false);
+    }
+  }, [liveDetected, liveManualPaused]);
 
   // Close settings dropdown when clicking outside
   useEffect(() => {
@@ -1727,6 +1894,22 @@ export default function MkvTapperPage() {
             }}
           >
             Refresh sessions
+          </button>
+          <button
+            type="button"
+            onClick={() => setLiveManualPaused((prev) => !prev)}
+            disabled={!liveDetected}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #1e293b",
+              background: liveEnabled ? "rgba(56, 189, 248, 0.2)" : "#0f172a",
+              color: liveEnabled ? "#e0f2fe" : "#e2e8f0",
+              cursor: liveDetected ? "pointer" : "not-allowed",
+              opacity: liveDetected ? 1 : 0.6,
+            }}
+          >
+            {liveEnabled ? "Stop live" : liveDetected ? "Start live" : "Live idle"}
           </button>
           <button
             type="button"
@@ -2963,6 +3146,20 @@ export default function MkvTapperPage() {
                 >
                   Pinned only
                 </button>
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>
+                    Live polling
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#cbd5f5" }}>
+                    <input
+                      type="checkbox"
+                      checked={pauseWhenInactive}
+                      onChange={(event) => setPauseWhenInactive(event.target.checked)}
+                    />
+                    <span>Pause live polling when tab/window is inactive</span>
+                  </label>
+                </div>
 
                 {pinnedEventsLoading ? (
                   <div style={{ color: "#94a3b8", fontSize: 12 }}>Loading pinned events...</div>
