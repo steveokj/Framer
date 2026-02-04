@@ -432,7 +432,7 @@ export default function MkvTapperPage() {
   const [ocrSaveSuccess, setOcrSaveSuccess] = useState<string | null>(null);
   const [ocrLoadedEventId, setOcrLoadedEventId] = useState<number | null>(null);
   const [ocrBoxScale, setOcrBoxScale] = useState(1);
-  const [showOcrBoxes, setShowOcrBoxes] = useState(true);
+  const [showOcrBoxes, setShowOcrBoxes] = useState(false);
   const [minOcrConf, setMinOcrConf] = useState(50);
   const [settingsMenuPos, setSettingsMenuPos] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -516,7 +516,7 @@ export default function MkvTapperPage() {
     setOcrSaveSuccess(null);
     setOcrLoadedEventId(null);
     setOcrBoxScale(1);
-    setShowOcrBoxes(true);
+    setShowOcrBoxes(false);
     setMinOcrConf(50);
   }, []);
 
@@ -537,7 +537,7 @@ export default function MkvTapperPage() {
       resetOcrState();
       return;
     }
-    setShowOcrBoxes(true);
+    setShowOcrBoxes(false);
   }, [ocrMode, resetOcrState]);
 
   useEffect(() => {
@@ -753,7 +753,6 @@ export default function MkvTapperPage() {
       setOcrSaveSuccess(null);
       setOcrLoading(true);
       setOcrSaving(true);
-      setShowOcrBoxes(true);
       setOcrBoxScale(Number.isFinite(ocrPreset.scale) ? Number(ocrPreset.scale) : 1);
       setOcrError(null);
       setOcrText(null);
@@ -1082,7 +1081,6 @@ export default function MkvTapperPage() {
     setOcrSaveSuccess(null);
     setOcrError(null);
     setOcrLoading(true);
-    setShowOcrBoxes(true);
     setOcrFrameLoading(true);
     setOcrFrameError(null);
     const run = async () => {
@@ -1910,9 +1908,13 @@ export default function MkvTapperPage() {
                           <div style={{ color: "#94a3b8" }}>Loading frame...</div>
                         </div>
                       ) : null}
-                      {showOcrBoxes && ocrBoxes.length && ocrImageSize ? (
+                      {ocrBoxes.length && ocrImageSize ? (
                         <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
                           {ocrBoxes.map((box, idx) => {
+                            const labelText = String(box.text ?? "").trim();
+                            if (!labelText) {
+                              return null;
+                            }
                             const confValue = Number.isFinite(box.conf) ? box.conf : -1;
                             if (confValue >= 0 && confValue < minOcrConf) {
                               return null;
@@ -1925,19 +1927,21 @@ export default function MkvTapperPage() {
                             const labelAbove = top > 3;
                             return (
                               <div key={`${box.text}-${idx}`} style={{ position: "absolute", inset: 0 }}>
-                                <div
-                                  title={`${box.text} (${Math.round(confValue)})`}
-                                  style={{
-                                    position: "absolute",
-                                    left: `${left}%`,
-                                    top: `${top}%`,
-                                    width: `${width}%`,
-                                    height: `${height}%`,
-                                    border: "1px solid rgba(56, 189, 248, 0.8)",
-                                    boxShadow: "0 0 0 1px rgba(14, 116, 144, 0.35) inset",
-                                    background: "rgba(56, 189, 248, 0.08)",
-                                  }}
-                                />
+                                {showOcrBoxes ? (
+                                  <div
+                                    title={`${labelText} (${Math.round(confValue)})`}
+                                    style={{
+                                      position: "absolute",
+                                      left: `${left}%`,
+                                      top: `${top}%`,
+                                      width: `${width}%`,
+                                      height: `${height}%`,
+                                      border: "1px solid rgba(56, 189, 248, 0.8)",
+                                      boxShadow: "0 0 0 1px rgba(14, 116, 144, 0.35) inset",
+                                      background: "rgba(56, 189, 248, 0.08)",
+                                    }}
+                                  />
+                                ) : null}
                                 <div
                                   style={{
                                     position: "absolute",
@@ -1953,7 +1957,7 @@ export default function MkvTapperPage() {
                                     whiteSpace: "nowrap",
                                   }}
                                 >
-                                  {box.text} ({Math.round(confValue)}%)
+                                  {labelText} ({Math.round(confValue)}%)
                                 </div>
                               </div>
                             );
