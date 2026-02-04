@@ -369,7 +369,20 @@ export default function MkvTapperPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [manualOffsetSec, setManualOffsetSec] = useState(0.2);
   const [pinnedSessions, setPinnedSessions] = useState<PinnedSession[]>([]);
-  const [pinnedOnly, setPinnedOnly] = useState(false);
+  const [pinnedOnly, setPinnedOnly] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    try {
+      const saved = localStorage.getItem(PINNED_ONLY_STORAGE_KEY);
+      if (!saved) {
+        return false;
+      }
+      return saved === "1" || saved.toLowerCase() === "true";
+    } catch {
+      return false;
+    }
+  });
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [pinsLoading, setPinsLoading] = useState(false);
   const [pinsError, setPinsError] = useState<string | null>(null);
@@ -397,13 +410,6 @@ export default function MkvTapperPage() {
     const saved = localStorage.getItem(LAST_SESSION_STORAGE_KEY);
     if (saved) {
       setSessionId(saved);
-    }
-  }, []);
-
-  useEffect(() => {
-    const saved = localStorage.getItem(PINNED_ONLY_STORAGE_KEY);
-    if (saved) {
-      setPinnedOnly(saved === "1" || saved.toLowerCase() === "true");
     }
   }, []);
 
