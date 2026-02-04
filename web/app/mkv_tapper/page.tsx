@@ -409,6 +409,7 @@ export default function MkvTapperPage() {
   const [pinnedEventsLoading, setPinnedEventsLoading] = useState(false);
   const [pinnedEventsError, setPinnedEventsError] = useState<string | null>(null);
   const [initialPinnedEventApplied, setInitialPinnedEventApplied] = useState(false);
+  const [pinnedEventsLoaded, setPinnedEventsLoaded] = useState(false);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [pinsLoading, setPinsLoading] = useState(false);
   const [pinsError, setPinsError] = useState<string | null>(null);
@@ -538,6 +539,7 @@ export default function MkvTapperPage() {
 
   useEffect(() => {
     setInitialPinnedEventApplied(false);
+    setPinnedEventsLoaded(false);
   }, [sessionId]);
 
   const filteredEvents = useMemo(() => {
@@ -852,11 +854,13 @@ export default function MkvTapperPage() {
   const fetchPinnedEvents = useCallback(async (sessionIdValue: string) => {
     if (!sessionIdValue) {
       setPinnedEvents([]);
+      setPinnedEventsLoaded(false);
       return;
     }
     setPinnedEvents([]);
     setPinnedEventsLoading(true);
     setPinnedEventsError(null);
+    setPinnedEventsLoaded(false);
     try {
       const res = await fetch("/api/mkv_event_pins", {
         method: "POST",
@@ -875,6 +879,7 @@ export default function MkvTapperPage() {
       setPinnedEventsError(err instanceof Error ? err.message : "Failed to load pinned events");
     } finally {
       setPinnedEventsLoading(false);
+      setPinnedEventsLoaded(true);
     }
   }, []);
 
@@ -1070,7 +1075,10 @@ export default function MkvTapperPage() {
   }, [fetchEvents, fetchSegments, fetchEventFrameIndex]);
 
   useEffect(() => {
-    if (initialPinnedEventApplied || pinnedEventsLoading || !sessionId) {
+    if (initialPinnedEventApplied || !sessionId) {
+      return;
+    }
+    if (!pinnedEventsLoaded || pinnedEventsLoading) {
       return;
     }
     if (selectedEvent) {
@@ -1081,7 +1089,8 @@ export default function MkvTapperPage() {
       setInitialPinnedEventApplied(true);
       return;
     }
-    for (const pin of pinnedEvents) {
+    const ordered = [...pinnedEvents].sort((a, b) => (b.pinned_at || 0) - (a.pinned_at || 0));
+    for (const pin of ordered) {
       const event = eventsById.get(pin.event_id);
       if (event) {
         selectEvent(event);
@@ -1090,7 +1099,16 @@ export default function MkvTapperPage() {
       }
     }
     setInitialPinnedEventApplied(true);
-  }, [eventsById, initialPinnedEventApplied, pinnedEvents, pinnedEventsLoading, selectEvent, selectedEvent, sessionId]);
+  }, [
+    eventsById,
+    initialPinnedEventApplied,
+    pinnedEvents,
+    pinnedEventsLoaded,
+    pinnedEventsLoading,
+    selectEvent,
+    selectedEvent,
+    sessionId,
+  ]);
 
   // Reset video/frames when session changes
   useEffect(() => {
