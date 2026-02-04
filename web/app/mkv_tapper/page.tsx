@@ -43,6 +43,11 @@ type EventFrame = {
   frame_wall_ms: number | null;
 };
 
+type PinnedSession = {
+  session_id: string;
+  pinned_at: number;
+};
+
 type OcrBox = {
   text: string;
   conf: number;
@@ -362,6 +367,13 @@ export default function MkvTapperPage() {
   const [expandAll, setExpandAll] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [manualOffsetSec, setManualOffsetSec] = useState(0.2);
+  const [pinnedSessions, setPinnedSessions] = useState<PinnedSession[]>([]);
+  const [pinnedOnly, setPinnedOnly] = useState(false);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [pinsLoading, setPinsLoading] = useState(false);
+  const [pinsError, setPinsError] = useState<string | null>(null);
+  const [pinsLoaded, setPinsLoaded] = useState(false);
+  const [initialPinApplied, setInitialPinApplied] = useState(false);
   const [ocrMode, setOcrMode] = useState(false);
   const [ocrPresetId, setOcrPresetId] = useState(DEFAULT_OCR_PRESET_ID);
   const [ocrLoading, setOcrLoading] = useState(false);
@@ -378,6 +390,7 @@ export default function MkvTapperPage() {
   const [ocrSaveSuccess, setOcrSaveSuccess] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const settingsRef = useRef<HTMLDivElement | null>(null);
+  const sessionMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem(LAST_SESSION_STORAGE_KEY);
@@ -398,6 +411,9 @@ export default function MkvTapperPage() {
     () => sessions.find((session) => session.session_id === sessionId) || null,
     [sessions, sessionId]
   );
+  const pinnedSessionSet = useMemo(() => {
+    return new Set(pinnedSessions.map((pin) => pin.session_id));
+  }, [pinnedSessions]);
   const ocrPreset = useMemo(
     () => OCR_PRESETS.find((preset) => preset.id === ocrPresetId) || OCR_PRESETS[0],
     [ocrPresetId]
@@ -408,6 +424,20 @@ export default function MkvTapperPage() {
     events.forEach((event) => types.add(event.event_type));
     return Array.from(types).sort();
   }, [events]);
+
+  const missingPinnedSessions = useMemo(() => {
+    if (!pinnedSessions.length) {
+      return [];
+    }
+    return pinnedSessions.filter((pin) => !sessions.some((session) => session.session_id === pin.session_id));
+  }, [pinnedSessions, sessions]);
+
+  const visibleSessions = useMemo(() => {
+    if (!pinnedOnly) {
+      return sessions;
+    }
+    return sessions.filter((session) => pinnedSessionSet.has(session.session_id));
+  }, [pinnedOnly, pinnedSessionSet, sessions]);
 
   const resetOcrState = useCallback(() => {
     setOcrLoading(false);
@@ -727,6 +757,55 @@ export default function MkvTapperPage() {
     }
   }, [ocrContext, ocrPreset]);
 
+  const fetchPinnedSessions = useCallback(async () => {
+    setPinsLoading(true);
+    setPinsError(null);
+    try {
+      const res = await fetch("/api/mkv_pins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "list" }),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to load pins (${res.status})`);
+      }
+      const data = await res.json();
+      const list = Array.isArray(data?.pins) ? data.pins : [];
+      setPinnedSessions(list);
+    } catch (err) {
+      setPinnedSessions([]);
+      setPinsError(err instanceof Error ? err.message : "Failed to load pins");
+    } finally {
+      setPinsLoading(false);
+      setPinsLoaded(true);
+    }
+  }, []);
+
+  const updatePinnedSession = useCallback(async (sessionIdToUpdate: string, shouldPin: boolean) => {
+    if (!sessionIdToUpdate) {
+      return;
+    }
+    setPinsLoading(true);
+    setPinsError(null);
+    try {
+      const res = await fetch("/api/mkv_pins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: sessionIdToUpdate, pinned: shouldPin }),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to update pin (${res.status})`);
+      }
+      await fetchPinnedSessions();
+    } catch (err) {
+      setPinsError(err instanceof Error ? err.message : "Failed to update pin");
+    } finally {
+      setPinsLoading(false);
+    }
+  }, [fetchPinnedSessions]);
+
   const refreshSessions = useCallback(async () => {
     setError(null);
     setStatus("Loading sessions...");
@@ -743,15 +822,13 @@ export default function MkvTapperPage() {
       const data = await res.json();
       const list = Array.isArray(data.sessions) ? data.sessions : [];
       setSessions(list);
-      if (!sessionId && list.length > 0) {
-        setSessionId(list[0].session_id);
-      }
+      await fetchPinnedSessions();
       setStatus("Ready");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load sessions");
       setStatus("Error");
     }
-  }, [sessionId]);
+  }, [fetchPinnedSessions]);
 
   const fetchEvents = useCallback(async () => {
     if (!sessionId) {
@@ -839,6 +916,26 @@ export default function MkvTapperPage() {
   }, [refreshSessions]);
 
   useEffect(() => {
+    if (initialPinApplied || !pinsLoaded || sessions.length === 0) {
+      return;
+    }
+    if (pinnedSessions.length > 0) {
+      const preferred =
+        pinnedSessions.find((pin) => sessions.some((session) => session.session_id === pin.session_id))
+          ?.session_id || pinnedSessions[0]?.session_id;
+      if (preferred) {
+        setSessionId(preferred);
+      }
+      setInitialPinApplied(true);
+      return;
+    }
+    if (!sessionId && sessions.length > 0) {
+      setSessionId(sessions[0].session_id);
+    }
+    setInitialPinApplied(true);
+  }, [initialPinApplied, pinsLoaded, pinnedSessions, sessionId, sessions]);
+
+  useEffect(() => {
     fetchEvents();
     fetchSegments();
     fetchEventFrameIndex();
@@ -866,6 +963,19 @@ export default function MkvTapperPage() {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!sessionMenuOpen) {
+      return;
+    }
+    const handleClickOutside = (e: MouseEvent) => {
+      if (sessionMenuRef.current && !sessionMenuRef.current.contains(e.target as Node)) {
+        setSessionMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [sessionMenuOpen]);
 
   useEffect(() => {
     if (pendingSeekMs == null) {
@@ -1036,27 +1146,185 @@ export default function MkvTapperPage() {
             alignItems: "center",
           }}
         >
-          <label style={{ display: "grid", gap: 6, minWidth: 260 }}>
+          <div ref={sessionMenuRef} style={{ display: "grid", gap: 6, minWidth: 260, position: "relative" }}>
             <span style={{ color: "#cbd5f5" }}>Timestone session</span>
-            <select
-              value={sessionId}
-              onChange={(event) => setSessionId(event.target.value)}
+            <button
+              type="button"
+              onClick={() => setSessionMenuOpen((prev) => !prev)}
               style={{
                 padding: "8px 10px",
                 borderRadius: 8,
                 border: "1px solid #1e293b",
                 background: "#0b1120",
                 color: "#e2e8f0",
+                textAlign: "left",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
               }}
             >
-              <option value="">Select a session...</option>
-              {sessions.map((session) => (
-                <option key={session.session_id} value={session.session_id}>
-                  {formatSessionDate(session.start_wall_iso)} ({session.session_id.slice(0, 8)})
-                </option>
-              ))}
-            </select>
-          </label>
+              <span>
+                {activeSession
+                  ? `${formatSessionDate(activeSession.start_wall_iso)} (${activeSession.session_id.slice(0, 8)})`
+                  : "Select a session..."}
+              </span>
+              <span style={{ color: "#64748b" }}>{sessionMenuOpen ? "^" : "v"}</span>
+            </button>
+            {sessionMenuOpen ? (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  right: 0,
+                  marginTop: 8,
+                  background: "#0b1120",
+                  border: "1px solid #1e293b",
+                  borderRadius: 10,
+                  padding: 10,
+                  zIndex: 20,
+                  boxShadow: "0 18px 40px rgba(15, 23, 42, 0.45)",
+                  display: "grid",
+                  gap: 8,
+                  maxHeight: 320,
+                  overflowY: "auto",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span style={{ color: "#cbd5f5", fontSize: 13 }}>Pinned only</span>
+                  <button
+                    type="button"
+                    onClick={() => setPinnedOnly((prev) => !prev)}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      border: "1px solid #1e293b",
+                      background: pinnedOnly ? "rgba(56, 189, 248, 0.18)" : "#0f172a",
+                      color: pinnedOnly ? "#e0f2fe" : "#94a3b8",
+                      cursor: "pointer",
+                      fontSize: 12,
+                    }}
+                  >
+                    {pinnedOnly ? "On" : "Off"}
+                  </button>
+                </div>
+                {visibleSessions.length ? (
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {visibleSessions.map((session) => {
+                      const isPinned = pinnedSessionSet.has(session.session_id);
+                      return (
+                        <button
+                          key={session.session_id}
+                          type="button"
+                          onClick={() => {
+                            setSessionId(session.session_id);
+                            setSessionMenuOpen(false);
+                            setInitialPinApplied(true);
+                          }}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 10,
+                            padding: "8px 10px",
+                            borderRadius: 8,
+                            border: activeSession?.session_id === session.session_id
+                              ? "1px solid rgba(56, 189, 248, 0.7)"
+                              : "1px solid rgba(30, 41, 59, 0.6)",
+                            background: activeSession?.session_id === session.session_id
+                              ? "rgba(56, 189, 248, 0.12)"
+                              : "rgba(15, 23, 42, 0.7)",
+                            color: "#e2e8f0",
+                            cursor: "pointer",
+                            textAlign: "left",
+                          }}
+                        >
+                          <span style={{ fontSize: 13 }}>
+                            {formatSessionDate(session.start_wall_iso)} ({session.session_id.slice(0, 8)})
+                          </span>
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              updatePinnedSession(session.session_id, !isPinned);
+                            }}
+                            style={{
+                              width: 24,
+                              height: 24,
+                              borderRadius: 6,
+                              border: "1px solid rgba(30, 41, 59, 0.7)",
+                              background: isPinned ? "rgba(251, 191, 36, 0.2)" : "transparent",
+                              color: isPinned ? "#facc15" : "#94a3b8",
+                              display: "grid",
+                              placeItems: "center",
+                              cursor: "pointer",
+                              flexShrink: 0,
+                            }}
+                            title={isPinned ? "Unpin session" : "Pin session"}
+                          >
+                            {isPinned ? (
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                              </svg>
+                            ) : (
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                                <path d="M12 2l2.9 6.6 7.1.6-5.4 4.6 1.7 7-6.3-3.8-6.3 3.8 1.7-7L2 9.2l7.1-.6L12 2z" />
+                              </svg>
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ color: "#64748b", fontSize: 13 }}>
+                    {pinnedOnly ? "No pinned sessions." : "No sessions available."}
+                  </div>
+                )}
+                {missingPinnedSessions.length ? (
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ color: "#64748b", fontSize: 12 }}>Missing pinned sessions</div>
+                    {missingPinnedSessions.map((pin) => (
+                      <div
+                        key={pin.session_id}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 10,
+                          padding: "6px 8px",
+                          borderRadius: 8,
+                          border: "1px dashed rgba(148, 163, 184, 0.4)",
+                          color: "#94a3b8",
+                          fontSize: 12,
+                        }}
+                      >
+                        <span>{pin.session_id.slice(0, 12)} (missing)</span>
+                        <button
+                          type="button"
+                          onClick={() => updatePinnedSession(pin.session_id, false)}
+                          style={{
+                            padding: "2px 8px",
+                            borderRadius: 999,
+                            border: "1px solid rgba(30, 41, 59, 0.7)",
+                            background: "transparent",
+                            color: "#94a3b8",
+                            cursor: "pointer",
+                            fontSize: 11,
+                          }}
+                        >
+                          Unpin
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {pinsLoading ? <div style={{ color: "#64748b", fontSize: 12 }}>Updating pins...</div> : null}
+                {pinsError ? <div style={{ color: "#fca5a5", fontSize: 12 }}>{pinsError}</div> : null}
+              </div>
+            ) : null}
+          </div>
           <button
             type="button"
             onClick={refreshSessions}
