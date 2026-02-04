@@ -408,6 +408,7 @@ export default function MkvTapperPage() {
   });
   const [pinnedEventsLoading, setPinnedEventsLoading] = useState(false);
   const [pinnedEventsError, setPinnedEventsError] = useState<string | null>(null);
+  const [initialPinnedEventApplied, setInitialPinnedEventApplied] = useState(false);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [pinsLoading, setPinsLoading] = useState(false);
   const [pinsError, setPinsError] = useState<string | null>(null);
@@ -468,6 +469,9 @@ export default function MkvTapperPage() {
   const pinnedEventSet = useMemo(() => {
     return new Set(pinnedEvents.map((pin) => pin.event_id));
   }, [pinnedEvents]);
+  const eventsById = useMemo(() => {
+    return new Map(events.map((event) => [event.id, event]));
+  }, [events]);
   const ocrPreset = useMemo(
     () => OCR_PRESETS.find((preset) => preset.id === ocrPresetId) || OCR_PRESETS[0],
     [ocrPresetId]
@@ -531,6 +535,10 @@ export default function MkvTapperPage() {
   useEffect(() => {
     resetOcrState();
   }, [sessionId, resetOcrState]);
+
+  useEffect(() => {
+    setInitialPinnedEventApplied(false);
+  }, [sessionId]);
 
   const filteredEvents = useMemo(() => {
     let list = events;
@@ -1060,6 +1068,29 @@ export default function MkvTapperPage() {
     fetchSegments();
     fetchEventFrameIndex();
   }, [fetchEvents, fetchSegments, fetchEventFrameIndex]);
+
+  useEffect(() => {
+    if (initialPinnedEventApplied || pinnedEventsLoading || !sessionId) {
+      return;
+    }
+    if (selectedEvent) {
+      setInitialPinnedEventApplied(true);
+      return;
+    }
+    if (!pinnedEvents.length) {
+      setInitialPinnedEventApplied(true);
+      return;
+    }
+    for (const pin of pinnedEvents) {
+      const event = eventsById.get(pin.event_id);
+      if (event) {
+        selectEvent(event);
+        setInitialPinnedEventApplied(true);
+        return;
+      }
+    }
+    setInitialPinnedEventApplied(true);
+  }, [eventsById, initialPinnedEventApplied, pinnedEvents, pinnedEventsLoading, selectEvent, selectedEvent, sessionId]);
 
   // Reset video/frames when session changes
   useEffect(() => {
