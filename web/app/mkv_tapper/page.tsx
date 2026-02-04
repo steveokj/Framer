@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 type TimestoneSession = {
   session_id: string;
@@ -428,8 +429,10 @@ export default function MkvTapperPage() {
   const [ocrSaveSuccess, setOcrSaveSuccess] = useState<string | null>(null);
   const [showOcrBoxes, setShowOcrBoxes] = useState(true);
   const [minOcrConf, setMinOcrConf] = useState(50);
+  const [settingsMenuPos, setSettingsMenuPos] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const settingsRef = useRef<HTMLDivElement | null>(null);
+  const settingsPanelRef = useRef<HTMLDivElement | null>(null);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -1073,12 +1076,36 @@ export default function MkvTapperPage() {
       return;
     }
     const handleClickOutside = (e: MouseEvent) => {
-      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (settingsRef.current?.contains(target)) {
+        return;
+      }
+      if (settingsPanelRef.current?.contains(target)) {
+        return;
+      }
+      if (settingsRef.current) {
         setSettingsOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      setSettingsMenuPos(null);
+      return;
+    }
+    if (!settingsRef.current) {
+      return;
+    }
+    const rect = settingsRef.current.getBoundingClientRect();
+    const width = 280;
+    const margin = 8;
+    const left = Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12));
+    const top = rect.bottom + margin;
+    const maxHeight = Math.max(160, Math.min(400, window.innerHeight - top - 12));
+    setSettingsMenuPos({ left, top, maxHeight });
   }, [settingsOpen]);
 
   useEffect(() => {
@@ -1900,157 +1927,7 @@ export default function MkvTapperPage() {
                       />
                     </svg>
                   </button>
-                  {/* Dropdown panel */}
-                  {settingsOpen ? (
-                    <div
-                      style={{
-                        position: "absolute",
-                        top: "100%",
-                        right: 0,
-                        marginTop: 8,
-                        width: 280,
-                        maxHeight: 400,
-                        overflowY: "auto",
-                        background: "#0f172a",
-                        border: "1px solid #1e293b",
-                        borderRadius: 12,
-                        padding: 12,
-                        zIndex: 100,
-                        display: "grid",
-                        gap: 12,
-                        boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
-                      }}
-                    >
-                      {/* Expand all toggle */}
-                      <button
-                        type="button"
-                        onClick={() => setExpandAll((prev) => !prev)}
-                        style={{
-                          padding: "8px 12px",
-                          borderRadius: 8,
-                          border: "1px solid",
-                          borderColor: expandAll ? "#38bdf8" : "#1e293b",
-                          background: expandAll ? "rgba(56, 189, 248, 0.18)" : "transparent",
-                          color: expandAll ? "#e0f2fe" : "#94a3b8",
-                          fontSize: 13,
-                          cursor: "pointer",
-                          textAlign: "left",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                        }}
-                      >
-                        {/* Expand icon */}
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <polyline points="15 3 21 3 21 9" />
-                          <polyline points="9 21 3 21 3 15" />
-                          <line x1="21" y1="3" x2="14" y2="10" />
-                          <line x1="3" y1="21" x2="10" y2="14" />
-                        </svg>
-                        Expand all groups
-                      </button>
-
-                      {/* Frames only toggle */}
-                      <button
-                        type="button"
-                        onClick={() => setFramesOnly((prev) => !prev)}
-                        style={{
-                          padding: "8px 12px",
-                          borderRadius: 8,
-                          border: "1px solid",
-                          borderColor: framesOnly ? "#22c55e" : "#1e293b",
-                          background: framesOnly ? "rgba(34, 197, 94, 0.18)" : "transparent",
-                          color: framesOnly ? "#bbf7d0" : "#94a3b8",
-                          fontSize: 13,
-                          cursor: "pointer",
-                          textAlign: "left",
-                        }}
-                      >
-                        Frames only
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setPinnedEventsOnly((prev) => !prev)}
-                        style={{
-                          padding: "8px 12px",
-                          borderRadius: 8,
-                          border: "1px solid",
-                          borderColor: pinnedEventsOnly ? "#f59e0b" : "#1e293b",
-                          background: pinnedEventsOnly ? "rgba(251, 191, 36, 0.18)" : "transparent",
-                          color: pinnedEventsOnly ? "#fde68a" : "#94a3b8",
-                          fontSize: 13,
-                          cursor: "pointer",
-                          textAlign: "left",
-                        }}
-                      >
-                        Pinned only
-                      </button>
-
-                      {pinnedEventsLoading ? (
-                        <div style={{ color: "#94a3b8", fontSize: 12 }}>Loading pinned events...</div>
-                      ) : null}
-                      {pinnedEventsError ? <div style={{ color: "#fca5a5", fontSize: 12 }}>{pinnedEventsError}</div> : null}
-
-                      <label style={{ display: "grid", gap: 6, fontSize: 12, color: "#cbd5f5" }}>
-                        <span>Manual offset (sec)</span>
-                        <input
-                          type="number"
-                          step="0.5"
-                          value={manualOffsetSec}
-                          onChange={(event) => {
-                            const next = Number(event.target.value);
-                            if (Number.isNaN(next)) {
-                              return;
-                            }
-                            setManualOffsetSec(next);
-                          }}
-                          style={{
-                            padding: "6px 8px",
-                            borderRadius: 8,
-                            border: "1px solid #1e293b",
-                            background: "#0b1120",
-                            color: "#e2e8f0",
-                          }}
-                        />
-                        <span style={{ color: "#64748b" }}>Applies to video seek only.</span>
-                      </label>
-
-                      {/* Divider */}
-                      <div style={{ height: 1, background: "#1e293b" }} />
-
-                      {/* Event type filters */}
-                      <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>
-                        Event Types
-                      </div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        {eventTypes.map((type) => {
-                          const active = eventVisibility[type] !== false;
-                          return (
-                            <button
-                              key={type}
-                              type="button"
-                              onClick={() =>
-                                setEventVisibility((prev) => ({ ...prev, [type]: !(prev[type] !== false) }))
-                              }
-                              style={{
-                                padding: "5px 10px",
-                                borderRadius: 999,
-                                border: "1px solid",
-                                borderColor: active ? "#38bdf8" : "#1e293b",
-                                background: active ? "rgba(56, 189, 248, 0.18)" : "transparent",
-                                color: active ? "#e0f2fe" : "#94a3b8",
-                                fontSize: 11,
-                                cursor: "pointer",
-                              }}
-                            >
-                              {type.replace(/_/g, " ")}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ) : null}
+                  {/* Dropdown panel rendered via portal */}
                 </div>
               </div>
 
@@ -2619,6 +2496,159 @@ export default function MkvTapperPage() {
             </div>
           </aside>
         </section>
+        {settingsOpen && settingsMenuPos
+          ? createPortal(
+              <div
+                ref={settingsPanelRef}
+                style={{
+                  position: "fixed",
+                  left: settingsMenuPos.left,
+                  top: settingsMenuPos.top,
+                  width: 280,
+                  maxHeight: settingsMenuPos.maxHeight,
+                  overflowY: "auto",
+                  background: "#0f172a",
+                  border: "1px solid #1e293b",
+                  borderRadius: 12,
+                  padding: 12,
+                  zIndex: 2000,
+                  display: "grid",
+                  gap: 12,
+                  boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
+                }}
+              >
+                {/* Expand all toggle */}
+                <button
+                  type="button"
+                  onClick={() => setExpandAll((prev) => !prev)}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    border: "1px solid",
+                    borderColor: expandAll ? "#38bdf8" : "#1e293b",
+                    background: expandAll ? "rgba(56, 189, 248, 0.18)" : "transparent",
+                    color: expandAll ? "#e0f2fe" : "#94a3b8",
+                    fontSize: 13,
+                    cursor: "pointer",
+                    textAlign: "left",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  {/* Expand icon */}
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="15 3 21 3 21 9" />
+                    <polyline points="9 21 3 21 3 15" />
+                    <line x1="21" y1="3" x2="14" y2="10" />
+                    <line x1="3" y1="21" x2="10" y2="14" />
+                  </svg>
+                  Expand all groups
+                </button>
+
+                {/* Frames only toggle */}
+                <button
+                  type="button"
+                  onClick={() => setFramesOnly((prev) => !prev)}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    border: "1px solid",
+                    borderColor: framesOnly ? "#22c55e" : "#1e293b",
+                    background: framesOnly ? "rgba(34, 197, 94, 0.18)" : "transparent",
+                    color: framesOnly ? "#bbf7d0" : "#94a3b8",
+                    fontSize: 13,
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  Frames only
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setPinnedEventsOnly((prev) => !prev)}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    border: "1px solid",
+                    borderColor: pinnedEventsOnly ? "#f59e0b" : "#1e293b",
+                    background: pinnedEventsOnly ? "rgba(251, 191, 36, 0.18)" : "transparent",
+                    color: pinnedEventsOnly ? "#fde68a" : "#94a3b8",
+                    fontSize: 13,
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  Pinned only
+                </button>
+
+                {pinnedEventsLoading ? (
+                  <div style={{ color: "#94a3b8", fontSize: 12 }}>Loading pinned events...</div>
+                ) : null}
+                {pinnedEventsError ? <div style={{ color: "#fca5a5", fontSize: 12 }}>{pinnedEventsError}</div> : null}
+
+                <label style={{ display: "grid", gap: 6, fontSize: 12, color: "#cbd5f5" }}>
+                  <span>Manual offset (sec)</span>
+                  <input
+                    type="number"
+                    step="0.5"
+                    value={manualOffsetSec}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      if (Number.isNaN(next)) {
+                        return;
+                      }
+                      setManualOffsetSec(next);
+                    }}
+                    style={{
+                      padding: "6px 8px",
+                      borderRadius: 8,
+                      border: "1px solid #1e293b",
+                      background: "#0b1120",
+                      color: "#e2e8f0",
+                    }}
+                  />
+                  <span style={{ color: "#64748b" }}>Applies to video seek only.</span>
+                </label>
+
+                {/* Divider */}
+                <div style={{ height: 1, background: "#1e293b" }} />
+
+                {/* Event type filters */}
+                <div style={{ fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>
+                  Event Types
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {eventTypes.map((type) => {
+                    const active = eventVisibility[type] !== false;
+                    return (
+                      <button
+                        key={type}
+                        type="button"
+                        onClick={() =>
+                          setEventVisibility((prev) => ({ ...prev, [type]: !(prev[type] !== false) }))
+                        }
+                        style={{
+                          padding: "5px 10px",
+                          borderRadius: 999,
+                          border: "1px solid",
+                          borderColor: active ? "#38bdf8" : "#1e293b",
+                          background: active ? "rgba(56, 189, 248, 0.18)" : "transparent",
+                          color: active ? "#e0f2fe" : "#94a3b8",
+                          fontSize: 11,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {type.replace(/_/g, " ")}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>,
+              document.body,
+            )
+          : null}
       </div>
     </div>
   );
