@@ -74,6 +74,17 @@ type OcrPreset = {
   oem?: number;
 };
 
+type OcrSearchResult = {
+  event_id: number;
+  frame_path: string | null;
+  created_ms: number | null;
+  snippet: string | null;
+  ts_wall_ms: number | null;
+  event_type: string | null;
+  window_title: string | null;
+  process_name: string | null;
+};
+
 type VideoInfo = {
   path: string;
   offsetMs: number;
@@ -434,6 +445,11 @@ export default function MkvTapperPage() {
   const [ocrBoxScale, setOcrBoxScale] = useState(1);
   const [showOcrBoxes, setShowOcrBoxes] = useState(false);
   const [minOcrConf, setMinOcrConf] = useState(50);
+  const [ocrSearchQuery, setOcrSearchQuery] = useState("");
+  const [ocrSearchResults, setOcrSearchResults] = useState<OcrSearchResult[]>([]);
+  const [ocrSearchLoading, setOcrSearchLoading] = useState(false);
+  const [ocrSearchError, setOcrSearchError] = useState<string | null>(null);
+  const [ocrSearchHighlight, setOcrSearchHighlight] = useState<string | null>(null);
   const [settingsMenuPos, setSettingsMenuPos] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const settingsRef = useRef<HTMLDivElement | null>(null);
@@ -480,6 +496,16 @@ export default function MkvTapperPage() {
     () => OCR_PRESETS.find((preset) => preset.id === ocrPresetId) || OCR_PRESETS[0],
     [ocrPresetId]
   );
+  const ocrSearchTokens = useMemo(() => {
+    if (!ocrSearchHighlight) {
+      return [];
+    }
+    return ocrSearchHighlight
+      .toLowerCase()
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter(Boolean);
+  }, [ocrSearchHighlight]);
 
   const eventTypes = useMemo(() => {
     const types = new Set<string>();
@@ -1057,6 +1083,48 @@ export default function MkvTapperPage() {
     }
   }, [sessionId]);
 
+  const runOcrSearch = useCallback(
+    async (nextQuery?: string) => {
+      const query = (nextQuery ?? ocrSearchQuery).trim();
+      if (!query || !sessionId) {
+        setOcrSearchResults([]);
+        setOcrSearchError(null);
+        setOcrSearchHighlight(null);
+        return;
+      }
+      setOcrSearchLoading(true);
+      setOcrSearchError(null);
+      try {
+        const params = new URLSearchParams();
+        params.set("query", query);
+        params.set("session_id", sessionId);
+        params.set("limit", "30");
+        const res = await fetch(`/api/mkv_ocr_search?${params.toString()}`);
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || `OCR search failed (${res.status})`);
+        }
+        const data = await res.json();
+        const results = Array.isArray(data?.results) ? (data.results as OcrSearchResult[]) : [];
+        setOcrSearchResults(results);
+        setOcrSearchHighlight(query);
+      } catch (err) {
+        setOcrSearchResults([]);
+        setOcrSearchError(err instanceof Error ? err.message : "OCR search failed");
+      } finally {
+        setOcrSearchLoading(false);
+      }
+    },
+    [ocrSearchQuery, sessionId],
+  );
+
+  const clearOcrSearch = useCallback(() => {
+    setOcrSearchQuery("");
+    setOcrSearchResults([]);
+    setOcrSearchError(null);
+    setOcrSearchHighlight(null);
+  }, []);
+
   useEffect(() => {
     refreshSessions();
   }, [refreshSessions]);
@@ -1193,6 +1261,9 @@ export default function MkvTapperPage() {
     if (initialPinnedEventApplied || !sessionId) {
       return;
     }
+    if (!pinnedEventsOnly) {
+      return;
+    }
     if (!pinnedEventsLoaded || pinnedEventsLoading || !eventsLoaded) {
       return;
     }
@@ -1225,6 +1296,7 @@ export default function MkvTapperPage() {
     pinnedEvents,
     pinnedEventsLoaded,
     pinnedEventsLoading,
+    pinnedEventsOnly,
     selectEvent,
     selectedEvent,
     sessionId,
@@ -1237,6 +1309,10 @@ export default function MkvTapperPage() {
     setEventFrames([]);
     setFrameIndex(0);
     setExpandedGroups(new Set());
+    setOcrSearchResults([]);
+    setOcrSearchError(null);
+    setOcrSearchHighlight(null);
+    setOcrSearchQuery("");
   }, [sessionId]);
 
   // Close settings dropdown when clicking outside
@@ -1915,6 +1991,12 @@ export default function MkvTapperPage() {
                             if (!labelText) {
                               return null;
                             }
+                            if (
+                              ocrSearchTokens.length > 0 &&
+                              !ocrSearchTokens.some((token) => labelText.toLowerCase().includes(token))
+                            ) {
+                              return null;
+                            }
                             const confValue = Number.isFinite(box.conf) ? box.conf : -1;
                             if (confValue >= 0 && confValue < minOcrConf) {
                               return null;
@@ -2118,7 +2200,134 @@ export default function MkvTapperPage() {
                   boxSizing: "border-box",
                 }}
               />
+
+              <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span style={{ color: "#94a3b8", fontSize: 12 }}>OCR search</span>
+                  {ocrSearchLoading ? <span style={{ color: "#94a3b8", fontSize: 12 }}>Searching...</span> : null}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    value={ocrSearchQuery}
+                    onChange={(event) => setOcrSearchQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        runOcrSearch();
+                      }
+                    }}
+                    placeholder="Search OCR text"
+                    style={{
+                      padding: "8px 10px",
+                      borderRadius: 10,
+                      border: "1px solid #1e293b",
+                      background: "#0f172a",
+                      color: "#e2e8f0",
+                      flex: 1,
+                      minWidth: 0,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => runOcrSearch()}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 10,
+                      border: "1px solid #1e293b",
+                      background: "#0f172a",
+                      color: "#e2e8f0",
+                      cursor: "pointer",
+                      fontSize: 12,
+                    }}
+                  >
+                    Go
+                  </button>
+                  {ocrSearchQuery ? (
+                    <button
+                      type="button"
+                      onClick={clearOcrSearch}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 10,
+                        border: "1px solid #1e293b",
+                        background: "transparent",
+                        color: "#94a3b8",
+                        cursor: "pointer",
+                        fontSize: 12,
+                      }}
+                    >
+                      Clear
+                    </button>
+                  ) : null}
+                </div>
+                {ocrSearchError ? <div style={{ color: "#fca5a5", fontSize: 12 }}>{ocrSearchError}</div> : null}
+              </div>
             </div>
+
+            {(ocrSearchQuery.trim() || ocrSearchResults.length > 0 || ocrSearchLoading) ? (
+              <div style={{ marginBottom: 16, display: "grid", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <strong style={{ fontSize: 12 }}>OCR results</strong>
+                    <span style={{ color: "#94a3b8", fontSize: 12 }}>{ocrSearchResults.length} hits</span>
+                  </div>
+                  {ocrSearchHighlight ? (
+                    <span style={{ color: "#64748b", fontSize: 11 }}>Highlight: {ocrSearchHighlight}</span>
+                  ) : null}
+                </div>
+                {!ocrSearchLoading && ocrSearchResults.length === 0 ? (
+                  <div style={{ color: "#64748b", fontSize: 12 }}>No OCR matches.</div>
+                ) : null}
+                {ocrSearchResults.map((result, idx) => {
+                  const event = eventsById.get(result.event_id);
+                  const displayTime = event
+                    ? activeSession
+                      ? formatDurationMs(event.ts_wall_ms - activeSession.start_wall_ms)
+                      : formatDurationMs(event.ts_mono_ms)
+                    : "--:--";
+                  const snippet = (result.snippet || "").trim();
+                  return (
+                    <button
+                      key={`${result.event_id}-${idx}`}
+                      type="button"
+                      onClick={() => {
+                        if (event) {
+                          setOcrMode(true);
+                          setOcrSearchHighlight((ocrSearchQuery || "").trim() || null);
+                          selectEvent(event);
+                        }
+                      }}
+                      style={{
+                        borderRadius: 10,
+                        border: "1px solid rgba(30, 41, 59, 0.6)",
+                        background: event && selectedEvent?.id === event.id ? "rgba(30, 64, 175, 0.25)" : "#0f172a",
+                        color: "#e2e8f0",
+                        padding: "10px 12px",
+                        display: "grid",
+                        gap: 6,
+                        cursor: event ? "pointer" : "not-allowed",
+                        textAlign: "left",
+                      }}
+                      disabled={!event}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                        <span style={{ color: "#94a3b8" }}>{displayTime}</span>
+                        {result.event_type ? (
+                          <span style={{ color: "#cbd5f5" }}>{result.event_type}</span>
+                        ) : null}
+                      </div>
+                      {snippet ? (
+                        <div style={{ color: "#e2e8f0", fontSize: 12, lineHeight: 1.4 }}>{snippet}</div>
+                      ) : (
+                        <div style={{ color: "#64748b", fontSize: 12 }}>No snippet available.</div>
+                      )}
+                      {result.window_title ? (
+                        <div style={{ color: "#64748b", fontSize: 11 }}>{result.window_title}</div>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
 
             {/* Event list segmented by active window */}
             <div style={{ display: "grid", gap: 16, minWidth: 0 }}>

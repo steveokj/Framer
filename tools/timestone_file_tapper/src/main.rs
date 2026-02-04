@@ -11,14 +11,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const APP_DIR: &str = "data\\timestone";
 const DB_NAME: &str = "timestone_events.sqlite3";
-const DEFAULT_SCALE_WIDTH: u32 = 1280;
-const DEFAULT_JPEG_QUALITY: u8 = 4;
+const DEFAULT_SCALE_WIDTH: u32 = 0;
+const DEFAULT_JPEG_QUALITY: u8 = 2;
 const DEFAULT_POLL_MS: u64 = 1500;
 const DEFAULT_GRACE_MS: i64 = 2000;
 const DEFAULT_FRAME_OFFSET_MS: i64 = 200;
 const DEFAULT_FFMPEG_TIMEOUT_SEC: u64 = 10;
 const DEFAULT_TRANSCRIBE_MODEL: &str = "medium";
 const DEFAULT_OCR_LANG: &str = "eng";
+const DEFAULT_OCR_PSM: i32 = 11;
+const DEFAULT_OCR_SCALE: f32 = 2.0;
+const DEFAULT_OCR_PREPROCESS: &str = "gray_autocontrast";
 const FILE_TAPPER_LOG_FILE: &str = "file_tapper.log";
 const AUDIO_RETRY_COUNT: usize = 3;
 const AUDIO_RETRY_DELAY_MS: u64 = 800;
@@ -39,6 +42,10 @@ struct Args {
     delete_frames_after_ocr: bool,
     transcribe_model: String,
     ocr_lang: String,
+    ocr_psm: Option<i32>,
+    ocr_oem: Option<i32>,
+    ocr_scale: f32,
+    ocr_preprocess: String,
     event_types: Option<HashSet<String>>,
     ocr_keydown_mode: OcrKeydownMode,
     quiet_ffmpeg: bool,
@@ -194,7 +201,7 @@ fn main() -> Result<()> {
                     event.id, event.ts_wall_ms
                 ));
                 if frame_path.exists() {
-                    if !event_frames_exist(&conn, event.id)? {
+                    if !args.delete_frames_after_ocr && !event_frames_exist(&conn, event.id)? {
                         insert_event_frame(&conn, event.id, &frame_path, event.ts_wall_ms)?;
                     }
                     counts.frames_done += 1;
@@ -214,7 +221,9 @@ fn main() -> Result<()> {
                     args.verbose,
                     args.quiet_ffmpeg,
                 )? {
-                    insert_event_frame(&conn, event.id, &frame_path, event.ts_wall_ms)?;
+                    if !args.delete_frames_after_ocr {
+                        insert_event_frame(&conn, event.id, &frame_path, event.ts_wall_ms)?;
+                    }
                     counts.frames_done += 1;
                 }
                 }
@@ -226,6 +235,10 @@ fn main() -> Result<()> {
                     &scripts_dir,
                     &frame_path,
                     &args.ocr_lang,
+                    args.ocr_psm,
+                    args.ocr_oem,
+                    args.ocr_scale,
+                    &args.ocr_preprocess,
                     args.verbose,
                 )? {
                     insert_event_ocr(
@@ -370,9 +383,13 @@ fn parse_args() -> Result<Args> {
         frame_offset_ms: DEFAULT_FRAME_OFFSET_MS,
         ffmpeg_timeout_sec: DEFAULT_FFMPEG_TIMEOUT_SEC,
         fast_seek: true,
-        delete_frames_after_ocr: false,
+        delete_frames_after_ocr: true,
         transcribe_model: DEFAULT_TRANSCRIBE_MODEL.to_string(),
         ocr_lang: DEFAULT_OCR_LANG.to_string(),
+        ocr_psm: Some(DEFAULT_OCR_PSM),
+        ocr_oem: None,
+        ocr_scale: DEFAULT_OCR_SCALE,
+        ocr_preprocess: DEFAULT_OCR_PREPROCESS.to_string(),
         event_types: None,
         ocr_keydown_mode: OcrKeydownMode::GroupHead,
         quiet_ffmpeg: false,
@@ -435,6 +452,9 @@ fn parse_args() -> Result<Args> {
             "--delete-frames-after-ocr" => {
                 args.delete_frames_after_ocr = true;
             }
+            "--keep-frames" => {
+                args.delete_frames_after_ocr = false;
+            }
             "--transcribe-model" => {
                 if let Some(value) = iter.next() {
                     if !value.trim().is_empty() {
@@ -446,6 +466,36 @@ fn parse_args() -> Result<Args> {
                 if let Some(value) = iter.next() {
                     if !value.trim().is_empty() {
                         args.ocr_lang = value;
+                    }
+                }
+            }
+            "--ocr-psm" => {
+                if let Some(value) = iter.next() {
+                    if let Ok(parsed) = value.parse::<i32>() {
+                        args.ocr_psm = Some(parsed);
+                    }
+                }
+            }
+            "--ocr-oem" => {
+                if let Some(value) = iter.next() {
+                    if let Ok(parsed) = value.parse::<i32>() {
+                        args.ocr_oem = Some(parsed);
+                    }
+                }
+            }
+            "--ocr-scale" => {
+                if let Some(value) = iter.next() {
+                    if let Ok(parsed) = value.parse::<f32>() {
+                        if parsed > 0.0 {
+                            args.ocr_scale = parsed;
+                        }
+                    }
+                }
+            }
+            "--ocr-preprocess" => {
+                if let Some(value) = iter.next() {
+                    if !value.trim().is_empty() {
+                        args.ocr_preprocess = value;
                     }
                 }
             }
@@ -542,6 +592,12 @@ fn init_db(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_event_ocr_event ON event_ocr(event_id);
         CREATE INDEX IF NOT EXISTS idx_event_ocr_frame ON event_ocr(frame_path);
+        CREATE VIRTUAL TABLE IF NOT EXISTS event_ocr_fts USING fts5(
+            ocr_text,
+            event_id UNINDEXED,
+            frame_path UNINDEXED,
+            created_ms UNINDEXED
+        );
         CREATE TABLE IF NOT EXISTS processing_status (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT,
@@ -783,7 +839,11 @@ fn extract_frame(
 ) -> Result<bool> {
     let offset_sec = (offset_ms.max(0) as f64) / 1000.0;
     let offset_arg = format!("{offset_sec:.3}");
-    let vf = format!("scale={}: -1", scale_width).replace(": ", ":");
+    let vf = if scale_width > 0 {
+        format!("scale={}: -1,format=yuvj420p", scale_width).replace(": ", ":")
+    } else {
+        "format=yuvj420p".to_string()
+    };
     let mut cmd = Command::new("ffmpeg");
     let log_level = if quiet_ffmpeg {
         "error"
@@ -855,6 +915,17 @@ fn insert_event_ocr(
             ocr_text,
             engine,
             boxes_json.unwrap_or(""),
+            created_ms
+        ],
+    )?;
+    let row_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO event_ocr_fts (rowid, ocr_text, event_id, frame_path, created_ms) VALUES (?, ?, ?, ?, ?)",
+        params![
+            row_id,
+            ocr_text,
+            event_id,
+            frame_path.to_string_lossy(),
             created_ms
         ],
     )?;
@@ -1027,6 +1098,10 @@ fn run_ocr_script(
     scripts_dir: &Path,
     frame_path: &Path,
     lang: &str,
+    psm: Option<i32>,
+    oem: Option<i32>,
+    scale: f32,
+    preprocess: &str,
     verbose: bool,
 ) -> Result<Option<OcrResult>> {
     let script_path = scripts_dir.join("timestone_ocr_frame.py");
@@ -1040,8 +1115,19 @@ fn run_ocr_script(
         .arg(frame_path)
         .arg("--lang")
         .arg(lang)
+        .arg("--preprocess")
+        .arg(preprocess)
         .stdout(Stdio::piped())
         .stderr(if verbose { Stdio::inherit() } else { Stdio::piped() });
+    if let Some(value) = psm {
+        cmd.arg("--psm").arg(value.to_string());
+    }
+    if let Some(value) = oem {
+        cmd.arg("--oem").arg(value.to_string());
+    }
+    if scale > 0.0 && (scale - 1.0).abs() > f32::EPSILON {
+        cmd.arg("--scale").arg(scale.to_string());
+    }
     if let Ok(tess) = env::var("TESSERACT_CMD") {
         cmd.arg("--tesseract").arg(tess);
     } else if let Ok(tess) = env::var("TESSERACT_PATH") {
@@ -1062,7 +1148,15 @@ fn run_ocr_script(
     if text.is_empty() {
         return Ok(None);
     }
-    let boxes_json = payload.get("boxes").map(|v| v.to_string());
+    let boxes_json = if let Some(boxes) = payload.get("boxes") {
+        if let Some(meta) = payload.get("meta") {
+            Some(serde_json::json!({ "boxes": boxes, "meta": meta }).to_string())
+        } else {
+            Some(boxes.to_string())
+        }
+    } else {
+        None
+    };
     Ok(Some(OcrResult { text, boxes_json }))
 }
 

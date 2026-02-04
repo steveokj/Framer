@@ -138,12 +138,22 @@ def main() -> int:
                 );
                 """
             )
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS event_ocr_fts USING fts5(
+                    ocr_text,
+                    event_id UNINDEXED,
+                    frame_path UNINDEXED,
+                    created_ms UNINDEXED
+                );
+                """
+            )
             columns = [row[1].lower() for row in conn.execute("PRAGMA table_info(event_ocr)")]
             if "ocr_boxes_json" not in columns:
                 conn.execute("ALTER TABLE event_ocr ADD COLUMN ocr_boxes_json TEXT")
             created_ms = int(time.time() * 1000)
             boxes_payload = {"boxes": boxes, "meta": meta}
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO event_ocr (event_id, frame_path, ocr_text, ocr_engine, ocr_boxes_json, created_ms) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     int(args.event_id),
@@ -154,6 +164,12 @@ def main() -> int:
                     created_ms,
                 ),
             )
+            row_id = cur.lastrowid
+            if row_id is not None:
+                conn.execute(
+                    "INSERT INTO event_ocr_fts (rowid, ocr_text, event_id, frame_path, created_ms) VALUES (?, ?, ?, ?, ?)",
+                    (row_id, payload["text"], int(args.event_id), image_path, created_ms),
+                )
             conn.commit()
             conn.close()
         except Exception:
