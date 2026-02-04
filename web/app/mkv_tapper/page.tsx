@@ -89,6 +89,7 @@ const API_BASE = (
 
 const ABSOLUTE_PATH_REGEX = /^[a-zA-Z]:[\\/]|^\//;
 const LAST_SESSION_STORAGE_KEY = "timestone:lastSessionId:mkv_tapper";
+const PINNED_ONLY_STORAGE_KEY = "timestone:pinnedOnly:mkv_tapper";
 const DEFAULT_OCR_PRESET_ID = "clean-ui";
 
 const OCR_PRESETS: OcrPreset[] = [
@@ -400,12 +401,23 @@ export default function MkvTapperPage() {
   }, []);
 
   useEffect(() => {
+    const saved = localStorage.getItem(PINNED_ONLY_STORAGE_KEY);
+    if (saved) {
+      setPinnedOnly(saved === "1" || saved.toLowerCase() === "true");
+    }
+  }, []);
+
+  useEffect(() => {
     if (!sessionId.trim()) {
       localStorage.removeItem(LAST_SESSION_STORAGE_KEY);
       return;
     }
     localStorage.setItem(LAST_SESSION_STORAGE_KEY, sessionId);
   }, [sessionId]);
+
+  useEffect(() => {
+    localStorage.setItem(PINNED_ONLY_STORAGE_KEY, pinnedOnly ? "1" : "0");
+  }, [pinnedOnly]);
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.session_id === sessionId) || null,
