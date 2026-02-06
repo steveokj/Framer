@@ -11,11 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, STILL_ACTIVE, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, OpenProcess, CREATE_NO_WINDOW, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, CREATE_NO_WINDOW,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -64,6 +65,26 @@ const HOTKEY_ALT_F14: i32 = 6;
 
 const VK_F13: u32 = 0x7C;
 const VK_F14: u32 = 0x7D;
+
+fn find_repo_root_from_exe() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    let mut dir = exe.parent()?.to_path_buf();
+    for _ in 0..12 {
+        // Repo root is expected to contain `tools/` and `web/`.
+        if dir.join("tools").is_dir() && dir.join("web").is_dir() {
+            return Some(dir);
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+    None
+}
+
+fn repo_root() -> Result<PathBuf> {
+    if let Some(root) = find_repo_root_from_exe() {
+        return Ok(root);
+    }
+    env::current_dir().context("Failed to read current dir")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,12 +148,14 @@ enum TrayAction {
 struct RecorderCommand {
     exe: String,
     args_prefix: Vec<String>,
+    cwd: PathBuf,
 }
 
 struct AppState {
     hwnd: HWND,
     tooltip: String,
     command: RecorderCommand,
+    repo_root: PathBuf,
     data_dir: PathBuf,
     icon_stopped: HICON,
     icon_running_full: HICON,
@@ -187,18 +210,19 @@ fn log_line(data_dir: &Path, message: &str) {
 }
 
 fn main() -> Result<()> {
-    let base_dir = ensure_app_dir()?;
+    let root = repo_root()?;
+    let base_dir = ensure_app_dir(&root)?;
     let config = load_or_create_config(&base_dir)?;
-    let command = build_command(&config);
+    let command = build_command(&config, &root);
     let obs_ws_exe = config
         .obs_ws_exe
         .clone()
-        .or_else(find_default_obs_ws_exe)
+        .or_else(|| find_default_obs_ws_exe(&root))
         .unwrap_or_else(|| "timestone_obs_ws.exe".to_string());
     let file_tapper_exe = config
         .file_tapper_exe
         .clone()
-        .or_else(find_default_file_tapper_exe)
+        .or_else(|| find_default_file_tapper_exe(&root))
         .unwrap_or_else(|| "timestone_file_tapper.exe".to_string());
     let obs_host = config
         .obs_host
@@ -275,11 +299,13 @@ fn main() -> Result<()> {
             hinstance,
             None,
         );
-        let status = get_status(&command).unwrap_or(RecorderStatus::Stopped);
+        let status = get_status_from_files(&data_dir, &root);
+        let should_autostart = status == RecorderStatus::Stopped && !data_dir.join("recorder.lock").exists();
         let state = AppState {
             hwnd,
             tooltip,
             command,
+            repo_root: root.clone(),
             data_dir,
             icon_stopped,
             icon_running_full,
@@ -310,10 +336,8 @@ fn main() -> Result<()> {
         register_hotkeys(hwnd);
         update_tray_icon()?;
         let _ = SetTimer(hwnd, TIMER_ID, TIMER_MS, None);
-        if status == RecorderStatus::Stopped {
+        if should_autostart {
             dispatch_action(TrayAction::Start, false, false);
-        } else {
-            dispatch_action(TrayAction::Stop, false, false);
         }
 
         let mut msg = std::mem::zeroed();
@@ -329,9 +353,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn ensure_app_dir() -> Result<PathBuf> {
-    let cwd = env::current_dir().context("Failed to read current dir")?;
-    let base_dir = cwd.join(APP_DIR);
+fn ensure_app_dir(repo_root: &Path) -> Result<PathBuf> {
+    let base_dir = repo_root.join(APP_DIR);
     if !base_dir.exists() {
         fs::create_dir_all(&base_dir).context("Failed to create timestone data dir")?;
     }
@@ -351,15 +374,20 @@ fn load_or_create_config(base_dir: &Path) -> Result<TrayConfig> {
     Ok(config)
 }
 
-fn build_command(config: &TrayConfig) -> RecorderCommand {
+fn build_command(config: &TrayConfig, repo_root: &Path) -> RecorderCommand {
     if let Some(exe) = config.recorder_exe.clone() {
         let args_prefix = config.recorder_args.clone().unwrap_or_default();
-        return RecorderCommand { exe, args_prefix };
+        return RecorderCommand {
+            exe,
+            args_prefix,
+            cwd: repo_root.to_path_buf(),
+        };
     }
-    if let Some(exe) = find_default_recorder_exe() {
+    if let Some(exe) = find_default_recorder_exe(repo_root) {
         return RecorderCommand {
             exe,
             args_prefix: Vec::new(),
+            cwd: repo_root.to_path_buf(),
         };
     }
     RecorderCommand {
@@ -370,18 +398,18 @@ fn build_command(config: &TrayConfig) -> RecorderCommand {
             "tools\\timestone_recorder\\Cargo.toml".to_string(),
             "--".to_string(),
         ],
+        cwd: repo_root.to_path_buf(),
     }
 }
 
 
-fn find_default_recorder_exe() -> Option<String> {
-    let cwd = env::current_dir().ok()?;
+fn find_default_recorder_exe(repo_root: &Path) -> Option<String> {
     let candidates = [
         "tools\\timestone_recorder\\target\\debug\\timestone_recorder.exe",
         "tools\\timestone_recorder\\target\\release\\timestone_recorder.exe",
     ];
     for candidate in candidates {
-        let path = cwd.join(candidate);
+        let path = repo_root.join(candidate);
         if path.exists() {
             return Some(path.to_string_lossy().to_string());
         }
@@ -389,14 +417,13 @@ fn find_default_recorder_exe() -> Option<String> {
     None
 }
 
-fn find_default_obs_ws_exe() -> Option<String> {
-    let cwd = env::current_dir().ok()?;
+fn find_default_obs_ws_exe(repo_root: &Path) -> Option<String> {
     let candidates = [
         "tools\\timestone_obs_ws\\target\\debug\\timestone_obs_ws.exe",
         "tools\\timestone_obs_ws\\target\\release\\timestone_obs_ws.exe",
     ];
     for candidate in candidates {
-        let path = cwd.join(candidate);
+        let path = repo_root.join(candidate);
         if path.exists() {
             return Some(path.to_string_lossy().to_string());
         }
@@ -404,14 +431,13 @@ fn find_default_obs_ws_exe() -> Option<String> {
     None
 }
 
-fn find_default_file_tapper_exe() -> Option<String> {
-    let cwd = env::current_dir().ok()?;
+fn find_default_file_tapper_exe(repo_root: &Path) -> Option<String> {
     let candidates = [
         "tools\\timestone_file_tapper\\target\\debug\\timestone_file_tapper.exe",
         "tools\\timestone_file_tapper\\target\\release\\timestone_file_tapper.exe",
     ];
     for candidate in candidates {
-        let path = cwd.join(candidate);
+        let path = repo_root.join(candidate);
         if path.exists() {
             return Some(path.to_string_lossy().to_string());
         }
@@ -674,6 +700,7 @@ fn to_wide(value: &str) -> Vec<u16> {
 
 fn run_command(command: &RecorderCommand, action: &str) -> Result<String> {
     let mut cmd = Command::new(&command.exe);
+    cmd.current_dir(&command.cwd);
     cmd.args(&command.args_prefix);
     cmd.arg(action);
     cmd.creation_flags(CREATE_NO_WINDOW.0);
@@ -689,6 +716,7 @@ fn run_command(command: &RecorderCommand, action: &str) -> Result<String> {
 
 fn run_command_async(command: &RecorderCommand, action: &str) -> Result<()> {
     let mut cmd = Command::new(&command.exe);
+    cmd.current_dir(&command.cwd);
     cmd.args(&command.args_prefix);
     cmd.arg(action);
     cmd.creation_flags(CREATE_NO_WINDOW.0);
@@ -699,6 +727,7 @@ fn run_command_async(command: &RecorderCommand, action: &str) -> Result<()> {
 
 fn send_obs_command(state: &AppState, action: &str) -> Result<bool> {
     let mut cmd = Command::new(&state.obs_ws_exe);
+    cmd.current_dir(&state.repo_root);
     cmd.arg("--host")
         .arg(&state.obs_host)
         .arg("--port")
@@ -735,6 +764,7 @@ fn start_obs_listener(state: &mut AppState) -> Result<()> {
         }
     }
     let mut cmd = Command::new(&state.obs_ws_exe);
+    cmd.current_dir(&state.repo_root);
     cmd.arg("--host")
         .arg(&state.obs_host)
         .arg("--port")
@@ -770,6 +800,7 @@ fn start_file_tapper(state: &mut AppState) -> Result<()> {
         anyhow::bail!("No session id available for file tapper");
     }
     let mut cmd = Command::new(&state.file_tapper_exe);
+    cmd.current_dir(&state.repo_root);
     cmd.arg("--db")
         .arg(&state.db_path)
         .arg("--session-id")
@@ -839,22 +870,29 @@ fn get_status(command: &RecorderCommand) -> Result<RecorderStatus> {
     }
 }
 
-fn get_status_from_files(data_dir: &Path) -> RecorderStatus {
+fn get_status_from_files(data_dir: &Path, repo_root: &Path) -> RecorderStatus {
     let lock_path = data_dir.join("recorder.lock");
     if !lock_path.exists() {
         let pause_path = data_dir.join("pause.signal");
         let _ = fs::remove_file(pause_path);
         return RecorderStatus::Stopped;
     }
-    if let Some(pid) = read_lock_pid(&lock_path) {
-        if !is_pid_running(pid) {
-            let _ = fs::remove_file(&lock_path);
-            let pause_path = data_dir.join("pause.signal");
-            let _ = fs::remove_file(pause_path);
-            return RecorderStatus::Stopped;
-        }
-    }
     let pause_path = data_dir.join("pause.signal");
+    let Some(pid) = read_lock_pid(&lock_path) else {
+        let _ = fs::remove_file(&lock_path);
+        let _ = fs::remove_file(pause_path);
+        return RecorderStatus::Stopped;
+    };
+    if !is_pid_running(pid) {
+        let _ = fs::remove_file(&lock_path);
+        let _ = fs::remove_file(pause_path);
+        return RecorderStatus::Stopped;
+    }
+    if !is_pid_under_repo_root(pid, repo_root) {
+        // Another repo's recorder (or a copied lock file). Don't auto-delete; just treat as stopped.
+        let _ = fs::remove_file(pause_path);
+        return RecorderStatus::Stopped;
+    }
     if pause_path.exists() {
         RecorderStatus::Paused
     } else {
@@ -862,11 +900,11 @@ fn get_status_from_files(data_dir: &Path) -> RecorderStatus {
     }
 }
 
-fn wait_for_lock(data_dir: &Path, timeout_ms: u64) -> bool {
+fn wait_for_lock(data_dir: &Path, repo_root: &Path, timeout_ms: u64) -> bool {
     let lock_path = data_dir.join("recorder.lock");
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     while std::time::Instant::now() < deadline {
-        if lock_path.exists() {
+        if lock_path.exists() && lock_is_valid(&lock_path, repo_root) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -931,6 +969,51 @@ fn is_pid_running(pid: u32) -> bool {
     exit_code == STILL_ACTIVE.0 as u32
 }
 
+fn get_process_exe_path(pid: u32) -> Option<PathBuf> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    if handle.is_invalid() {
+        return None;
+    }
+    let mut buf: Vec<u16> = vec![0; 4096];
+    let mut size: u32 = buf.len() as u32;
+    let ok = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+        .is_ok()
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    if !ok || size == 0 {
+        return None;
+    }
+    buf.truncate(size as usize);
+    Some(PathBuf::from(String::from_utf16_lossy(&buf)))
+}
+
+fn is_pid_under_repo_root(pid: u32, repo_root: &Path) -> bool {
+    let exe = match get_process_exe_path(pid) {
+        Some(exe) => exe,
+        None => return false,
+    };
+    let mut root = repo_root.to_string_lossy().to_lowercase();
+    if !root.ends_with('\\') {
+        root.push('\\');
+    }
+    let exe_str = exe.to_string_lossy().to_lowercase();
+    exe_str.starts_with(&root)
+}
+
+fn lock_is_valid(lock_path: &Path, repo_root: &Path) -> bool {
+    let pid = match read_lock_pid(lock_path) {
+        Some(pid) => pid,
+        None => return false,
+    };
+    is_pid_running(pid) && is_pid_under_repo_root(pid, repo_root)
+}
+
 fn save_last_mode(data_dir: &Path, mode: Mode) {
     let path = data_dir.join(TRAY_CONFIG_FILE);
     let contents = match fs::read_to_string(&path) {
@@ -946,8 +1029,11 @@ fn save_last_mode(data_dir: &Path, mode: Mode) {
 
 fn start_session(state: &mut AppState) -> Result<()> {
     log_line(&state.data_dir, "starting session");
+    // Clear any stale signals so a prior stop/pause doesn't poison a new start.
+    let _ = fs::remove_file(state.data_dir.join("stop.signal"));
+    let _ = fs::remove_file(state.data_dir.join("pause.signal"));
     run_command_async(&state.command, "start")?;
-    let ok = wait_for_lock(&state.data_dir, 15000);
+    let ok = wait_for_lock(&state.data_dir, &state.repo_root, 15000);
     if !ok {
         anyhow::bail!("Recorder did not start in time");
     }
@@ -1038,7 +1124,7 @@ fn set_mode(state: &mut AppState, mode: Mode) -> Result<()> {
 fn update_status() {
     if let Some(state) = STATE.get() {
         let mut state = state.lock().unwrap();
-        let status = get_status_from_files(&state.data_dir);
+        let status = get_status_from_files(&state.data_dir, &state.repo_root);
         let changed = status != state.status;
         if changed {
             state.status = status;
@@ -1255,7 +1341,7 @@ fn handle_menu_command(cmd: u16) {
         CMD_STATUS => {
             let (status, hwnd) = if let Some(state) = STATE.get() {
                 let mut state = state.lock().unwrap();
-                let status = get_status_from_files(&state.data_dir);
+                let status = get_status_from_files(&state.data_dir, &state.repo_root);
                 state.status = status;
                 (status, state.hwnd)
             } else {
